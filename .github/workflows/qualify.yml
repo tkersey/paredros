@@ -118,7 +118,7 @@ jobs:
         run: |
           test "$ACQUISITION_KEY" = "$INPUT_KEY"
           printf '%s  %s\n' "$ACQUISITION_SHA256" "$RUNNER_TEMP/acquisition/acquisition.tar.zst" | sha256sum --check --strict
-          zstd -dc "$RUNNER_TEMP/acquisition/acquisition.tar.zst" | tar -xf -
+          zstd -dc "$RUNNER_TEMP/acquisition/acquisition.tar.zst" | tar -xpf -
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache
@@ -187,7 +187,7 @@ jobs:
         run: |
           test "$PREPARATION_KEY" = "$INPUT_KEY"
           printf '%s  %s\n' "$PREPARATION_SHA256" "$RUNNER_TEMP/preparation/preparation.tar.zst" | sha256sum --check --strict
-          zstd -dc "$RUNNER_TEMP/preparation/preparation.tar.zst" | tar -xf -
+          zstd -dc "$RUNNER_TEMP/preparation/preparation.tar.zst" | tar -xpf -
           cmp "$RUNNER_TEMP/native-inputs.key" prepared/inputs.key
           (cd prepared && sha256sum --check --strict SHA256SUMS)
           cmp app/types.zig prepared/types.zig
