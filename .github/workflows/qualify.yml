@@ -163,7 +163,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [authority, providers, transitions, rendering, methods, continuity, product, crash]
+        part: [authority, providers, transitions-first, transitions-second, rendering, methods, continuity-first, continuity-second, product, crash]
     env:
       PART: ${{ matrix.part }}
     steps:
@@ -193,10 +193,6 @@ jobs:
           cmp "$RUNNER_TEMP/native-inputs.key" prepared/inputs.key
           (cd prepared && sha256sum --check --strict SHA256SUMS)
           cmp app/types.zig prepared/types.zig
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
-        with:
-          path: .zig-cache
-          key: ${{ steps.inputs.outputs.key }}-${{ matrix.part }}
       - name: Compile selected artifact
         run: |
           nproc
@@ -213,8 +209,12 @@ jobs:
           case "$PART" in
             product) zig build -Dnative=true -Dtarget=x86_64-linux-musl -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
             crash) zig build build-crash-tests -Dcrash-tests=true -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
-            providers|transitions|rendering|methods)
+            providers|rendering|methods)
               zig build build-native-tests -Dnative-tests=true -Dnative-group="$PART" -Dtest-product-assets=false -Doptimize=safe -j2 --verbose --summary all ;;
+            continuity-*)
+              zig build build-native-tests -Dnative-tests=true -Dnative-group=continuity -Dnative-partition="${PART##*-}" -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
+            transitions-*)
+              zig build build-native-tests -Dnative-tests=true -Dnative-group=transitions -Dnative-partition="${PART##*-}" -Dtest-product-assets=false -Doptimize=safe -j2 --verbose --summary all ;;
             *) zig build build-native-tests -Dnative-tests=true -Dnative-group="$PART" -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
           esac
           tar -C zig-out -czf "$RUNNER_TEMP/$PART.tar.gz" .
@@ -236,10 +236,12 @@ jobs:
         include:
           - {part: authority, count: 85}
           - {part: providers, count: 39}
-          - {part: transitions, count: 48}
+          - {part: transitions-first, count: 25}
+          - {part: transitions-second, count: 24}
           - {part: rendering, count: 59}
           - {part: methods, count: 20}
-          - {part: continuity, count: 37}
+          - {part: continuity-first, count: 17}
+          - {part: continuity-second, count: 21}
           - {part: product, count: 5}
           - {part: crash, count: 12}
     env:

@@ -7,7 +7,11 @@ const control = @import("../native/control.zig");
 const config = @import("../native/configuration.zig");
 const app = @import("../native/application.zig");
 const Driver = @import("../native/driver.zig").Driver(t);
-const Fixture = @import("product_fixture.zig").Fixture;
+const Application = struct {
+    pub const use_product_assets = true;
+    pub const declarations = app.Application.declarations;
+};
+const Fixture = @import("native_fixture.zig").Fixture(t, Application);
 const a = std.testing.allocator;
 
 fn configuration() config.Config {

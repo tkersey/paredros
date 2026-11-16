@@ -1,11 +1,15 @@
 const std = @import("std");
 const protean_build = @import("protean");
 const NativeGroup = enum { authority, providers, transitions, rendering, methods, continuity };
+const NativePartition = enum { first, second };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const native_tests = b.option(bool, "native-tests", "Run native owner tests") orelse false;
+    const partition = b.option(NativePartition, "native-partition", "Select a continuity or transitions partition");
+    if (partition != null and !native_tests)
+        std.debug.panic("native-partition requires native-tests", .{});
     const crash_tests = b.option(bool, "crash-tests", "Build process-death witnesses") orelse false;
     const scale_tests = b.option(bool, "scale-tests", "Build native storage measurements") orelse false;
     const native_product = b.option(
@@ -44,7 +48,7 @@ pub fn build(b: *std.Build) void {
         null;
     if (native_tests) {
         const test_assets = if (test_product_assets) assets else null;
-        nativeTests(b, dependency, optimize, test_assets, filter);
+        nativeTests(b, dependency, optimize, test_assets, filter, partition);
     }
     if (crash_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig");
@@ -74,8 +78,15 @@ fn nativeTests(
     optimize: std.lang.Optimize,
     assets: ?ProductAssets,
     filter: ?[]const u8,
+    partition: ?NativePartition,
 ) void {
     const selected = b.option(NativeGroup, "native-group", "Select a native diagnostic group");
+    if (partition != null) {
+        if (filter != null)
+            std.debug.panic("native-partition cannot be combined with test-filter", .{});
+        if (selected == null or (selected.? != .continuity and selected.? != .transitions))
+            std.debug.panic("native-partition requires continuity or transitions native-group", .{});
+    }
     const execute = b.step("test-native", "Run every selected native owner group");
     const compile = b.step("build-native-tests", "Build every selected native owner group");
     for (std.enums.values(NativeGroup)) |group| {
@@ -84,19 +95,68 @@ fn nativeTests(
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
         const checks = b.addTest(.{
-            .filters = if (filter) |value| &.{value} else &.{},
+            .filters = if (partition) |part|
+                nativePartitionFilters(group, part)
+            else if (filter) |value| &.{value} else &.{},
             .root_module = root,
             .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const run = b.addRunArtifact(checks);
         run.has_side_effects = true;
         execute.dependOn(&run.step);
+        const artifact = if (partition) |part|
+            b.fmt("{s}-{s}", .{ name, @tagName(part) })
+        else
+            name;
         const install = b.addInstallFile(
             checks.getEmittedBin(),
-            b.fmt("test-tools/native/{s}", .{name}),
+            b.fmt("test-tools/native/{s}", .{artifact}),
         );
         compile.dependOn(&install.step);
     }
+}
+
+fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []const []const u8 {
+    return switch (group) {
+        .continuity => switch (partition) {
+            .first => &.{
+                "tests.transfer.test.",
+                "tests.native_restore.test.",
+                "tests.native_recovery_control.test.",
+                "tests.compatibility.test.",
+                "tests.contracts.test.",
+                "tests.directive_policy.test.",
+                "tests.native_genesis.test.",
+            },
+            .second => &.{
+                "tests.native_slack_owner.test.",
+                "tests.native_audit_control.test.",
+                "tests.control.test.",
+                "tests.slack_owner.test.",
+                "tests.configuration.test.",
+            },
+        },
+        .transitions => switch (partition) {
+            .first => &.{
+                "tests.native_directive_chain.test.",
+                "tests.directive_chain.test.",
+                "tests.native_directive_policy.test.",
+                "tests.directive_policy.test.",
+                "tests.native_phase_recovery.test.",
+                "tests.phase_recovery.test.",
+                "tests.step.test.",
+            },
+            .second => &.{
+                "tests.native_settlement.test.",
+                "tests.settlement.test.",
+                "tests.native_revision.test.",
+                "tests.revision.test.",
+                "tests.native_genesis.test.",
+                "tests.contracts.test.",
+            },
+        },
+        else => unreachable,
+    };
 }
 
 fn dependencyGraph(

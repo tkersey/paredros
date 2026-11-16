@@ -48,17 +48,22 @@ The process-death controller uses local provider fixtures, kills the process at
 named admission, dispatch, or capture boundaries, and checks retained state and
 acquisition counts in a fresh process. It does not contact live providers.
 
-The Linux workflow compiles each native group, the product, and the crash fixture
-separately, then executes every artifact in a fresh job. Each job has a ten-minute
-limit. Compiler cache reuse never skips execution. The six groups contain 288
-tests; source checks, five product smoke assertions, and twelve process-death
-cases are additional. GitHub Actions qualification remains pending for this draft.
+The Linux workflow splits continuity and transitions with
+`-Dnative-partition=first|second`; each named test runs in exactly one partition.
+The unchanged import-only root runs in both partitions, giving 290 checks in CI
+and 288 in the six unfiltered local groups. The product and crash fixture compile
+separately, and every artifact executes in a fresh job. Each job retains its
+ten-minute limit. Prepared compiler work is reused through the authenticated
+current-run archive; build jobs do not save a redundant cache after uploading
+their completed artifact. Source checks, five product smoke assertions, and twelve
+process-death cases are additional. GitHub Actions qualification remains pending
+for this draft.
 
 This draft pins the Protean candidate `df3f8c9` used by the offline consumer
 checks. The release dependency still awaits corrections, required serial reviews,
 and landing of [Protean PR #74](https://github.com/tkersey/protean/pull/74).
-Current upstream findings concern recovery dispatch-gate metadata and task/attempt
-pagination costs. Final dependency selection, packaged-pin qualification, Linux CI,
+Upstream corrections cover recovery dispatch metadata, task/attempt pagination,
+and placement dispatch/recovery gating. Final dependency selection, packaged-pin qualification, Linux CI,
 and application review remain pending. This draft is not a qualified release.
 
 [Offline measurements](docs/measurements.md) document task storage, startup,

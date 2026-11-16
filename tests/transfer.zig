@@ -7,7 +7,11 @@ const continuity = @import("../native/continuity.zig");
 const configuration = @import("../native/configuration.zig");
 const app = @import("../native/application.zig");
 const Driver = @import("../native/driver.zig").Driver(app.Types);
-const Fixture = @import("product_fixture.zig").Fixture;
+const Application = struct {
+    pub const use_product_assets = true;
+    pub const declarations = app.Application.declarations;
+};
+const Fixture = @import("native_fixture.zig").Fixture(app.Types, Application);
 const origin: t.Origin = .{ .local = .{ .uid = 501 } };
 
 const Clock = struct {
