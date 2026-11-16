@@ -6,4 +6,5 @@ test {
     _ = @import("tests/native_audit_control.zig");
     _ = @import("tests/compatibility.zig");
     _ = @import("tests/configuration.zig");
+    _ = @import("tests/native_genesis.zig");
 }
