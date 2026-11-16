@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
         const checks = b.addTest(.{
             .filters = &.{"process crash owner fixture"},
             .root_module = root,
+            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-crash-tests");
         b.step("build-crash-tests", "Build process-death witnesses").dependOn(&install.step);
@@ -60,6 +61,7 @@ pub fn build(b: *std.Build) void {
         const checks = b.addTest(.{
             .filters = &.{"native scale measurement"},
             .root_module = root,
+            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-scale");
         b.step("build-scale-tests", "Build native storage measurements").dependOn(&install.step);
@@ -84,6 +86,7 @@ fn nativeTests(
         const checks = b.addTest(.{
             .filters = if (filter) |value| &.{value} else &.{},
             .root_module = root,
+            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const run = b.addRunArtifact(checks);
         run.has_side_effects = true;
@@ -121,6 +124,10 @@ fn dependencyGraph(
             "Admitted SQLite source",
         ) orelse b.path(".protean-native/inputs/sqlite"),
     });
+}
+
+fn linuxX86(target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
 }
 
 fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
@@ -242,6 +249,8 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
             .types = b.path("app/types.zig"),
         } },
     });
+    if (linuxX86(result.executable.root_module.resolved_target.?))
+        result.executable.use_llvm = false;
     const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     if (symbols) {
         result.executable.root_module.strip = false;
