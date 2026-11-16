@@ -8,11 +8,7 @@ const PolicyFixture = @import("native_fixture.zig").Fixture(policy.Types, policy
 const restore = @import("../native/restore.zig");
 const app = @import("../native/application.zig");
 pub const Driver = @import("../native/driver.zig").Driver(app.Types);
-const Application = struct {
-    pub const use_product_assets = true;
-    pub const declarations = app.Application.declarations;
-};
-pub const Fixture = @import("native_fixture.zig").Fixture(app.Types, Application);
+pub const Fixture = @import("product_fixture.zig").Fixture;
 
 const origin: t.Origin = .{ .local = .{ .uid = 501 } };
 const boundary: t.InputReference = .{ .task = @splat(7), .digest = @splat(8) };
