@@ -56,15 +56,16 @@ separately, and every artifact executes in a fresh job. Each job retains its
 ten-minute limit. Prepared compiler work is reused through the authenticated
 current-run archive; build jobs do not save a redundant cache after uploading
 their completed artifact. Source checks, five product smoke assertions, and twelve
-process-death cases are additional. GitHub Actions qualification remains pending
-for this draft.
+process-death cases are additional. GitHub Actions executes these checks on
+native Linux x86-64.
 
-This draft pins the Protean candidate `df3f8c9` used by the offline consumer
-checks. The release dependency still awaits corrections, required serial reviews,
-and landing of [Protean PR #74](https://github.com/tkersey/protean/pull/74).
-Upstream corrections cover recovery dispatch metadata, task/attempt pagination,
-and placement dispatch/recovery gating. Final dependency selection, packaged-pin qualification, Linux CI,
-and application review remain pending. This draft is not a qualified release.
+PAREDROS pins landed Protean `787e3ae6e6a6f59bb1b51830ba40b5f89f4119bc`,
+including [the native embedding and recovery changes](https://github.com/tkersey/protean/pull/74)
+and [the authenticated Kosmos borrowing update](https://github.com/tkersey/protean/pull/75).
+Both upstream changes completed their required qualification, serial reviews,
+and landing. Application qualification and reviews must cover this selected pin;
+upstream verification alone does not qualify PAREDROS. Live-provider qualification
+remains deferred.
 
 [Offline measurements](docs/measurements.md) document task storage, startup,
 empty-check costs, reproduction commands, and the current performance limits.

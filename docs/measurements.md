@@ -110,11 +110,13 @@ executables. The baseline took 69.15 seconds. A candidate that retains the
 active evaluator for at most eight physical pump calls took 11.07 and 11.10
 seconds in two unprofiled runs. This is a small-sample observation, not a tail
 latency estimate. Protean candidate `df3f8c9ab496cb395b03730edc17fc39b9629b19`
-passed its complete local qualification and native Linux CI. Its required serial
-reviews and landing remain outstanding. PAREDROS's 284 native checks and 12
-process-death cases passed against that candidate in a separate consumer build.
-The draft dependency now selects that candidate; the final qualified release pin
-remains pending upstream corrections, review, and landing.
+passed its complete local qualification and native Linux CI. PAREDROS's 284 native
+checks and 12 process-death cases passed against that candidate in a separate
+consumer build. Those measurements retain that historical dependency identity.
+The upstream corrections have since landed through Protean PRs #74 and #75 after
+qualification and serial reviews. PAREDROS now selects landed Protean `787e3ae`.
+The historical measurements below retain their recorded build identities and
+do not certify the new dependency.
 
 The baseline profile attributed most sampled owner work to retiring and restoring
 the active evaluator between task turns. The candidate profile shifts most of
