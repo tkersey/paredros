@@ -265,7 +265,14 @@ test "configuration unsafe credential permissions fail before transport setup" {
 }
 
 test "configuration offline profile permits authenticated local owner reads" {
-    const Fixture = @import("product_fixture.zig").Fixture;
+    const Application = struct {
+        pub const use_product_assets = true;
+        pub const declarations = application.Application.declarations;
+    };
+    const Fixture = @import("native_fixture.zig").Fixture(
+        @import("application_types"),
+        Application,
+    );
     var owner: Fixture = .{};
     defer owner.deinit();
     try owner.init();
