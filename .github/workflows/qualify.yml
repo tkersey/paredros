@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
 env:
+  ZIG_DEBUG_CMD: '1'
   ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
   ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 defaults:
@@ -62,7 +63,7 @@ jobs:
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
           const files = execFileSync('git', ['ls-files', '-z'], {encoding: 'utf8'}).split('\0').filter(Boolean).sort();
           const inputs = {compiler: process.env.COMPILER_SHA256, host: process.platform + '-' + process.arch,
-            target: 'x86_64-linux-musl', optimize: 'safe', jobs: 2,
+            target: 'x86_64-linux-musl', optimize: 'safe', jitHelpers: process.env.ZIG_DEBUG_CMD, jobs: 2,
             files: files.map(file => [file, fs.statSync(file).mode & 0o777, hash(fs.readFileSync(file))])};
           const key = 'paredros-native-v2-' + hash(JSON.stringify(inputs));
           fs.writeFileSync(process.env.RUNNER_TEMP + '/native-inputs.key', key + '\n');
