@@ -16,6 +16,7 @@ const Expected = struct {
 const expected = [_]Expected{
     .{ .identity = github.identity, .role = .read, .resource = "read", .capture = true },
     .{ .identity = history.identity, .role = .read, .resource = "read", .capture = true },
+    .{ .identity = @import("../app/lineage_audit_contract.zig").identity, .role = .read, .resource = "read", .capture = true },
     .{ .identity = model.P.identity, .role = .model, .resource = "inference", .capture = true },
     .{ .identity = application.notification_identity, .role = .write, .resource = "write", .capture = true },
     .{ .identity = @import("../app/method_contract.zig").workspace_identity, .role = .read, .resource = "workspace" },

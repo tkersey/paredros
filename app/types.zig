@@ -461,6 +461,17 @@ pub const AuditResult = union(enum) {
     not_observed: struct { oldest: Timestamp, latest: Timestamp, canary: Receipt },
     inconclusive: Name,
 };
+pub const LineageAudit = struct {
+    envelope: Envelope,
+    obligation: Id,
+    predecessor: Reference,
+    lineage: Digest,
+    destination: Destination,
+    oldest: Timestamp,
+    latest: ?Timestamp,
+    page_limit: u32,
+};
+pub const LineageAuditResult = union(enum) { complete: void, inconclusive: Name };
 pub const Proposal = struct {
     identity: struct { operation: OperationId, ordinal: u32, attempt: u32 = 0 },
     target: ?Id,
@@ -528,6 +539,7 @@ pub const Input = union(enum) {
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     restore: Restore,
+    lineage_audit: LineageAudit,
 };
 pub const Output = union(enum) {
     genesis: Head,
@@ -540,6 +552,7 @@ pub const Output = union(enum) {
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     restore: Restore,
+    lineage_audit: LineageAuditResult,
 };
 pub const Failure = struct { code: Name };
 pub const Message = union(enum) { pause: struct { directive: InputReference } };

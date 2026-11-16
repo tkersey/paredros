@@ -34,6 +34,7 @@ fn recordLineage(index: *const idx.Index, record: idx.Record) !t.Digest {
         .turn => |value| value.target,
         .delivery => |value| return deliveryLineage(index, value.key.lineage),
         .audit => |value| return deliveryLineage(index, value.delivery.key.lineage),
+        .lineage_audit => |value| return deliveryLineage(index, value.lineage),
         else => null,
     };
     const source = if (target) |value| index.record(value) else null;
@@ -201,7 +202,7 @@ const Builder = struct {
             .continuity_member => |input| {
                 _ = try self.addData(try rowReference(value, value.result != null), input.data);
             },
-            .genesis, .continuity_cut, .restore => {},
+            .genesis, .continuity_cut, .restore, .lineage_audit => {},
         }
     }
 };

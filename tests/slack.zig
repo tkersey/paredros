@@ -397,3 +397,101 @@ fn allocationWitness(allocator: std.mem.Allocator) !void {
 test "Slack owned protocol results clean up every allocation failure" {
     try std.testing.checkAllAllocationFailures(a, allocationWitness, .{});
 }
+
+test "Slack history retains same lineage observations before exact delivery filtering" {
+    var prepared = try slack.prepare(a, binding, "known", &.{}, marker);
+    defer prepared.deinit();
+    var later_marker = marker;
+    later_marker.key = @splat(9);
+    later_marker.generation = 7;
+    var later = try slack.prepare(a, binding, "later", &.{}, later_marker);
+    defer later.deinit();
+    later_marker.lineage = "foreign";
+    var foreign = try slack.prepare(a, binding, "foreign", &.{}, later_marker);
+    defer foreign.deinit();
+    const unseen = try historyMessage(a, later, "1730000000.000003", "A1");
+    defer a.free(unseen);
+    const other = try historyMessage(a, foreign, "1730000000.000004", "A1");
+    defer a.free(other);
+    const page = try historyPage(a, &.{ unseen, other }, "", false);
+    defer a.free(page);
+    var audit = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
+    defer audit.deinit();
+    try audit.ingest(audit.request(), .{ .status = 200, .body = page });
+    try std.testing.expectEqual(.no_canary, audit.finding().inconclusive);
+    try std.testing.expectEqual(@as(usize, 1), audit.observations.items.len);
+    const observed = audit.observations.items[0];
+    try std.testing.expectEqualStrings("1730000000.000003", observed.timestamp);
+    const payload = observed.metadata.object.get("event_payload").?;
+    try std.testing.expectEqualStrings("7", payload.object.get("generation").?.string);
+    try std.testing.expect(audit.match == null);
+}
+
+test "Slack lineage history retains authenticated candidates on inconclusive pages" {
+    const lineage = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    var later_marker = marker;
+    later_marker.lineage = lineage;
+    var prepared = try slack.prepare(a, binding, "later", &.{}, later_marker);
+    defer prepared.deinit();
+    const message = try historyMessage(a, prepared, "1730000000.000003", "A1");
+    defer a.free(message);
+    const foreign = try historyMessage(a, prepared, "1730000000.000004", "A2");
+    defer a.free(foreign);
+    const tampered = try modified(
+        a,
+        message,
+        &.{ "metadata", "event_payload", "generation" },
+        .{ .string = "01" },
+    );
+    defer a.free(tampered);
+    const page = try historyPage(a, &.{ tampered, foreign, message }, "", false);
+    defer a.free(page);
+    var audit = try slack.HistoryAudit.initLineage(
+        a,
+        binding,
+        lineage,
+        "1730000000.000001",
+        "1730000000.000009",
+        history_limits,
+    );
+    defer audit.deinit();
+    try audit.ingest(audit.request(), .{ .status = 200, .body = page });
+    try std.testing.expectEqual(.metadata, audit.reason.?);
+    try std.testing.expectEqual(@as(usize, 1), audit.observations.items.len);
+    try std.testing.expectEqualStrings("1730000000.000003", audit.observations.items[0].timestamp);
+    try std.testing.expect(audit.complete);
+}
+
+test "Slack lineage history validates lowercase lineage and bounded cursor traversal" {
+    const lineage = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    try std.testing.expectError(error.InvalidLineage, slack.HistoryAudit.initLineage(
+        a,
+        binding,
+        "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        "1.0",
+        "2.0",
+        history_limits,
+    ));
+    var audit = try slack.HistoryAudit.initLineage(a, binding, lineage, "1.0", "2.0", .{
+        .pages = 1,
+        .messages = 100,
+        .page_bytes = 65536,
+    });
+    defer audit.deinit();
+    const page = try historyPage(a, &.{}, "next", true);
+    defer a.free(page);
+    try audit.ingest(audit.request(), .{ .status = 200, .body = page });
+    try std.testing.expectEqual(@as(usize, 0), audit.pages_left);
+    try std.testing.expect(!audit.complete);
+    try audit.ingest(audit.request(), .{ .status = 200, .body = page });
+    try std.testing.expectEqual(.budget, audit.reason.?);
+    try std.testing.expectEqual(@as(usize, 1), audit.pages.items.len);
+}

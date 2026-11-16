@@ -401,6 +401,13 @@ pub fn schedule(
         if (record.result == null or record.result.? != .step) continue;
         const producer = index.reference(position);
         for (record.result.?.step.audit_requests.items, 0..) |wanted, ordinal| {
+            if (wanted == .frontier) try tasks.append(a, try @import("lineage_audit.zig").admit(
+                service,
+                scratch,
+                index,
+                target,
+                producer,
+            ));
             var matched = false;
             for (deliveries) |delivery| {
                 if (!std.meta.eql(delivery.target, @as(?t.Id, target))) continue;
@@ -434,6 +441,13 @@ pub fn schedule(
         }
     }
     if (try recoverySource(index, obligation)) |producer| {
+        try tasks.append(a, try @import("lineage_audit.zig").admit(
+            service,
+            scratch,
+            index,
+            target,
+            producer,
+        ));
         for (deliveries) |delivery| {
             if (!std.meta.eql(delivery.target, @as(?t.Id, target)) or
                 !recoveryDelivery(index, producer, delivery)) continue;
@@ -501,7 +515,7 @@ fn automatic(
     return clock_ms >= due;
 }
 
-fn recoverySource(index: *const idx.Index, obligation: *const idx.Obligation) !?t.Reference {
+pub fn recoverySource(index: *const idx.Index, obligation: *const idx.Obligation) !?t.Reference {
     if (index.recovery) |reference| {
         const marker = index.record(reference.task) orelse return error.MissingRestoreBoundary;
         if (marker.result_digest) |digest| return .{ .task = marker.task, .digest = digest };

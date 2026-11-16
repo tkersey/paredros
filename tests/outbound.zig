@@ -10,8 +10,10 @@ const a = std.testing.allocator;
 const audit_control = @import("../native/audit_control.zig");
 
 const Store = struct {
+    owner_epoch: t.Digest = @splat(1),
     entries: std.ArrayList(Entry) = .empty,
     submits: u32 = 0,
+    cancellations: std.ArrayList(t.Id) = .empty,
     const Entry = struct { operation: []u8, bytes: []u8, task: t.Id };
     const Receipt = struct {
         value: struct { task: t.Id },
@@ -27,12 +29,59 @@ const Store = struct {
         }
     };
 
+    const Task = struct {
+        value: State = .{},
+        const State = struct {
+            schedule: enum { queued, parked } = .queued,
+            revision: u64 = 1,
+            pub fn terminal(_: State) bool {
+                return false;
+            }
+        };
+        pub fn deinit(_: *Task) void {}
+    };
+
+    pub fn task(_: *Store, _: std.mem.Allocator, _: t.Id) !Task {
+        return .{};
+    }
+    pub fn status(_: *Store, _: std.mem.Allocator, _: Task.State) !enum { ready, unknown } {
+        return .ready;
+    }
+    pub fn resumeTask(
+        _: *Store,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: t.Id,
+        _: u64,
+    ) anyerror!void {}
+
+    pub fn notificationHistory(
+        _: *Store,
+        _: std.mem.Allocator,
+        _: t.Id,
+        _: []const u8,
+    ) !@import("protean_native").tasks.NotificationHistory {
+        return .{ .complete = true };
+    }
+    pub fn requestCancel(
+        self: *Store,
+        _: std.mem.Allocator,
+        _: []const u8,
+        id: t.Id,
+        _: []const u8,
+    ) !void {
+        for (self.cancellations.items) |existing|
+            if (std.meta.eql(existing, id)) return;
+        try self.cancellations.append(a, id);
+    }
+
     fn deinit(self: *Store) void {
         for (self.entries.items) |entry| {
             a.free(entry.operation);
             a.free(entry.bytes);
         }
         self.entries.deinit(a);
+        self.cancellations.deinit(a);
     }
 
     pub fn operationLookup(self: *Store, _: std.mem.Allocator, operation: []const u8) !?Receipt {
@@ -45,10 +94,10 @@ const Store = struct {
     pub fn applicationValue(
         self: *Store,
         allocator: std.mem.Allocator,
-        task: t.Id,
+        task_id: t.Id,
         _: enum { input },
     ) !?Input {
-        for (self.entries.items) |entry| if (std.meta.eql(entry.task, task))
+        for (self.entries.items) |entry| if (std.meta.eql(entry.task, task_id))
             return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, entry.bytes) };
         return null;
     }
@@ -72,9 +121,9 @@ const Store = struct {
         errdefer a.free(saved);
         const op = try a.dupe(u8, operation);
         errdefer a.free(op);
-        const task: t.Id = @splat(@intCast(self.entries.items.len + 20));
-        try self.entries.append(a, .{ .operation = op, .bytes = saved, .task = task });
-        return .{ .receipt = .{ .task = task } };
+        const task_id: t.Id = @splat(@intCast(self.entries.items.len + 20));
+        try self.entries.append(a, .{ .operation = op, .bytes = saved, .task = task_id });
+        return .{ .receipt = .{ .task = task_id } };
     }
 
     fn read(self: *Store, ordinal: usize) !c.Decoded(t.Input) {
@@ -848,4 +897,94 @@ test "outbound fences superseded replies before replacement result and rejects r
         error.UnauthorizedIntent,
         outbound.admitTurnDeliveries(&store, a, &fixture.index),
     );
+}
+
+test "frontier audit scans a lineage with no admitted delivery and preserves the head" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    const before = fixture.head().*;
+    const requests = [_]t.AuditRequest{.{ .frontier = {} }};
+    fixture.index.records[1].result.?.step.audit_requests.items = &requests;
+    const tasks = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, -200_000);
+    defer a.free(tasks);
+    try std.testing.expectEqual(1, tasks.len);
+    var saved = try store.read(0);
+    defer saved.deinit();
+    try std.testing.expect(saved.value == .lineage_audit);
+    try std.testing.expectEqualDeep(before, fixture.head().*);
+    const scan = saved.value.lineage_audit;
+    try std.testing.expectEqualSlices(u8, &before.lineage, &scan.lineage);
+    try std.testing.expect(scan.latest == null);
+    const checker = @import("../native/lineage_audit.zig");
+    try std.testing.expect(try checker.permits(a, &fixture.index, scan));
+    var forged = scan;
+    forged.destination.channel.bytes = "D456";
+    forged.envelope.stable_request = try checker.stableDigest(a, forged);
+    try std.testing.expect(!try checker.permits(a, &fixture.index, forged));
+    forged = scan;
+    forged.latest = .{ .bytes = "200.000000" };
+    forged.envelope.stable_request = try checker.stableDigest(a, forged);
+    try std.testing.expect(!try checker.permits(a, &fixture.index, forged));
+    const repeated = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 300_000);
+    defer a.free(repeated);
+    try std.testing.expectEqualSlices(t.Id, tasks, repeated);
+    try std.testing.expectEqual(1, store.submits);
+}
+
+test "activation reconciliation needs retained readback and never releases digest holds" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    fixture.head().digest.?.hold = .uncertain_transmission;
+    fixture.head().activation = @import("native_genesis.zig").expectedFresh(examples.genesis()).activation;
+    const pending = fixture.head().*;
+    const view = @import("../native/reconciliation.zig");
+    try std.testing.expectEqual(.pending, try view.capability(a, &fixture.index, fixture.target));
+    const tasks = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
+    defer a.free(tasks);
+    var saved = try store.read(0);
+    defer saved.deinit();
+    try fixture.addDelivery(saved.value.delivery, tasks[0]);
+    fixture.index.records[3].result = .{ .delivery = .{ .confirmed = .{
+        .timestamp = .{ .bytes = "100.0" },
+        .metadata_observed = true,
+    } } };
+    try std.testing.expectEqual(.pending, try view.capability(a, &fixture.index, fixture.target));
+    fixture.index.records[3].result.?.delivery.confirmed.metadata_observed = false;
+    try std.testing.expectEqual(.degraded, try view.capability(a, &fixture.index, fixture.target));
+    fixture.index.records[3].input = .{ .audit = .{
+        .envelope = saved.value.delivery.envelope,
+        .delivery = saved.value.delivery,
+        .ordinal = 0,
+        .oldest = .{ .bytes = "0.0" },
+        .latest = null,
+        .page_limit = 10,
+        .canary = null,
+    } };
+    fixture.index.records[3].result = .{ .audit = .{ .found = .{
+        .timestamp = .{ .bytes = "100.0" },
+    } } };
+    try std.testing.expectEqual(.qualified, try view.capability(a, &fixture.index, fixture.target));
+    const successful = fixture.index.records[3];
+    fixture.index.records[2] = successful;
+    fixture.index.records[2].task = @splat(3);
+    fixture.index.records[2].result.?.audit = .{ .inconclusive = .{ .bytes = "missing history" } };
+    const mixed = try view.inspect(a, &fixture.index, fixture.target);
+    try std.testing.expectEqual(.degraded, mixed.capability);
+    try std.testing.expect(mixed.previously_qualified);
+    try std.testing.expectEqual(.unknown, mixed.readback_order);
+    try std.testing.expectEqual(.inconclusive, mixed.failed_readback.?.outcome);
+    std.mem.swap(idx.Record, &fixture.index.records[2], &fixture.index.records[3]);
+    try std.testing.expectEqual(.degraded, try view.capability(a, &fixture.index, fixture.target));
+    fixture.index.records[2] = successful;
+    fixture.index.records[3].input = saved.value;
+    fixture.index.records[3].result = .{ .delivery = .{ .confirmed = .{
+        .timestamp = .{ .bytes = "100.0" },
+        .metadata_observed = false,
+    } } };
+    try std.testing.expectEqual(.qualified, try view.capability(a, &fixture.index, fixture.target));
+    try std.testing.expectEqualDeep(pending, fixture.head().*);
 }

@@ -163,7 +163,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [authority, providers, transitions-first, transitions-second, rendering, methods, continuity-first, continuity-second, product, crash]
+        part: [authority, providers, transitions-first, transitions-second, transitions-third, rendering, methods, continuity-first, continuity-second, continuity-third, product, crash]
     env:
       PART: ${{ matrix.part }}
     steps:
@@ -223,6 +223,7 @@ jobs:
         with:
           name: ${{ matrix.part }}
           path: ${{ runner.temp }}/${{ matrix.part }}.tar.gz
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
   execute:
@@ -234,13 +235,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {part: authority, count: 85}
-          - {part: providers, count: 39}
-          - {part: transitions-first, count: 25}
-          - {part: transitions-second, count: 24}
-          - {part: rendering, count: 59}
-          - {part: methods, count: 20}
-          - {part: continuity-first, count: 17}
+          - {part: authority, count: 95}
+          - {part: providers, count: 40}
+          - {part: transitions-first, count: 15}
+          - {part: transitions-third, count: 11}
+          - {part: transitions-second, count: 25}
+          - {part: rendering, count: 63}
+          - {part: methods, count: 21}
+          - {part: continuity-first, count: 7}
+          - {part: continuity-third, count: 13}
           - {part: continuity-second, count: 21}
           - {part: product, count: 5}
           - {part: crash, count: 12}

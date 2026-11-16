@@ -16,7 +16,8 @@ pub fn permits(
     const record = index.record(request.task) orelse return false;
     if (record.superseded or request.kind == .placement_move or
         request.kind == .placement_control) return false;
-    if (index.recovery_purpose == .transfer and record.input != .audit) return false;
+    if (index.recovery_purpose == .transfer and record.input != .audit and
+        record.input != .lineage_audit) return false;
     return switch (record.input) {
         .step => |value| blk: {
             const obligation = index.obligation(value.obligation) orelse break :blk false;
@@ -30,6 +31,8 @@ pub fn permits(
             try deliveryPermitted(a, index, value, clock_ms),
         .audit => |value| std.mem.eql(u8, request.capability, @import("../app/audit_contract.zig").identity) and
             try auditPermitted(a, index, value, clock_ms),
+        .lineage_audit => |value| std.mem.eql(u8, request.capability, @import("../app/lineage_audit_contract.zig").identity) and
+            try @import("lineage_audit.zig").permits(a, index, value),
         .turn => record.input.turn.envelope.origin != .derived,
         .experiment => |value| experimentPermitted(value, request.capability),
         .genesis, .directive, .continuity_member, .continuity_cut, .restore => false,

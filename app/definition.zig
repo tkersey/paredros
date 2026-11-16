@@ -17,6 +17,7 @@ pub const resources = .{};
 pub const capabilities = .{
     .{ .identity = github.identity, .resource_role = "read" },
     .{ .identity = history.identity, .resource_role = "read" },
+    .{ .identity = @import("lineage_audit_contract.zig").identity, .resource_role = "read" },
     .{ .identity = model.P.identity, .resource_role = "inference" },
     .{ .identity = slack.notification_identity, .resource_role = "write" },
     .{ .identity = method.workspace_identity, .resource_role = "workspace" },

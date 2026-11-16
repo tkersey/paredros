@@ -16,6 +16,7 @@ pub fn admitDeliveries(
     clock_ms: i64,
 ) ![]t.Id {
     const obligation = index.obligation(target) orelse return error.UnknownObligation;
+    try @import("delivery_retirement.zig").reconcile(service, a, index, obligation);
     const wanted = try collect(a, index, obligation, clock_ms);
     defer a.free(wanted);
     var tasks: std.ArrayList(t.Id) = .empty;

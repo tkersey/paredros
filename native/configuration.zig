@@ -312,7 +312,8 @@ fn permitted(config: Config, identity: []const u8) bool {
     if (config.mode == .offline) return false;
     if (std.mem.eql(u8, identity, @import("../app/github_contract.zig").identity))
         return config.grants.github_read;
-    if (std.mem.eql(u8, identity, @import("../app/audit_contract.zig").identity))
+    if (std.mem.eql(u8, identity, @import("../app/audit_contract.zig").identity) or
+        std.mem.eql(u8, identity, @import("../app/lineage_audit_contract.zig").identity))
         return config.grants.slack_history;
     if (std.mem.eql(
         u8,
