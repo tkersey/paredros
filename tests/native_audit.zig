@@ -401,3 +401,256 @@ test "native Slack audit capture survives reopen before interpretation without r
     try std.testing.expectEqualStrings("150.000001", result.found.timestamp.bytes);
     try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, &scenario.calls);
 }
+
+const lineage_contract = @import("../app/lineage_audit_contract.zig");
+const LineageTypes = struct {
+    pub const application_id = "paredros.lineage-audit.witness";
+    pub const application_version = "1.0.0";
+    pub const Input = t.LineageAudit;
+    pub const Output = t.LineageAuditResult;
+    pub const Failure = t.Failure;
+    pub const Answer = void;
+    pub const Message = t.Message;
+    pub const input_schema_id = "paredros.lineage-audit.witness.input.v1";
+    pub const output_schema_id = "paredros.lineage-audit.witness.output.v1";
+    pub const failure_schema_id = t.failure_schema_id;
+    pub const answer_schema_id = "paredros.lineage-audit.witness.answer.v1";
+    pub const message_schema_id = t.message_schema_id;
+};
+const LineageApplication = struct {
+    pub const declarations: []const native.Declaration = &.{declaration()};
+    fn declaration() native.Declaration {
+        var result = external.lineageDeclaration();
+        result.capture.?.acquire = LineageScenario.acquire;
+        return result;
+    }
+    pub fn emit(ctx: protean.Context) !horos.source.Module {
+        return ctx.author.module(try audit.Lineage.emit(ctx), try ctx.schema(t.Failure));
+    }
+};
+const LineageFixture = @import("native_fixture.zig").Fixture(LineageTypes, LineageApplication);
+const LineageScenario = struct {
+    responses: [2][]const u8,
+    calls: [2]u32 = .{ 0, 0 },
+
+    fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
+        const self: *LineageScenario = @ptrCast(@alignCast(ctx.environment.?));
+        var request = try c.decodeOwned(lineage_contract.Request, ctx.allocator, bytes);
+        defer request.deinit();
+        const index = request.value.pages.items.len;
+        if (index >= self.calls.len or self.calls[index] != 0) return error.DuplicateAcquisition;
+        self.calls[index] += 1;
+        return .{ .captured = try lineageCapture(
+            ctx.allocator,
+            request.value,
+            self.responses[index],
+        ) };
+    }
+};
+
+fn lineageInput() t.LineageAudit {
+    return .{
+        .envelope = .{
+            .operation = .{ .bytes = "lineage-audit" },
+            .stable_request = @splat(7),
+            .origin = .{ .derived = .{ .predecessor = producer } },
+        },
+        .obligation = @splat(8),
+        .predecessor = producer,
+        .lineage = @splat(3),
+        .destination = destination,
+        .oldest = .{ .bytes = "100.000001" },
+        .latest = .{ .bytes = "200.000001" },
+        .page_limit = 4,
+    };
+}
+
+fn lineageBody(allocator: std.mem.Allocator, cursor: []const u8) ![]u8 {
+    var original = try delivery(allocator, 9);
+    defer original.deinit();
+    var intent = preparation.projectIntent(original.value);
+    intent.key.generation = 9;
+    var future = try preparation.materialize(allocator, intent, producer, @splat(4), "B1");
+    defer future.deinit();
+    return body(allocator, future.value, "150.000001", cursor);
+}
+
+fn lineageCapture(
+    allocator: std.mem.Allocator,
+    request: lineage_contract.Request,
+    response: []const u8,
+) ![]u8 {
+    const bytes = try c.encodeOwned(lineage_contract.Request, allocator, request);
+    defer allocator.free(bytes);
+    const headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ++
+        "Date: Mon, 16 Nov 2026 00:00:00 GMT\r\nX-Slack-Req-Id: lineage-page\r\n\r\n";
+    const head = try std.http.Client.Response.Head.parse(headers);
+    var reader = std.Io.Reader.fixed(response);
+    var retained = try http.captureResponse(allocator, head, &reader, .{}, "secret-never-retained");
+    defer retained.deinit();
+    return external.lineageCaptureBytes(allocator, bytes, "B1", retained, 1234);
+}
+
+fn lineageInterpret(
+    request: lineage_contract.Request,
+    captured: []const u8,
+) !c.Decoded(lineage_contract.Reply) {
+    const bytes = try c.encodeOwned(lineage_contract.Request, a, request);
+    defer a.free(bytes);
+    const result = try external.lineageInterpret(.{
+        .allocator = a,
+        .task = @splat(1),
+        .tenant = "test",
+        .profile = "test",
+        .objects = .{ .source = &source, .read_object = noObject },
+    }, bytes, bytes, captured);
+    defer a.free(result.reply);
+    return c.decodeOwned(lineage_contract.Reply, a, result.reply);
+}
+
+fn completeLineage(fixture: *LineageFixture, work: native.tasks.Work) !void {
+    const allocator = fixture.arena.allocator();
+    const task_id = std.fmt.bytesToHex(work.task, .lower);
+    const acquired = try work.entry.declaration.capture.?.acquire(.{
+        .allocator = allocator,
+        .io = .failing,
+        .authority = &fixture.profile.authority,
+        .task_id = &task_id,
+        .profile = work.profile,
+        .environment = fixture.profile.environment,
+    }, work.prepared orelse return error.MissingPrepared);
+    if (acquired != .captured) return error.UnexpectedAcquisitionFailure;
+    defer allocator.free(acquired.captured);
+    try fixture.service.?.completeWork(allocator, work, .{ .acquired = acquired.captured });
+}
+
+fn driveLineage(fixture: *LineageFixture, task_id: t.Id) !void {
+    const allocator = fixture.arena.allocator();
+    for (0..4096) |_| {
+        var task = try fixture.service.?.task(allocator, task_id);
+        defer task.deinit();
+        if (task.value.terminal()) return;
+        switch (try fixture.service.?.pump(allocator)) {
+            .work => |work| try completeLineage(fixture, work),
+            .idle, .waiting, .progressed => {},
+        }
+    }
+    return error.AuditDidNotComplete;
+}
+
+test "native Slack lineage audit completes authored read loop without a delivery anchor" {
+    const first = try lineageBody(a, "next + cursor");
+    defer a.free(first);
+    const last = try body(a, null, "", "");
+    defer a.free(last);
+    var scenario: LineageScenario = .{ .responses = .{ first, last } };
+    var fixture: LineageFixture = .{};
+    defer fixture.deinit();
+    fixture.profile.environment = &scenario;
+    try fixture.initWithGrants(&.{lineage_contract.identity});
+    const admitted = try horos.data.program_image.Admitted.decode(a, fixture.assets.image);
+    defer admitted.deinit();
+    try std.testing.expectEqual(1, admitted.program().effects.len);
+    try std.testing.expectEqualStrings(
+        lineage_contract.identity,
+        admitted.program().effects[0].identity,
+    );
+    try std.testing.expectEqual(1, fixture.handlers.?.entries.len);
+    try std.testing.expectEqualStrings(
+        "read",
+        fixture.handlers.?.entries[0].declaration.resource_role,
+    );
+    const submitted = try fixture.service.?.submit(
+        fixture.arena.allocator(),
+        "lineage-audit",
+        lineageInput(),
+    );
+    try driveLineage(&fixture, submitted.receipt.task);
+    try std.testing.expect((try fixture.output(submitted.receipt.task)) == .complete);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, &scenario.calls);
+}
+
+fn rejectLineageSubstitutions(request: lineage_contract.Request, captured: []const u8) !void {
+    for (0..4) |index| {
+        var decoded = try c.decodeOwned(external.Capture, a, captured);
+        defer decoded.deinit();
+        switch (index) {
+            0 => decoded.value.response.evidence.request_digest[0] ^= 1,
+            1 => decoded.value.response.evidence.body_digest[0] ^= 1,
+            2 => decoded.value.response.evidence.target.bytes = external.endpoint,
+            3 => decoded.value.response.bot_id.bytes = "B2",
+            else => unreachable,
+        }
+        var history = try external.replayLineage(a, request, "B1");
+        defer history.deinit();
+        try std.testing.expectError(error.InvalidCapture, external.ingestLineage(
+            a,
+            &history,
+            request,
+            decoded.value.response,
+        ));
+    }
+}
+
+test "native Slack lineage capture retains future marker and rejects forged replay" {
+    const request: lineage_contract.Request = .{
+        .audit = lineageInput(),
+        .pages = .{ .items = &.{} },
+    };
+    const response = try lineageBody(a, "");
+    defer a.free(response);
+    const captured = try lineageCapture(a, request, response);
+    defer a.free(captured);
+    var reply = try lineageInterpret(request, captured);
+    defer reply.deinit();
+    try std.testing.expect(reply.value.done == .complete);
+    var decoded = try c.decodeOwned(external.Capture, a, captured);
+    defer decoded.deinit();
+    var retained = request;
+    retained.pages.items = &.{decoded.value.response};
+    var history = try external.replayLineage(a, retained, "B1");
+    defer history.deinit();
+    try std.testing.expect(history.complete);
+    try std.testing.expectEqual(1, history.observations.items.len);
+    const observed = history.observations.items[0];
+    try std.testing.expectEqualStrings("150.000001", observed.timestamp);
+    const payload = observed.metadata.object.get("event_payload").?;
+    try std.testing.expectEqualStrings("9", payload.object.get("generation").?.string);
+    try std.testing.expectEqualStrings(
+        "lineage-page",
+        decoded.value.response.evidence.request_id.?.bytes,
+    );
+    try rejectLineageSubstitutions(request, captured);
+    retained.audit.lineage[0] ^= 1;
+    try std.testing.expectError(error.InvalidCapture, external.replayLineage(a, retained, "B1"));
+    var changed = request;
+    changed.audit.obligation[0] ^= 1;
+    try std.testing.expectError(error.InvalidCapture, lineageInterpret(changed, captured));
+}
+
+const LegacyInput = union(enum) {
+    genesis: t.Genesis,
+    step: t.Step,
+    directive: t.Directive,
+    delivery: t.Delivery,
+    audit: t.Audit,
+    turn: t.Turn,
+    experiment: t.Experiment,
+    continuity_member: t.ContinuityMember,
+    continuity_cut: t.ContinuityCut,
+    restore: t.Restore,
+};
+
+test "native Slack audit legacy Input bytes preserve ordinal and payload decoding" {
+    var frozen = try input(a, true);
+    defer frozen.deinit();
+    const bytes = try c.encodeOwned(LegacyInput, a, .{ .audit = frozen.value });
+    defer a.free(bytes);
+    var decoded = try c.decodeOwned(t.Input, a, bytes);
+    defer decoded.deinit();
+    try std.testing.expect(decoded.value == .audit);
+    try std.testing.expectEqualDeep(frozen.value, decoded.value.audit);
+    const current = try c.encodeOwned(t.Input, a, decoded.value);
+    defer a.free(current);
+    try std.testing.expectEqualSlices(u8, bytes, current);
+}

@@ -21,7 +21,7 @@ pub const help =
     \\  method show ID | revert ID REVISION | adopt ID REVISION METHOD_JSON
     \\  experiment run CAMPAIGN ATTEMPT PLAN_JSON [--live] | show CAMPAIGN
     \\  namespace check | describe-build | licenses
-    \\  recovery status | begin | release TASK DIGEST --exclusive-owner
+    \\  recovery status | candidates [AFTER LIMIT] | begin | release TASK DIGEST --exclusive-owner
     \\  transfer export NAME [--snapshot]
     \\  transfer import PATH [--exclusive-owner] [--bytes-max N]
     \\  request JSON | stdio              Machine-readable daemon access
@@ -66,6 +66,7 @@ pub fn request(
         .proposal_show,
         .experiment_show,
         .recovery_status,
+        .recovery_candidates,
         => false,
         else => true,
     };
@@ -100,6 +101,14 @@ fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
 
 fn recovery(args: []const []const u8) !Command {
     if (args.len == 1 and same(args[0], "status")) return .recovery_status;
+    if (args.len >= 1 and same(args[0], "candidates")) {
+        if (args.len == 1) return .{ .recovery_candidates = .{ .after = null, .limit = 16 } };
+        if (args.len != 3) return error.InvalidArguments;
+        return .{ .recovery_candidates = .{
+            .after = try number(u64, args[1]),
+            .limit = try number(u32, args[2]),
+        } };
+    }
     if (args.len == 1 and same(args[0], "begin")) return .recovery_begin;
     if (args.len != 4 or !same(args[0], "release") or
         !same(args[3], "--exclusive-owner")) return error.InvalidArguments;

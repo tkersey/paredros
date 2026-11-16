@@ -33,6 +33,7 @@ pub const Request = struct {
         audit_delivery: t.DeliveryKey,
         method_show: t.Id,
         recovery_status: void,
+        recovery_candidates: struct { after: ?u64, limit: u32 },
         recovery_begin: void,
         recovery_release: recovery_control.Release,
         transfer_export: continuity_control.Export,
@@ -152,6 +153,7 @@ fn readOnly(request: Request) bool {
         .proposal_show,
         .experiment_show,
         .recovery_status,
+        .recovery_candidates,
         => true,
         else => false,
     };
@@ -386,20 +388,36 @@ fn inspect(
         .delivery_show => |key| try deliveries(a, index, key),
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
-        .recovery_status => try native.values.toJson(struct {
-            recovery: ?t.InputReference,
-            recovery_hold: bool,
-            restore_cut: c.Vector(t.InputReference, null),
-            recovery_purpose: ?t.RestorePurpose,
-        }, a, .{
-            .recovery = index.recovery,
-            .recovery_hold = index.recovery_hold,
-            .restore_cut = .{ .items = index.restore_cut },
-            .recovery_purpose = index.recovery_purpose,
-        }),
+        .recovery_status => try recoveryStatus(a, index),
+        .recovery_candidates => |value| try native.values.toJson(
+            @import("history_evidence.zig").Page,
+            a,
+            try @import("history_evidence.zig").page(a, index, null, value.after, value.limit),
+        ),
         else => return error.InvalidReadCommand,
     };
     return reply(a, "observed", data);
+}
+
+fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Value {
+    var result = try native.values.toJson(struct {
+        recovery: ?t.InputReference,
+        recovery_hold: bool,
+        restore_cut: c.Vector(t.InputReference, null),
+        recovery_purpose: ?t.RestorePurpose,
+    }, a, .{
+        .recovery = index.recovery,
+        .recovery_hold = index.recovery_hold,
+        .restore_cut = .{ .items = index.restore_cut },
+        .recovery_purpose = index.recovery_purpose,
+    });
+    const history = @import("history_evidence.zig");
+    try native.json.put(a, &result, "external_history", try native.values.toJson(
+        history.Page,
+        a,
+        try history.page(a, index, null, null, 16),
+    ));
+    return result;
 }
 
 fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !native.json.Value {
@@ -476,6 +494,15 @@ fn monitor(
     else
         null else null;
     try native.json.put(a, &result, "source_age_ms", try native.values.toJson(?u64, a, age));
+    const reconciliation = try @import("reconciliation.zig").inspect(a, index, id);
+    try native.json.put(a, &result, "reconciliation", native.json.string(
+        @tagName(reconciliation.capability),
+    ));
+    try native.json.put(a, &result, "reconciliation_evidence", try native.values.toJson(
+        @TypeOf(reconciliation),
+        a,
+        reconciliation,
+    ));
     try appendPending(a, index, obligation, null, 16, &result);
     return result;
 }

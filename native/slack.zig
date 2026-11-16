@@ -527,7 +527,7 @@ pub fn prepareLinked(
     };
 }
 
-fn equalJson(left: std.json.Value, right: std.json.Value) bool {
+pub fn equalJson(left: std.json.Value, right: std.json.Value) bool {
     const Pair = struct { left: std.json.Value, right: std.json.Value };
     var pending: [512]Pair = undefined;
     pending[0] = .{ .left = left, .right = right };
@@ -634,11 +634,13 @@ pub const Finding = union(enum) {
     not_observed,
     inconclusive: AuditReason,
 };
+pub const HistoryObservation = struct { timestamp: []const u8, metadata: std.json.Value };
 pub const HistoryAudit = struct {
     arena: std.heap.ArenaAllocator,
     binding: Binding,
-    marker: std.json.Value,
-    canary: ?struct { timestamp: []const u8, marker: std.json.Value },
+    marker: std.json.Value = .null,
+    lineage: []const u8,
+    canary: ?struct { timestamp: []const u8, marker: std.json.Value } = null,
     oldest: []const u8,
     latest: ?[]const u8,
     cursor: []const u8 = "",
@@ -651,8 +653,45 @@ pub const HistoryAudit = struct {
     messages_left: usize,
     page_bytes: usize,
     pages: std.ArrayList(HistoryPage) = .empty,
+    observations: std.ArrayList(HistoryObservation) = .empty,
 
     pub fn init(a: std.mem.Allocator, binding: Binding, marker: Marker, oldest: []const u8, latest: ?[]const u8, canary: ?Canary, limits: HistoryLimits) !HistoryAudit {
+        var result = try initWindow(a, binding, marker.lineage, oldest, latest, limits);
+        errdefer result.deinit();
+        const allocator = result.arena.allocator();
+        result.marker = try markerValue(allocator, marker);
+        if (canary) |item| {
+            if (!same(oldest, item.timestamp)) return error.InvalidWindow;
+            result.canary = .{
+                .timestamp = try allocator.dupe(u8, item.timestamp),
+                .marker = try markerValue(allocator, item.marker),
+            };
+        }
+        return result;
+    }
+
+    pub fn initLineage(
+        a: std.mem.Allocator,
+        binding: Binding,
+        lineage: []const u8,
+        oldest: []const u8,
+        latest: ?[]const u8,
+        limits: HistoryLimits,
+    ) !HistoryAudit {
+        if (lineage.len != 64) return error.InvalidLineage;
+        for (lineage) |byte|
+            if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return error.InvalidLineage;
+        return initWindow(a, binding, lineage, oldest, latest, limits);
+    }
+
+    fn initWindow(
+        a: std.mem.Allocator,
+        binding: Binding,
+        lineage: []const u8,
+        oldest: []const u8,
+        latest: ?[]const u8,
+        limits: HistoryLimits,
+    ) !HistoryAudit {
         try validateBinding(binding);
         const oldest_time = try Timestamp.parse(oldest);
         if (latest) |upper| if (oldest_time.order(try Timestamp.parse(upper)) == .gt)
@@ -661,21 +700,13 @@ pub const HistoryAudit = struct {
         errdefer arena.deinit();
         const allocator = arena.allocator();
         const frozen_binding = try copyBinding(allocator, binding);
-        const frozen_canary: @FieldType(HistoryAudit, "canary") = if (canary) |item| blk: {
-            if (!same(oldest, item.timestamp)) return error.InvalidWindow;
-            break :blk .{
-                .timestamp = try allocator.dupe(u8, item.timestamp),
-                .marker = try markerValue(allocator, item.marker),
-            };
-        } else null;
-        const frozen_marker = try markerValue(allocator, marker);
+        const frozen_lineage = try allocator.dupe(u8, lineage);
         const frozen_oldest = try allocator.dupe(u8, oldest);
         const frozen_latest = if (latest) |upper| try allocator.dupe(u8, upper) else null;
         return .{
             .arena = arena,
             .binding = frozen_binding,
-            .marker = frozen_marker,
-            .canary = frozen_canary,
+            .lineage = frozen_lineage,
             .oldest = frozen_oldest,
             .latest = frozen_latest,
             .pages_left = limits.pages,
@@ -794,6 +825,12 @@ pub const HistoryAudit = struct {
             if (equalJson(metadata, canary.marker)) self.canary_seen = true else self.reason = .metadata;
         };
         const payload = try get(metadata, "event_payload");
+        if (equals(payload, "lineage_root", self.lineage))
+            try self.observations.append(self.arena.allocator(), .{
+                .timestamp = ts,
+                .metadata = metadata,
+            });
+        if (self.marker == .null) return;
         const expected = try get(self.marker, "event_payload");
         if (!equals(payload, "delivery_key", try string(expected, "delivery_key"))) return;
         if (!equals(payload, "generation", try string(expected, "generation"))) return;

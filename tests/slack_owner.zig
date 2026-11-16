@@ -63,6 +63,7 @@ pub const Application = struct {
             ),
             .continuity_cut = try (try b.caseOf(input, "continuity_cut")).fail(output, failure),
             .restore = try (try b.caseOf(input, "restore")).fail(output, failure),
+            .lineage_audit = try (try b.caseOf(input, "lineage_audit")).fail(output, failure),
         });
         try context.author.define(function, try b.ret(result));
         return context.author.module(function, try context.schema(t.Failure));

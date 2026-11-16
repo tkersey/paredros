@@ -213,7 +213,7 @@ test "configuration private files feed only selected live roles and stay out of 
     config.slack_bot_credential_file = path;
     const first = try configuration.prepare(a, std.testing.io, config, build);
     defer first.deinit();
-    try std.testing.expectEqual(7, first.profile.authority.grants.len);
+    try std.testing.expectEqual(8, first.profile.authority.grants.len);
     try std.testing.expectEqualStrings(
         "fake-private-token-one",
         first.environment.github.?.http.token,

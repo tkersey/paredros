@@ -1,7 +1,7 @@
 const std = @import("std");
 const protean_build = @import("protean");
 const NativeGroup = enum { authority, providers, transitions, rendering, methods, continuity };
-const NativePartition = enum { first, second };
+const NativePartition = enum { first, second, third };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -120,12 +120,14 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
     return switch (group) {
         .continuity => switch (partition) {
             .first => &.{
-                "tests.transfer.test.",
                 "tests.native_restore.test.",
                 "tests.native_recovery_control.test.",
+                "tests.directive_policy.test.",
+            },
+            .third => &.{
+                "tests.transfer.test.",
                 "tests.compatibility.test.",
                 "tests.contracts.test.",
-                "tests.directive_policy.test.",
                 "tests.native_genesis.test.",
             },
             .second => &.{
@@ -142,6 +144,8 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
                 "tests.directive_chain.test.",
                 "tests.native_directive_policy.test.",
                 "tests.directive_policy.test.",
+            },
+            .third => &.{
                 "tests.native_phase_recovery.test.",
                 "tests.phase_recovery.test.",
                 "tests.step.test.",

@@ -49,9 +49,9 @@ named admission, dispatch, or capture boundaries, and checks retained state and
 acquisition counts in a fresh process. It does not contact live providers.
 
 The Linux workflow splits continuity and transitions with
-`-Dnative-partition=first|second`; each named test runs in exactly one partition.
-The unchanged import-only root runs in both partitions, giving 290 checks in CI
-and 288 in the six unfiltered local groups. The product and crash fixture compile
+`-Dnative-partition=first|second|third`; each named test runs in exactly one partition.
+The unchanged import-only root runs in all three partitions, giving 311 checks in CI
+and 307 in the six unfiltered local groups. The product and crash fixture compile
 separately, and every artifact executes in a fresh job. Each job retains its
 ten-minute limit. Prepared compiler work is reused through the authenticated
 current-run archive; build jobs do not save a redundant cache after uploading
@@ -95,6 +95,18 @@ and `pending_directives_next`. Use `monitor directives ID --after ORDINAL
 --limit N` to continue from that ordinal until the next cursor is null. Each page
 describes the current retained state; controls may be folded between requests.
 Individual admitted tasks remain available through `task show ID`.
+
+Monitor views report reconciliation as `pending`, `qualified`, or `degraded`,
+with retained readback references in `reconciliation_evidence`. A successful
+readback does not hide a failed audit whose order cannot be established. These
+observations never clear a digest or recovery hold.
+
+`recovery candidates [AFTER LIMIT]` pages authenticated same-lineage Slack markers
+from retained history captures, including markers whose delivery intent is absent
+from the restored state. Results retain their source namespace, task, and capture
+references and identify incomplete scans. New scans use a moving window without
+a local-clock upper bound and remain inconclusive when traversal ends. Candidates
+require owner disposition; they do not advance observed or told progress.
 
 Proposal confirmations use the exact `REQUEST_DIGEST:ATTEMPT:ORDINAL` identity.
 `proposal show` returns the complete retained proposal. Slack offers a button only

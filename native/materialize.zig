@@ -97,7 +97,7 @@ fn compose(
 
 fn controlBoundary(pending: []const t.DirectiveFact) bool {
     for (pending) |fact| switch (fact.value.body) {
-        .adopt, .revert, .@"resume", .recovery_hold, .recovery_release => return true,
+        .adopt, .revert, .@"resume", .recovery_hold, .recovery_release, .audit, .frontier_audit => return true,
         else => {},
     };
     return false;
@@ -135,7 +135,7 @@ fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
             target,
         ),
         .turn => |value| sameTarget(value.target, target),
-        .genesis, .directive, .experiment, .continuity_member, .continuity_cut, .restore => false,
+        .genesis, .directive, .experiment, .continuity_member, .continuity_cut, .restore, .lineage_audit => false,
     };
 }
 

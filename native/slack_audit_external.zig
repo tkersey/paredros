@@ -4,6 +4,7 @@ const native = @import("protean_native");
 const registry = native.registry;
 const t = @import("application_types");
 const contract = @import("../app/audit_contract.zig");
+const lineage_contract = @import("../app/lineage_audit_contract.zig");
 const slack = @import("slack.zig");
 const transport = @import("http.zig");
 const preparation = @import("delivery_prepare.zig");
@@ -17,36 +18,24 @@ pub const Capture = union(enum) {
 };
 const page_bytes_max = 2 * 1024 * 1024;
 
-pub fn declaration() native.Declaration {
-    return .{
-        .identity = contract.identity,
-        .resource_role = "read",
-        .kind = .leaf,
-        .background = true,
-        .payload_schema = requestSchema,
-        .resume_schema = replySchema,
-        .capture = .{
-            .dependencies = registry.opaqueProjection,
-            .prepare = prepare,
-            .acquire = acquire,
-            .interpret = interpret,
-        },
-    };
-}
-
-fn requestSchema(a: std.mem.Allocator) ![]u8 {
-    return native.values.schemaBytes(contract.Request, a);
-}
-
-fn replySchema(a: std.mem.Allocator) ![]u8 {
-    return native.values.schemaBytes(contract.Reply, a);
-}
-
-pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
-    var decoded = try c.decodeOwned(contract.Request, ctx.allocator, bytes);
-    defer decoded.deinit();
-    return c.encodeOwned(contract.Request, ctx.allocator, decoded.value);
-}
+const DeliveryHandler = Handler(false);
+const LineageHandler = Handler(true);
+pub const declaration = DeliveryHandler.declaration;
+pub const prepare = DeliveryHandler.prepare;
+pub const acquire = DeliveryHandler.acquire;
+pub const captureBytes = DeliveryHandler.captureBytes;
+pub const interpret = DeliveryHandler.interpret;
+pub const requestTarget = DeliveryHandler.requestTarget;
+pub const replayDelivery = DeliveryHandler.replayRetained;
+pub const ingestDelivery = DeliveryHandler.ingest;
+pub const lineageDeclaration = LineageHandler.declaration;
+pub const lineagePrepare = LineageHandler.prepare;
+pub const lineageAcquire = LineageHandler.acquire;
+pub const lineageCaptureBytes = LineageHandler.captureBytes;
+pub const lineageInterpret = LineageHandler.interpret;
+pub const lineageRequestTarget = LineageHandler.requestTarget;
+pub const replayLineage = LineageHandler.replayRetained;
+pub const ingestLineage = LineageHandler.ingest;
 
 fn sameDestination(left: t.Destination, right: t.Destination) bool {
     inline for (@typeInfo(t.Destination).@"struct".field_names) |name|
@@ -129,53 +118,11 @@ fn target(a: std.mem.Allocator, request: slack.HistoryRequest) ![]u8 {
     });
 }
 
-fn ingest(
+fn reject(
     a: std.mem.Allocator,
-    history: *slack.HistoryAudit,
-    request: contract.Request,
-    page: contract.CapturedPage,
-) !void {
-    if (!std.mem.eql(u8, history.binding.bot_id, page.bot_id.bytes))
-        return error.InvalidCapture;
-    const bytes = try c.encodeOwned(contract.Request, a, request);
-    defer a.free(bytes);
-    const url = try target(a, history.request());
-    defer a.free(url);
-    const evidence = page.evidence;
-    if (!std.meta.eql(evidence.request_digest, preparation.hash(bytes)) or
-        !std.meta.eql(evidence.body_digest, preparation.hash(evidence.body.bytes)) or
-        !std.mem.eql(u8, evidence.target.bytes, url)) return error.InvalidCapture;
-    if (!evidence.identity_encoding) {
-        history.reason = .malformed;
-        return;
-    }
-    try history.ingest(history.request(), .{
-        .status = evidence.status,
-        .body = evidence.body.bytes,
-    });
-}
-
-fn replay(a: std.mem.Allocator, request: contract.Request, bot: []const u8) !slack.HistoryAudit {
-    if (request.pages.items.len >= request.audit.page_limit) return error.InvalidAudit;
-    var history = try initial(a, request.audit, bot);
-    errdefer history.deinit();
-    for (request.pages.items, 0..) |page, index| {
-        if (history.complete or history.reason != null) return error.InvalidAudit;
-        var prefix = request;
-        prefix.pages.items = request.pages.items[0..index];
-        try ingest(a, &history, prefix, page);
-    }
-    if (history.complete or history.reason != null) return error.InvalidAudit;
-    return history;
-}
-
-pub fn requestTarget(a: std.mem.Allocator, request: contract.Request, bot: []const u8) ![]u8 {
-    var history = try replay(a, request, bot);
-    defer history.deinit();
-    return target(a, history.request());
-}
-
-fn reject(a: std.mem.Allocator, bytes: []const u8, reason: []const u8) registry.Acquisition {
+    bytes: []const u8,
+    reason: []const u8,
+) registry.Acquisition {
     const encoded = c.encodeOwned(Capture, a, .{ .rejected = .{
         .request_digest = preparation.hash(bytes),
         .reason = .{ .bytes = reason },
@@ -183,125 +130,267 @@ fn reject(a: std.mem.Allocator, bytes: []const u8, reason: []const u8) registry.
     return .{ .captured = encoded };
 }
 
-pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
-    ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
-    var request = try c.decodeOwned(contract.Request, ctx.allocator, bytes);
-    defer request.deinit();
-    const env: *const Environment = @ptrCast(@alignCast(ctx.environment orelse
-        return reject(ctx.allocator, bytes, "binding")));
-    const destination = env.destination orelse return reject(ctx.allocator, bytes, "binding");
-    if (!sameDestination(destination, request.value.audit.delivery.destination) or
-        !std.mem.eql(u8, env.http.account, destination.account.bytes) or
-        !std.mem.eql(u8, env.http.origin, "https://slack.com") or
-        ctx.authority.revoked or !ctx.authority.disclosure)
-        return reject(ctx.allocator, bytes, "binding");
-    const url = requestTarget(ctx.allocator, request.value, env.bot_id) catch |err| {
-        if (err == error.OutOfMemory) return .{ .definitely_not_sent = err };
-        return reject(ctx.allocator, bytes, "invalid_audit");
-    };
-    defer ctx.allocator.free(url);
-    var http = transport.prepare(ctx.allocator, env.http, .{
-        .method = .GET,
-        .url = url,
-        .headers = &.{.{ .name = "User-Agent", .value = "paredros/0.0.1" }},
-    }) catch |err| {
-        if (err == error.OutOfMemory) return .{ .definitely_not_sent = err };
-        return reject(ctx.allocator, bytes, "binding");
-    };
-    defer http.deinit();
-    ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
-    return switch (transport.execute(ctx.allocator, ctx.io, env.http, &http)) {
-        .definitely_not_sent => |err| .{ .definitely_not_sent = err },
-        .unknown => |err| .{ .unknown = err },
-        .captured => |captured| retain(ctx, bytes, env.bot_id, captured),
-    };
-}
-
-fn retain(
-    ctx: registry.Context,
-    bytes: []const u8,
-    bot: []const u8,
-    owned: transport.Capture,
-) registry.Acquisition {
-    var captured = owned;
-    defer captured.deinit();
-    const encoded = captureBytes(
-        ctx.allocator,
-        bytes,
-        bot,
-        captured,
-        std.Io.Clock.real.now(ctx.io).toMilliseconds(),
-    ) catch |err|
-        return .{ .unknown = err };
-    return .{ .captured = encoded };
-}
-
-pub fn captureBytes(
-    a: std.mem.Allocator,
-    bytes: []const u8,
-    bot: []const u8,
-    captured: transport.Capture,
-    captured_ms: i64,
-) ![]u8 {
-    var request = try c.decodeOwned(contract.Request, a, bytes);
-    defer request.deinit();
-    const url = try requestTarget(a, request.value, bot);
-    defer a.free(url);
-    const notification_bytes = try notification.captureBytes(a, bytes, bot, captured, captured_ms);
-    defer a.free(notification_bytes);
-    var decoded = try c.decodeOwned(notification.Capture, a, notification_bytes);
-    defer decoded.deinit();
-    var page: contract.CapturedPage = .{
-        .bot_id = decoded.value.response.bot_id,
-        .evidence = decoded.value.response.evidence,
-    };
-    page.evidence.target = .{ .bytes = url };
-    return c.encodeOwned(Capture, a, .{ .response = page });
-}
-
-fn outcome(
-    a: std.mem.Allocator,
-    request: contract.Request,
-    page: contract.CapturedPage,
-) !contract.Reply {
-    var history = try replay(a, request, page.bot_id.bytes);
-    defer history.deinit();
-    try ingest(a, &history, request, page);
-    if (history.reason == null and !history.complete and history.pages_left == 0)
-        history.reason = .budget;
-    if (history.reason == null and !history.complete) return .{ .next = page };
-    return .{ .done = switch (history.finding()) {
-        .present => |ts| .{ .found = .{ .timestamp = .{ .bytes = try a.dupe(u8, ts) } } },
-        .not_observed => .{ .not_observed = .{
-            .oldest = request.audit.oldest,
-            .latest = request.audit.latest orelse return error.InvalidAuditFinding,
-            .canary = request.audit.canary.?.receipt,
-        } },
-        .inconclusive => |reason| .{ .inconclusive = .{ .bytes = @tagName(reason) } },
-    } };
-}
-
-pub fn interpret(
-    ctx: registry.ProjectionContext,
-    request_bytes: []const u8,
-    prepared_bytes: []const u8,
-    captured_bytes: []const u8,
-) !registry.Projection {
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const expected = try prepare(ctx, request_bytes);
-    defer ctx.allocator.free(expected);
-    if (!std.mem.eql(u8, expected, prepared_bytes)) return error.InvalidPrepared;
-    const request = try c.decodeOwned(contract.Request, a, expected);
-    const capture = try c.decodeOwned(Capture, a, captured_bytes);
-    const reply: contract.Reply = switch (capture.value) {
-        .rejected => |value| blk: {
-            if (!std.meta.eql(value.request_digest, preparation.hash(expected)))
-                return error.InvalidCapture;
-            break :blk .{ .done = .{ .inconclusive = value.reason } };
+fn initialLineage(a: std.mem.Allocator, audit: t.LineageAudit, bot: []const u8) !slack.HistoryAudit {
+    if (audit.page_limit == 0 or audit.destination.account.bytes.len == 0)
+        return error.InvalidAudit;
+    return slack.HistoryAudit.initLineage(
+        a,
+        preparation.binding(audit.destination, bot),
+        &std.fmt.bytesToHex(audit.lineage, .lower),
+        audit.oldest.bytes,
+        if (audit.latest) |latest| latest.bytes else null,
+        .{
+            .pages = audit.page_limit,
+            .messages = try std.math.mul(usize, audit.page_limit, 100),
+            .page_bytes = page_bytes_max,
         },
-        .response => |page| try outcome(a, request.value, page),
+    );
+}
+
+fn Handler(comptime lineage: bool) type {
+    const Contract = if (lineage) lineage_contract else contract;
+    const Audit = if (lineage) t.LineageAudit else t.Audit;
+    return struct {
+        const Self = @This();
+        const initialHistory = if (lineage) initialLineage else initial;
+
+        fn destinationOf(audit: Audit) t.Destination {
+            return if (lineage) audit.destination else audit.delivery.destination;
+        }
+
+        pub fn declaration() native.Declaration {
+            return .{
+                .identity = Contract.identity,
+                .resource_role = "read",
+                .kind = .leaf,
+                .background = true,
+                .payload_schema = requestSchema,
+                .resume_schema = replySchema,
+                .capture = .{
+                    .dependencies = registry.opaqueProjection,
+                    .prepare = Self.prepare,
+                    .acquire = Self.acquire,
+                    .interpret = Self.interpret,
+                },
+            };
+        }
+
+        fn requestSchema(a: std.mem.Allocator) ![]u8 {
+            return native.values.schemaBytes(Contract.Request, a);
+        }
+
+        fn replySchema(a: std.mem.Allocator) ![]u8 {
+            return native.values.schemaBytes(Contract.Reply, a);
+        }
+
+        pub fn prepare(ctx: registry.ProjectionContext, bytes: []const u8) ![]u8 {
+            var decoded = try c.decodeOwned(Contract.Request, ctx.allocator, bytes);
+            defer decoded.deinit();
+            return c.encodeOwned(Contract.Request, ctx.allocator, decoded.value);
+        }
+
+        pub fn ingest(
+            a: std.mem.Allocator,
+            history: *slack.HistoryAudit,
+            request: Contract.Request,
+            page: contract.CapturedPage,
+        ) !void {
+            if (!std.mem.eql(u8, history.binding.bot_id, page.bot_id.bytes))
+                return error.InvalidCapture;
+            const bytes = try c.encodeOwned(Contract.Request, a, request);
+            defer a.free(bytes);
+            const url = try target(a, history.request());
+            defer a.free(url);
+            const evidence = page.evidence;
+            if (!std.meta.eql(evidence.request_digest, preparation.hash(bytes)) or
+                !std.meta.eql(evidence.body_digest, preparation.hash(evidence.body.bytes)) or
+                !std.mem.eql(u8, evidence.target.bytes, url)) return error.InvalidCapture;
+            if (!evidence.identity_encoding) {
+                history.reason = .malformed;
+                return;
+            }
+            try history.ingest(history.request(), .{
+                .status = evidence.status,
+                .body = evidence.body.bytes,
+            });
+        }
+
+        fn replay(
+            a: std.mem.Allocator,
+            request: Contract.Request,
+            bot: []const u8,
+        ) !slack.HistoryAudit {
+            var history = try replayRetained(a, request, bot);
+            errdefer history.deinit();
+            if (history.complete or history.reason != null or history.pages_left == 0)
+                return error.InvalidAudit;
+            return history;
+        }
+
+        pub fn replayRetained(
+            a: std.mem.Allocator,
+            request: Contract.Request,
+            bot: []const u8,
+        ) !slack.HistoryAudit {
+            if (request.pages.items.len > request.audit.page_limit) return error.InvalidAudit;
+            var history = try initialHistory(a, request.audit, bot);
+            errdefer history.deinit();
+            for (request.pages.items, 0..) |page, index| {
+                if (history.complete or history.reason != null) return error.InvalidAudit;
+                var prefix = request;
+                prefix.pages.items = request.pages.items[0..index];
+                try ingest(a, &history, prefix, page);
+            }
+            return history;
+        }
+
+        pub fn requestTarget(
+            a: std.mem.Allocator,
+            request: Contract.Request,
+            bot: []const u8,
+        ) ![]u8 {
+            var history = try replay(a, request, bot);
+            defer history.deinit();
+            return target(a, history.request());
+        }
+
+        pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
+            ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
+            var request = try c.decodeOwned(Contract.Request, ctx.allocator, bytes);
+            defer request.deinit();
+            const env: *const Environment = @ptrCast(@alignCast(ctx.environment orelse
+                return reject(ctx.allocator, bytes, "binding")));
+            const destination = env.destination orelse
+                return reject(ctx.allocator, bytes, "binding");
+            if (!sameDestination(destination, destinationOf(request.value.audit)) or
+                !std.mem.eql(u8, env.http.account, destination.account.bytes) or
+                !std.mem.eql(u8, env.http.origin, "https://slack.com") or
+                ctx.authority.revoked or !ctx.authority.disclosure)
+                return reject(ctx.allocator, bytes, "binding");
+            const url = Self.requestTarget(ctx.allocator, request.value, env.bot_id) catch |err| {
+                if (err == error.OutOfMemory) return .{ .definitely_not_sent = err };
+                return reject(ctx.allocator, bytes, "invalid_audit");
+            };
+            defer ctx.allocator.free(url);
+            var http = transport.prepare(ctx.allocator, env.http, .{
+                .method = .GET,
+                .url = url,
+                .headers = &.{.{ .name = "User-Agent", .value = "paredros/0.0.1" }},
+            }) catch |err| {
+                if (err == error.OutOfMemory) return .{ .definitely_not_sent = err };
+                return reject(ctx.allocator, bytes, "binding");
+            };
+            defer http.deinit();
+            ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
+            return switch (transport.execute(ctx.allocator, ctx.io, env.http, &http)) {
+                .definitely_not_sent => |err| .{ .definitely_not_sent = err },
+                .unknown => |err| .{ .unknown = err },
+                .captured => |captured| retain(ctx, bytes, env.bot_id, captured),
+            };
+        }
+
+        fn retain(
+            ctx: registry.Context,
+            bytes: []const u8,
+            bot: []const u8,
+            owned: transport.Capture,
+        ) registry.Acquisition {
+            var captured = owned;
+            defer captured.deinit();
+            const encoded = Self.captureBytes(
+                ctx.allocator,
+                bytes,
+                bot,
+                captured,
+                std.Io.Clock.real.now(ctx.io).toMilliseconds(),
+            ) catch |err|
+                return .{ .unknown = err };
+            return .{ .captured = encoded };
+        }
+
+        pub fn captureBytes(
+            a: std.mem.Allocator,
+            bytes: []const u8,
+            bot: []const u8,
+            captured: transport.Capture,
+            captured_ms: i64,
+        ) ![]u8 {
+            var request = try c.decodeOwned(Contract.Request, a, bytes);
+            defer request.deinit();
+            const url = try Self.requestTarget(a, request.value, bot);
+            defer a.free(url);
+            const notification_bytes = try notification.captureBytes(
+                a,
+                bytes,
+                bot,
+                captured,
+                captured_ms,
+            );
+            defer a.free(notification_bytes);
+            var decoded = try c.decodeOwned(notification.Capture, a, notification_bytes);
+            defer decoded.deinit();
+            var page: contract.CapturedPage = .{
+                .bot_id = decoded.value.response.bot_id,
+                .evidence = decoded.value.response.evidence,
+            };
+            page.evidence.target = .{ .bytes = url };
+            return c.encodeOwned(Capture, a, .{ .response = page });
+        }
+
+        fn outcome(
+            a: std.mem.Allocator,
+            request: Contract.Request,
+            page: contract.CapturedPage,
+        ) !Contract.Reply {
+            var history = try replay(a, request, page.bot_id.bytes);
+            defer history.deinit();
+            try ingest(a, &history, request, page);
+            if (history.reason == null and !history.complete and history.pages_left == 0)
+                history.reason = .budget;
+            if (history.reason == null and !history.complete) return .{ .next = page };
+            if (lineage) {
+                return .{ .done = if (history.reason) |reason|
+                    .{ .inconclusive = .{ .bytes = @tagName(reason) } }
+                else if (history.latest == null)
+                    .{ .inconclusive = .{ .bytes = "moving_window" } }
+                else
+                    .complete };
+            } else {
+                return .{ .done = switch (history.finding()) {
+                    .present => |ts| .{ .found = .{ .timestamp = .{ .bytes = try a.dupe(u8, ts) } } },
+                    .not_observed => .{ .not_observed = .{
+                        .oldest = request.audit.oldest,
+                        .latest = request.audit.latest orelse return error.InvalidAuditFinding,
+                        .canary = request.audit.canary.?.receipt,
+                    } },
+                    .inconclusive => |reason| .{ .inconclusive = .{ .bytes = @tagName(reason) } },
+                } };
+            }
+        }
+
+        pub fn interpret(
+            ctx: registry.ProjectionContext,
+            request_bytes: []const u8,
+            prepared_bytes: []const u8,
+            captured_bytes: []const u8,
+        ) !registry.Projection {
+            var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const expected = try Self.prepare(ctx, request_bytes);
+            defer ctx.allocator.free(expected);
+            if (!std.mem.eql(u8, expected, prepared_bytes)) return error.InvalidPrepared;
+            const request = try c.decodeOwned(Contract.Request, a, expected);
+            const capture = try c.decodeOwned(Capture, a, captured_bytes);
+            const reply: Contract.Reply = switch (capture.value) {
+                .rejected => |value| blk: {
+                    if (!std.meta.eql(value.request_digest, preparation.hash(expected)))
+                        return error.InvalidCapture;
+                    break :blk .{ .done = .{ .inconclusive = value.reason } };
+                },
+                .response => |page| try outcome(a, request.value, page),
+            };
+            return .{ .reply = try c.encodeOwned(Contract.Reply, ctx.allocator, reply) };
+        }
     };
-    return .{ .reply = try c.encodeOwned(contract.Reply, ctx.allocator, reply) };
 }

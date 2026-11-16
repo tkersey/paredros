@@ -27,6 +27,7 @@ pub const Application = struct {
         method.codecDeclaration(),
         @import("experiment_external.zig").declaration(),
         @import("experiment_external.zig").clockDeclaration(),
+        lineageDeclaration(),
     };
 };
 
@@ -40,6 +41,16 @@ fn historyDeclaration() native.Declaration {
     var declaration = history.declaration();
     declaration.capture.?.acquire = acquireHistory;
     return declaration;
+}
+
+fn lineageDeclaration() native.Declaration {
+    var declaration = history.lineageDeclaration();
+    declaration.capture.?.acquire = acquireLineage;
+    return declaration;
+}
+
+fn acquireLineage(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
+    return history.lineageDeclaration().capture.?.acquire(route(ctx, "slack"), bytes);
 }
 
 fn modelDeclaration() native.Declaration {

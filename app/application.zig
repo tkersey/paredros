@@ -25,6 +25,7 @@ const Functions = struct {
     step: step.Function,
     turn: turn.Function,
     audit: audit.Function,
+    lineage_audit: audit.Lineage.EntryFunction,
     experiment: experiment.Function,
 };
 
@@ -42,6 +43,9 @@ pub const Application = struct {
             history.Reply,
             history.identity,
         );
+        const lineage_reader = try audit.Lineage.emit(c);
+        const lineage_contract = @import("lineage_audit_contract.zig");
+        const lineage_read = try operation(c, lineage_reader, lineage_contract.Request, lineage_contract.Reply, lineage_contract.identity);
         const method_ops = try method.declare(c);
         const render_effects = .{ inference, method_ops.workspace, method_ops.codec };
         const retained = try method.emit(c, method_ops, completion, render_effects);
@@ -61,11 +65,12 @@ pub const Application = struct {
             ),
             .turn = try turn.emit(c, completion, .{inference}),
             .audit = history_reader,
+            .lineage_audit = lineage_reader,
             .experiment = try experiment.emit(c, experiment_ops, method_ops, completion, experiment_effects),
         };
         const ordinary = try dispatch(c, functions, .{
             github_read,          inference,            history_read, method_ops.workspace, method_ops.codec,
-            experiment_ops.codec, experiment_ops.clock,
+            experiment_ops.codec, experiment_ops.clock, lineage_read,
         });
         const published = try c.author.module(ordinary, try c.schema(t.Failure));
         const prefix = protean.notification.identity_prefix;
@@ -111,6 +116,7 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
     const directive = try b.caseOf(input, "directive");
     const delivery = try b.caseOf(input, "delivery");
     const inspect = try b.caseOf(input, "audit");
+    const lineage = try b.caseOf(input, "lineage_audit");
     const converse = try b.caseOf(input, "turn");
     const compare = try b.caseOf(input, "experiment");
     const member = try b.caseOf(input, "continuity_member");
@@ -175,6 +181,7 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
             "continuity_cut",
         )),
         .restore = try restore.ret(try preserve(c, restore.body(), restore.payload(), "restore")),
+        .lineage_audit = try lineage.ret(try invoke(c, lineage.body(), functions.lineage_audit, lineage.payload(), "lineage_audit")),
     });
     try c.author.define(function, try b.ret(result));
     return function;
