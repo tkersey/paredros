@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "current_uid": 1000,
+  "namespace_path": "/var/lib/paredros/state",
+  "control_socket_path": "/run/paredros/control.sock",
+  "backup_directory": "/var/lib/paredros/backups",
+  "mode": "offline",
+  "repository": {
+    "account": "github-owner",
+    "id": 1,
+    "owner": "owner",
+    "name": "repository",
+    "ref": "refs/heads/main"
+  },
+  "slack": {
+    "account": "slack-owner",
+    "app": "A1",
+    "workspace": "T1",
+    "operator": "U1",
+    "channel": "D1",
+    "bot_id": "B1"
+  }
+}

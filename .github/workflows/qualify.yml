@@ -1,0 +1,119 @@
+name: Offline qualification
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - run: zig build test -Dnative=false -Doptimize=safe --summary all
+  build:
+    name: Build / ${{ matrix.part }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [authority, providers, transitions, rendering, methods, continuity, product, crash]
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache/global
+      PART: ${{ matrix.part }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .zig-cache
+          key: paredros-linux-x86_64-zig0.17.1-safe-${{ matrix.part }}-${{ hashFiles('**/*.zig', '**/*.zon') }}
+      - run: zig build setup
+      - name: Compile selected artifact
+        run: |
+          case "$PART" in
+            product) zig build -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe --summary all ;;
+            crash) zig build build-crash-tests -Dcrash-tests=true -Doptimize=safe --summary all ;;
+            *) zig build build-native-tests -Dnative-tests=true -Dnative-group="$PART" -Doptimize=safe --summary all ;;
+          esac
+          tar -C zig-out -czf "$RUNNER_TEMP/$PART.tar.gz" .
+          sha256sum "$RUNNER_TEMP/$PART.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.part }}
+          path: ${{ runner.temp }}/${{ matrix.part }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+  execute:
+    name: Execute / ${{ matrix.part }}
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: authority, count: 85}
+          - {part: providers, count: 39}
+          - {part: transitions, count: 48}
+          - {part: rendering, count: 59}
+          - {part: methods, count: 20}
+          - {part: continuity, count: 37}
+          - {part: product, count: 5}
+          - {part: crash, count: 12}
+    env:
+      PART: ${{ matrix.part }}
+      EXPECTED: ${{ matrix.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.part }}
+          path: ${{ runner.temp }}/artifacts
+      - if: matrix.part == 'product' || matrix.part == 'crash'
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Execute every selected check
+        run: |
+          mkdir -p zig-out
+          tar -C zig-out -xzf "$RUNNER_TEMP/artifacts/$PART.tar.gz"
+          case "$PART" in
+            product) uv run --no-project python tests/product_smoke.py zig-out/bin/paredros --report "$RUNNER_TEMP/report.json" ;;
+            crash) uv run --no-project python tests/process_crash.py zig-out/test-tools/paredros-crash-tests --report "$RUNNER_TEMP/report.json" ;;
+            *)
+              set -o pipefail
+              zig-out/test-tools/native/"$PART" 2>&1 | tee "$RUNNER_TEMP/tests.log"
+              grep -Fxq "All $EXPECTED tests passed." "$RUNNER_TEMP/tests.log"
+              ;;
+          esac
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: results-${{ matrix.part }}
+          path: |
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/tests.log
+          if-no-files-found: ignore
+          retention-days: 7
