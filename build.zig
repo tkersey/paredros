@@ -224,11 +224,20 @@ const ProductAssets = struct {
 };
 
 fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
+    const emitted = b.option(
+        std.Build.LazyPath,
+        "emitted-application",
+        "Verified emitted application directory",
+    );
     const result = protean_build.addNativeSystem(b, dependency, .{
         .name = "paredros",
         .entry = b.path("main.zig"),
         .environment = b.path("environment.zig"),
-        .application = .{ .source = .{
+        .application = if (emitted) |directory| .{ .emitted = .{
+            .image = directory.path(b, "program.bpi3"),
+            .application = directory.path(b, "application.json"),
+            .types = b.path("app/types.zig"),
+        } } else .{ .source = .{
             .definition = b.path("app/definition.zig"),
             .types = b.path("app/types.zig"),
         } },
@@ -242,6 +251,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     const protean = dependency.module("protean_native_types");
     environment.addImport("protean", protean);
     environment.addImport("horos", protean.import_table.get("horos").?);
+    prepareNative(b, result.executable, result.assets);
     b.addNamedLazyPath("paredros-image", result.assets.image);
     b.addNamedLazyPath("paredros-application", result.assets.application);
     b.addNamedLazyPath("paredros-manifest", result.manifest);
@@ -251,4 +261,28 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
         .manifest = result.manifest,
         .symbols = symbols,
     };
+}
+
+fn prepareNative(
+    b: *std.Build,
+    executable: *std.Build.Step.Compile,
+    assets: protean_build.NativeAssets,
+) void {
+    const prepare = b.step("prepare-native", "Materialize application and native build inputs");
+    for (executable.root_module.getGraph().modules) |module| {
+        if (module.root_source_file) |source| source.addStepDependencies(prepare);
+        for (module.link_objects.items) |object| switch (object) {
+            .other_step => |linked| prepare.dependOn(&linked.step),
+            .static_path => |source| source.addStepDependencies(prepare),
+            else => {},
+        };
+    }
+    const outputs = .{
+        .{ assets.image, "prepared/program.bpi3" },
+        .{ assets.application, "prepared/application.json" },
+        .{ assets.types, "prepared/types.zig" },
+    };
+    inline for (outputs) |output| {
+        prepare.dependOn(&b.addInstallFile(output[0], output[1]).step);
+    }
 }
