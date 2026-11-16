@@ -1,0 +1,18 @@
+.{
+    .name = .paredros,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .protean = .{
+            .url = "git+https://github.com/tkersey/protean#df3f8c9ab496cb395b03730edc17fc39b9629b19",
+            .hash = "protean-9.1.0-dBg3hIDXdwBnvThVe9ygkwpliAAJ15uo0Rv2DfNhXMrf",
+        },
+    },
+    .paths = .{
+        "build.zig",               "build.zig.zon",              "main.zig",                  "environment.zig",             "test.zig",
+        "native_test.zig",         "native_authority_test.zig",  "native_providers_test.zig", "native_transitions_test.zig", "native_rendering_test.zig",
+        "native_methods_test.zig", "native_continuity_test.zig", "crash_test.zig",            "app",                         "native",
+        "tests",                   "docs",                       "scale_test.zig",            "packaging",                   "README.md",
+    },
+    .fingerprint = 0x3bd3d6db0831e453,
+}
