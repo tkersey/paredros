@@ -52,20 +52,18 @@ pub fn build(b: *std.Build) void {
     }
     if (crash_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig");
-        const checks = b.addTest(.{
+        const checks = addSelfHostedTest(b, .{
             .filters = &.{"process crash owner fixture"},
             .root_module = root,
-            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-crash-tests");
         b.step("build-crash-tests", "Build process-death witnesses").dependOn(&install.step);
     }
     if (scale_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "scale_test.zig");
-        const checks = b.addTest(.{
+        const checks = addSelfHostedTest(b, .{
             .filters = &.{"native scale measurement"},
             .root_module = root,
-            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-scale");
         b.step("build-scale-tests", "Build native storage measurements").dependOn(&install.step);
@@ -94,14 +92,14 @@ fn nativeTests(
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
-        const checks = b.addTest(.{
+        const checks = addSelfHostedTest(b, .{
             .filters = if (partition) |part|
                 nativePartitionFilters(group, part)
             else if (filter) |value| &.{value} else &.{},
             .root_module = root,
-            .use_llvm = if (linuxX86(root.resolved_target.?)) false else null,
         });
         const run = b.addRunArtifact(checks);
+        if (checks.test_runner != null) run.expectExitCode(0);
         run.has_side_effects = true;
         execute.dependOn(&run.step);
         const artifact = if (partition) |part|
@@ -190,12 +188,30 @@ fn dependencyGraph(
     });
 }
 
-fn linuxX86(target: std.Build.ResolvedTarget) bool {
-    return target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
+fn addSelfHostedTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
+    var selected = options;
+    selected.use_llvm = false;
+    const target = selected.root_module.resolved_target.?.result;
+    if (target.os.tag == .macos and target.cpu.arch == .aarch64) {
+        // The stock simple runner omits the environment and per-test leak checks.
+        // Select the pinned compiler's full terminal entry for native macOS.
+        const runner = b.addSystemCommand(&.{
+            "sed",
+            \\/^pub fn main(/,/^}/c\
+            \\pub fn main(init: std.process.Init.Minimal) void { mainTerminal(init); }
+        });
+        runner.addFileArg2(b.graph.path(.zig_lib, "compiler/test_runner.zig"), .{});
+        selected.test_runner = .{
+            .path = runner.captureStdOut(.{ .basename = "test_runner.zig" }),
+            .mode = .simple,
+        };
+    }
+    return b.addTest(selected);
 }
 
 fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
     const bootstrap = b.addExecutable(.{
+        .use_llvm = false,
         .name = "paredros-dependencies",
         .root_module = b.createModule(.{
             .root_source_file = dependency.path("tools/native/dependencies.zig"),
@@ -240,11 +256,12 @@ fn testStep(
     name: []const u8,
     description: []const u8,
 ) *std.Build.Step.Compile {
-    const checks = b.addTest(.{
+    const checks = addSelfHostedTest(b, .{
         .filters = if (filter) |value| &.{value} else &.{},
         .root_module = root,
     });
     const run = b.addRunArtifact(checks);
+    if (checks.test_runner != null) run.expectExitCode(0);
     run.has_side_effects = true;
     b.step(name, description).dependOn(&run.step);
     return checks;
@@ -313,8 +330,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
             .types = b.path("app/types.zig"),
         } },
     });
-    if (linuxX86(result.executable.root_module.resolved_target.?))
-        result.executable.use_llvm = false;
+    result.executable.use_llvm = false;
     const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     if (symbols) {
         result.executable.root_module.strip = false;
