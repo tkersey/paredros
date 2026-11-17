@@ -210,14 +210,19 @@ fn oidFunction(c: protean.Context) !OidText {
         "some",
         try failure(c),
     );
-    const digit = try between(active, byte, '0', '9');
-    const alpha = try either(
-        active,
-        try between(active, byte, 'a', 'f'),
-        try between(active, byte, 'A', 'F'),
+    const table = comptime blk: {
+        var values: [256]u8 = @splat(0);
+        for ("0123456789abcdefABCDEF") |digit| values[digit] = digit;
+        break :blk values;
+    };
+    const position = try active.convertInteger(try c.schema(u64), byte, .{});
+    const digit = try active.variantPayload(
+        try active.blobByte(try literal(c, &table), position),
+        "some",
+        try failure(c),
     );
-    try a.require(c, active, try either(active, digit, alpha), "render_invalid_oid");
-    const scalar = try active.convertInteger(try c.schema(u32), byte, .{});
+    try a.require(c, active, try active.less(try active.constant(u8, 0), digit), "render_invalid_oid");
+    const scalar = try active.convertInteger(try c.schema(u32), digit, .{});
     const next = try active.call(function, .{
         .oid = oid,
         .index = try add(c, active, index, try active.constant(u64, 1)),
@@ -231,14 +236,6 @@ fn oidFunction(c: protean.Context) !OidText {
         try ended.ret(text),
     )));
     return function;
-}
-
-fn between(b: anytype, byte: a.Value(u8), lower: u8, upper: u8) !a.Value(bool) {
-    return b.select(
-        try b.less(byte, try b.constant(u8, lower)),
-        try b.constant(bool, false),
-        try b.less(byte, try b.constant(u8, upper + 1)),
-    );
 }
 
 fn oidValue(

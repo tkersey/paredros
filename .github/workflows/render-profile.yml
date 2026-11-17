@@ -1,56 +1,43 @@
-name: Measure the retained rendering binary
+name: Compare hexadecimal rendering on Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
 permissions:
+  contents: read
   actions: read
 jobs:
-  measure:
+  compare:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, lookup]
     steps:
-      - name: Authenticate the retained build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Restore authenticated Linux build inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/tkersey/paredros/actions/artifacts/14285006452/zip > rendering.zip
-          echo 'f8b1ad77a162dad44e3e2ff595d6af71786c9503fe6190b444df57b1e4bd94ea  rendering.zip' | sha256sum --check --strict
-          unzip -q rendering.zip
-          tar -xzf rendering.tar.gz
-          file test-tools/native/rendering
-          lscpu
-      - name: Sample the first substantive case
+          gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
+          echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
+          unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xf -
+      - if: matrix.variant == 'baseline'
+        run: git show f4938267f6d979308da62692dfe311037d61ad04:app/render_frame.zig > app/render_frame.zig
+      - name: Compile the focused test with the self-hosted backend
         run: |
-          node --input-type=module <<'JS'
-          import {spawn} from 'node:child_process';
-          import {readFileSync} from 'node:fs';
-          import {createInterface} from 'node:readline';
-          import assert from 'node:assert/strict';
-          const child = spawn('./test-tools/native/rendering', {stdio:['ignore','ignore','pipe']});
-          const done = new Promise(resolve => child.once('close', resolve));
-          const started = performance.now();
-          function sample() {
-            const fields = readFileSync('/proc/' + child.pid + '/stat', 'utf8').split(' ');
-            const io = readFileSync('/proc/' + child.pid + '/io', 'utf8').trim();
-            console.log(JSON.stringify({seconds:(performance.now()-started)/1000,
-              userTicks:fields[13], systemTicks:fields[14], minorFaults:fields[9],
-              majorFaults:fields[11], residentPages:fields[23], io}));
-          }
-          const timer = setInterval(sample, 10000);
-          let witnessed = false;
-          try {
-            for await (const line of createInterface({input:child.stderr})) {
-              console.log(line);
-              if (line.includes('native render frame retains truthful full count and oldest ordered bounded entries...OK')) {
-                sample();
-                witnessed = true;
-                break;
-              }
-            }
-          } finally {
-            clearInterval(timer);
-            child.kill();
-            await done;
-          }
-          assert(witnessed, 'rendering case did not finish');
-          JS
+          zig test -fno-llvm -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline --dep application_types --dep protean_native --dep protean_contracts --dep protean --dep horos -Mroot=native_rendering_test.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep protean --dep protean_contracts -Mapplication_types=app/types.zig .zig-cache/o/15fcb669fcdc96cd2e2be147fe060c77/libprotean-native-c.a -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline -I .zig-cache/o/31862b6f660dd84890962575457bffc9 --dep kosmos --dep horos_data --dep protean_contracts --dep horos --dep protean --dep _native_dependency_admission --dep native_c --dep native_options -Mprotean_native=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/runtime/native/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mprotean_contracts=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/contracts.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos --dep horos_data --dep protean_contracts -Mprotean=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/protean.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mhoros=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data --dep horos --dep packaged_runtime -Mkosmos=.protean-native/inputs/kosmos/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mhoros_data=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/data/root.zig -M_native_dependency_admission=.zig-cache/o/a05536e176de12acf3398b34b179c597/native_dependency_admission.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mnative_c=.zig-cache/o/c1774b413f703d637f992daf9e513a37/native_c.zig -Mnative_options=.zig-cache/o/358b8ae923fbc2f6fdc6b74bcb23b219/options.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mpackaged_runtime=.zig-cache/o/7f17a83969290ee174dc1066eb4111eb/runtime.zig -lc --cache-dir .zig-cache --global-cache-dir .zig-cache --build-root . --name test --zig-lib-dir /opt/hostedtoolcache/zig/0.17.1/x64/lib/ --test-no-exec -femit-bin=rendering-case --test-filter 'native render frame retains truthful full count and oldest ordered bounded entries'
+      - name: Measure rendering and check the outcome
+        run: |
+          set -o pipefail
+          /usr/bin/time -v ./rendering-case 2>&1 | tee measured.log
+          grep -Fxq 'All 2 tests passed.' measured.log
