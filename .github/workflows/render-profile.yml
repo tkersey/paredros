@@ -1,4 +1,4 @@
-name: Measure both non-LLVM Linux backends on the same rendering case
+name: Run the Linux GCC rendering case with the pinned musl statx implementation
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -10,89 +10,39 @@ env:
   ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
   ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
-  compile:
+  measure:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    outputs:
-      sha256: ${{ steps.seal.outputs.sha256 }}
     steps:
-      - &checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - &zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.17.1'
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
-      - &restore
-        name: Restore authenticated Linux build inputs
+      - name: Restore identical source and native archive from the matched comparison
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
-          echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
-          unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
-      - &compiler
-        name: Install the native musl C compiler
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - name: Build the unchanged rendering test and emit its C representation
-        env:
-          WITNESS: native render frame retains truthful full count and oldest ordered bounded entries
-        run: |
-          set -o pipefail
-          zig build build-native-tests -Dnative-tests=true -Dnative-group=rendering -Dtest-product-assets=false -Dtest-filter="$WITNESS" -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee compile.log
-          uv run --no-project python .github/emit-gcc-comparison.py
-      - name: Seal compiler inputs
-        id: seal
-        run: |
-          tar -cf - -C compiler-comparison . | zstd -T2 -1 -o comparison.tar.zst
-          echo "sha256=$(sha256sum comparison.tar.zst | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: compiler-comparison
-          path: comparison.tar.zst
-          compression-level: 0
-          retention-days: 1
-  measure:
-    needs: compile
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        backend: [direct, gcc]
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: compiler-comparison
-      - name: Verify compiler inputs
-        env:
-          SHA256: ${{ needs.compile.outputs.sha256 }}
-        run: |
-          echo "$SHA256  comparison.tar.zst" | sha256sum --check --strict
-          zstd -dc comparison.tar.zst | tar -xpf -
-      - if: matrix.backend == 'gcc'
-        name: Compile Zig-generated C with musl GCC
+          gh api repos/tkersey/paredros/actions/artifacts/14372576096/zip > inputs.zip
+          echo '740b4545c8dd2792cd18650d60e953ec5e056a9a1f3f9af046e05e9002ed4039  inputs.zip' | sha256sum --check --strict
+          unzip -p inputs.zip comparison.tar.zst | zstd -dc | tar -xpf -
+      - name: Link the pinned musl statx and execute the same checked case
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
           flags=(-std=gnu17 -fno-strict-aliasing -fno-ipa-modref -Wno-builtin-declaration-mismatch -fmax-errors=8 -march=x86-64 -mtune=generic -I.)
+          ziglib=$(dirname "$(realpath "$(command -v zig)")")/lib
+          musl="$ziglib/libc/musl"
+          musl-gcc -std=c99 -O2 -I"$musl/arch/x86_64" -I"$musl/arch/generic" -I"$musl/src/include" -I"$musl/src/internal" -I"$ziglib/libc/include/x86_64-linux-musl" -I"$ziglib/libc/include/generic-musl" -c "$musl/src/linux/statx.c" -o statx.o
+          printf '%s\n' 'int main(void) { return 0; }' | musl-gcc -static -x c - -x none statx.o -o check-statx
+          ./check-statx
           musl-gcc "${flags[@]}" -O2 -fno-builtin -c compiler-rt.c -o compiler-rt.o
           ar rcs libzig-rt.a compiler-rt.o
           musl-gcc "${flags[@]}" -O1 -c render.c -o render.o
           aliases=()
           while read -r name; do aliases+=("-Wl,--undefined=$name,--defsym=protean_posix_$name=$name"); done < aliases
-          musl-gcc -static render.o libprotean-native-c.a libzig-rt.a "${aliases[@]}" -lm -lpthread -o gcc
-      - name: Execute and time the complete selected case
-        env:
-          BACKEND: ${{ matrix.backend }}
-        run: |
+          musl-gcc -static render.o statx.o libprotean-native-c.a libzig-rt.a "${aliases[@]}" -lm -lpthread -o gcc
           set -o pipefail
-          /usr/bin/time -f 'elapsed=%e rss=%M' "./$BACKEND" 2>&1 | tee observed.log
+          /usr/bin/time -f 'elapsed=%e rss=%M' ./gcc 2>&1 | tee observed.log
           grep -Fxq 'All 2 tests passed.' observed.log
