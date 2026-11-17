@@ -43,7 +43,10 @@ jobs:
       - name: Sample the focused test
         run: |
           set -eu
-          command -v gdb
+          if ! command -v gdb; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends gdb
+          fi
           ./witness > test.log 2>&1 &
           witness_pid=$!
           trap 'kill "$witness_pid" 2>/dev/null || true' EXIT
