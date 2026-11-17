@@ -37,7 +37,7 @@ pub const Result = struct {
 pub const Function = a.Function(struct { input: Input }, Result);
 const Frame = struct { text: Text, listed_oids: Oids, invalid_highlights: u64, abbreviated: bool };
 const ClipResult = struct { text: cts.Utf8, abbreviated: bool };
-const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, output: cts.Utf8 };
+const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, start: u64, output: cts.Utf8 };
 const Clip = a.Function(struct { state: ClipInput }, ClipResult);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
@@ -90,6 +90,7 @@ fn clipped(
         .text = try widen(c, b, value),
         .index = try b.constant(u64, 0),
         .budget = try b.constant(u64, budget - 3),
+        .start = try b.constant(u64, 0),
         .used = try b.constant(u64, 0),
         .output = try literal(c, ""),
     }) });
@@ -104,7 +105,7 @@ fn clipFunction(c: protean.Context) !Clip {
     const active = try b.branch();
     const ended = try b.branch();
     const done = try ended.product(try c.schema(ClipResult), .{
-        .text = try b.field(state, "output"),
+        .text = try clipPrefix(c, ended, state),
         .abbreviated = try b.constant(bool, false),
     });
     const result = try b.conditional(
@@ -162,28 +163,31 @@ fn clipScalar(
     const used = try add(c, b, try b.field(state, "used"), try escapedCost(b, byte, length));
     const fits = try b.branch();
     const full = try b.branch();
-    const slice = try fits.blobSlice(
-        try c.schema(cts.Utf8),
-        text,
-        index,
-        end,
-        .{ .capacity = try failure(c), .invalid_utf8 = try failure(c) },
-    );
     const control = try either(
         fits,
         try fits.less(byte, try fits.constant(u8, 32)),
         try fits.equal(byte, try fits.constant(u8, 127)),
     );
-    const clean = try fits.select(control, try literal(c, " "), slice);
-    const next = try fits.update(state, .{
-        .index = end,
-        .used = used,
-        .output = try widen(c, fits, try join(c, fits, .{ try b.field(state, "output"), clean })),
+    const replace = try fits.branch();
+    const keep = try fits.branch();
+    const pending = try fits.update(state, .{ .index = end, .used = used });
+    const cleaned = try replace.update(pending, .{
+        .start = end,
+        .output = try replace.blobConcat(
+            try c.schema(cts.Utf8),
+            try clipPrefix(c, replace, state),
+            try literal(c, " "),
+            try failure(c),
+        ),
     });
+    const next = try fits.conditional(control, try replace.ret(cleaned), try keep.ret(pending));
     const truncated = try full.product(try c.schema(ClipResult), .{
-        .text = try widen(c, full, try join(c, full, .{
-            try b.field(state, "output"), try literal(c, "..."),
-        })),
+        .text = try full.blobConcat(
+            try c.schema(cts.Utf8),
+            try clipPrefix(c, full, state),
+            try literal(c, "..."),
+            try failure(c),
+        ),
         .abbreviated = try full.constant(bool, true),
     });
     return b.conditional(
@@ -191,6 +195,19 @@ fn clipScalar(
         try full.ret(truncated),
         try fits.ret(try fits.call(function, .{ .state = next })),
     );
+}
+
+// Bytes between start and index are complete, unchanged UTF-8 scalars.
+// Copy the span only when it ends or a control byte needs replacement.
+fn clipPrefix(c: protean.Context, b: anytype, state: a.Value(ClipInput)) !a.Value(cts.Utf8) {
+    const span = try b.blobSlice(
+        try c.schema(cts.Utf8),
+        try b.field(state, "text"),
+        try b.field(state, "start"),
+        try b.field(state, "index"),
+        .{ .capacity = try failure(c), .invalid_utf8 = try failure(c) },
+    );
+    return b.blobConcat(try c.schema(cts.Utf8), try b.field(state, "output"), span, try failure(c));
 }
 
 fn containsFunction(c: protean.Context) !Contains {
