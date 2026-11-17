@@ -1,4 +1,4 @@
-name: Verify the downstream native build graph on Linux
+name: Verify the downstream product and compiler manifest on Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -6,7 +6,7 @@ permissions:
   contents: read
   actions: read
 jobs:
-  continuity:
+  product:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
@@ -30,13 +30,19 @@ jobs:
           gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
           echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
-      - name: Exercise the downstream build graph with the candidate Protean changes
-        env:
-          WITNESS: native genesis retains exact fresh head and rejects invalid inputs across restart
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Build the product from authored source and verify its manifest
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
           cp -a zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP diagnostic-protean
           git apply --unidiff-zero --directory=diagnostic-protean .github/protean-build.patch
-          zig build test-native -Dnative-tests=true -Dnative-group=continuity -Dtest-product-assets=false -Dtest-filter="$WITNESS" -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee observed.log
-          grep -Eq '2/2 tests passed|2 tests passed' observed.log
+          zig build -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
+          zig-out/bin/paredros describe-build > manifest.json
+          jq -e '.compiler.backend == "self-hosted" and
+            .dependencies.sqlite.compiler.family == "gcc" and
+            (.dependencies.sqlite.compiler.toolchain_sha256 | test("^[0-9a-f]{64}$")) and
+            (.dependencies.sqlite.compile_flags | index("-O1") != null) and
+            (.dependencies.sqlite.posix_shim_compile_flags | index("-O2") != null)' manifest.json
+          uv run --no-project python tests/product_smoke.py zig-out/bin/paredros --report "$RUNNER_TEMP/report.json"
+          jq -e '.count == 5 and .live_services == false' "$RUNNER_TEMP/report.json"
