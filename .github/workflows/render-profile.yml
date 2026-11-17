@@ -1,123 +1,38 @@
-name: Verify the pinned Protean compiler selection on native Linux
+name: Measure independent cases from the retained native Linux executables
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
 permissions:
   contents: read
   actions: read
-env:
-  ZIG_DEBUG_CMD: '1'
-  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
-  ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
-  prepare:
+  measure:
+    name: Measure / ${{ matrix.case }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    outputs:
-      sha256: ${{ steps.seal.outputs.sha256 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: native public session serves two control clients while a worker is held}
+          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: native conversation retains maximal exact proposal body for CLI without a Slack button}
+          - {part: rendering, count: 63, artifact: 14374282865, digest: e6ec6d53fa5c08f16c7ed91b2283fae5169a6ab2c8a98a8aafea99687dc23ba0, case: native render frame budgets hostile escaping and all sections at their upper bounds}
+          - {part: transitions-second, count: 25, artifact: 14373294716, digest: 2e436cc682d6391402f724bdc6b7c3397cb70599317361ea38e429249aa91658, case: native settlements retain unrelated superseded malformed or unproven delivery evidence}
     steps:
-      - &checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - &zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: '0.17.1'
-          mirror: https://zigmirror.com
-          use-cache: false
-          use-tool-cache: true
-      - &restore
-        name: Restore authenticated Linux build inputs
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Run the selected original case with Zig's standard test server
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+          SHA256: ${{ matrix.digest }}
+          PART: ${{ matrix.part }}
+          CASE: ${{ matrix.case }}
+          COUNT: ${{ matrix.count }}
         run: |
-          gh api repos/tkersey/paredros/actions/artifacts/14374131920/zip > preparation.zip
-          echo '394ed18da33bbad88976d1dfca9d4f5f543fbfabec8c1541ec72b98cd6ed93f6  preparation.zip' | sha256sum --check --strict
-          unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
-      - &compiler
-        name: Install the native musl C compiler
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Emit the authored application
-        run: zig build prepare-native -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
-      - name: Seal the prepared application
-        id: seal
-        run: |
-          cmp app/types.zig zig-out/prepared/types.zig
-          tar -cf selected.tar -C zig-out/prepared program.bpi3 application.json types.zig
-          echo "sha256=$(sha256sum selected.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: selected-application
-          path: selected.tar
-          retention-days: 1
-  build:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    outputs:
-      sha256: ${{ steps.seal.outputs.sha256 }}
-    steps:
-      - *checkout
-      - *zig
-      - *restore
-      - *compiler
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: selected-application
-      - name: Compile against the verified emitted image
-        env:
-          SHA256: ${{ needs.prepare.outputs.sha256 }}
-        run: |
-          echo "$SHA256  selected.tar" | sha256sum --check --strict
-          mkdir selected
-          tar -xf selected.tar -C selected
-          cmp app/types.zig selected/types.zig
-          zig build -Dnative=true -Dtarget=x86_64-linux-musl -Demitted-application=selected -Doptimize=safe -j2 --verbose --summary all
-          zig-out/bin/paredros describe-build > manifest.json
-          jq -e '.compiler.backend == "self-hosted" and
-            .dependencies.sqlite.compiler.family == "gcc" and
-            (.dependencies.sqlite.compiler.toolchain_sha256 | test("^[0-9a-f]{64}$")) and
-            (.dependencies.sqlite.compile_flags | index("-O1") != null) and
-            (.dependencies.sqlite.posix_shim_compile_flags | index("-O2") != null)' manifest.json
-      - name: Seal the built executable
-        id: seal
-        run: |
-          tar -cf product.tar -C zig-out/bin paredros
-          echo "sha256=$(sha256sum product.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: selected-product
-          path: product.tar
-          retention-days: 1
-  smoke:
-    needs: build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - *checkout
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: selected-product
-      - name: Run the five product smoke cases
-        env:
-          SHA256: ${{ needs.build.outputs.sha256 }}
-        run: |
-          echo "$SHA256  product.tar" | sha256sum --check --strict
-          tar -xpf product.tar
-          uv run --no-project python tests/product_smoke.py ./paredros --report "$RUNNER_TEMP/report.json"
-          jq -e '.count == 5 and .live_services == false' "$RUNNER_TEMP/report.json"
-  contracts:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - *checkout
-      - *zig
-      - name: Run every source contract test against the pinned package
-        run: |
-          set -o pipefail
-          zig build test -Dnative=false -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee source.log
-          grep -Fq '106/106 tests passed' source.log
+          gh api "repos/tkersey/paredros/actions/artifacts/$ARTIFACT/zip" > binary.zip
+          echo "$SHA256  binary.zip" | sha256sum --check --strict
+          unzip -p binary.zip "$PART.tar.gz" | tar -xzf -
+          uv run --no-project --isolated python .github/measure-native-case.py "./test-tools/native/$PART" "$COUNT" "$CASE"
