@@ -1,0 +1,114 @@
+name: Run all native methods with the GNU-compiled application runtime on Linux
+on:
+  push:
+    branches: [diagnostic/render-cost-f493826]
+permissions:
+  contents: read
+  actions: read
+env:
+  ZIG_DEBUG_CMD: '1'
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+  ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - &zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - &restore
+        name: Restore authenticated Linux build inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/tkersey/paredros/actions/artifacts/14374131920/zip > preparation.zip
+          echo '394ed18da33bbad88976d1dfca9d4f5f543fbfabec8c1541ec72b98cd6ed93f6  preparation.zip' | sha256sum --check --strict
+          unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
+      - &compiler
+        name: Install the native musl C compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Emit the unfiltered methods suite and its complete application runtime
+        run: |
+          set -o pipefail
+          zig build build-native-tests -Dnative-tests=true -Dnative-group=methods -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee compile.log
+          uv run --no-project python .github/emit-gcc-comparison.py
+      - name: Seal compiler inputs
+        id: seal
+        run: |
+          tar -cf - -C compiler-comparison . | zstd -T2 -1 -o comparison.tar.zst
+          echo "sha256=$(sha256sum comparison.tar.zst | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: compiler-comparison
+          path: comparison.tar.zst
+          compression-level: 0
+          retention-days: 1
+  gcc:
+    needs: compile
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.link.outputs.sha256 }}
+    steps:
+      - *zig
+      - *compiler
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: compiler-comparison
+      - name: Build and link the checked methods executable with GNU musl GCC
+        id: link
+        env:
+          SHA256: ${{ needs.compile.outputs.sha256 }}
+        run: |
+          echo "$SHA256  comparison.tar.zst" | sha256sum --check --strict
+          zstd -dc comparison.tar.zst | tar -xpf -
+          echo 'c69e0c213f34af01002bdd649fd0a97af7cdb676e0809dcf4e24b18ebe3c9405  zig.h' | sha256sum --check --strict
+          flags=(-std=gnu17 -fno-strict-aliasing -fno-ipa-modref -Wno-builtin-declaration-mismatch -fmax-errors=8 -march=x86-64 -mtune=generic -I.)
+          ziglib=$(dirname "$(realpath "$(command -v zig)")")/lib
+          musl="$ziglib/libc/musl"
+          musl-gcc -std=c99 -O2 -I"$musl/arch/x86_64" -I"$musl/arch/generic" -I"$musl/src/include" -I"$musl/src/internal" -I"$ziglib/libc/include/x86_64-linux-musl" -I"$ziglib/libc/include/generic-musl" -c "$musl/src/linux/statx.c" -o statx.o
+          musl-gcc "${flags[@]}" -O2 -fno-builtin -c compiler-rt.c -o compiler-rt.o
+          ar rcs libzig-rt.a compiler-rt.o
+          /usr/bin/time -f 'compile elapsed=%e rss=%M' musl-gcc "${flags[@]}" -O2 -c methods.c -o methods.o
+          aliases=()
+          while read -r name; do aliases+=("-Wl,--undefined=$name,--defsym=protean_posix_$name=$name"); done < aliases
+          musl-gcc -static methods.o statx.o libprotean-native-c.a libzig-rt.a "${aliases[@]}" -lm -lpthread -o methods
+          tar -czf methods.tar.gz methods
+          echo "sha256=$(sha256sum methods.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: gcc-methods
+          path: methods.tar.gz
+          compression-level: 0
+          retention-days: 1
+  execute:
+    needs: gcc
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: gcc-methods
+      - name: Execute all 21 native methods checks
+        env:
+          SHA256: ${{ needs.gcc.outputs.sha256 }}
+        run: |
+          echo "$SHA256  methods.tar.gz" | sha256sum --check --strict
+          tar -xzf methods.tar.gz
+          set -o pipefail
+          /usr/bin/time -f 'execution elapsed=%e rss=%M' ./methods 2>&1 | tee observed.log
+          grep -Fxq 'All 21 tests passed.' observed.log

@@ -2,7 +2,7 @@ name: Offline qualification
 on:
   pull_request:
   push:
-    branches: [main, diagnostic/render-cost-f493826]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
