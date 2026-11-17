@@ -14,10 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: native public session serves two control clients while a worker is held}
-          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: native conversation retains maximal exact proposal body for CLI without a Slack button}
-          - {part: rendering, count: 63, artifact: 14374282865, digest: e6ec6d53fa5c08f16c7ed91b2283fae5169a6ab2c8a98a8aafea99687dc23ba0, case: native render frame budgets hostile escaping and all sections at their upper bounds}
-          - {part: transitions-second, count: 25, artifact: 14373294716, digest: 2e436cc682d6391402f724bdc6b7c3397cb70599317361ea38e429249aa91658, case: native settlements retain unrelated superseded malformed or unproven delivery evidence}
+          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: control proposal consumer shows and confirms maximal retained body by authored zero ordinal}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -36,3 +33,20 @@ jobs:
           echo "$SHA256  binary.zip" | sha256sum --check --strict
           unzip -p binary.zip "$PART.tar.gz" | tar -xzf -
           uv run --no-project --isolated python .github/measure-native-case.py "./test-tools/native/$PART" "$COUNT" "$CASE"
+  clock:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Observe durable campaign progress in the optimized Linux runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/tkersey/paredros/actions/artifacts/14376321918/zip > binary.zip
+          echo 'c9df3e982e2325808e626677861832e0baacea27cb442adcc8e37b87a3eb82ab  binary.zip' | sha256sum --check --strict
+          unzip -p binary.zip methods.tar.gz | tar -xzf -
+          lscpu | sed -n '/^Model name:/p'
+          uv run --no-project --isolated python .github/observe-experiment-clock.py ./methods
