@@ -1,0 +1,56 @@
+name: Measure the retained rendering binary
+on:
+  push:
+    branches: [diagnostic/render-cost-f493826]
+permissions:
+  actions: read
+jobs:
+  measure:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Authenticate the retained build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/tkersey/paredros/actions/artifacts/14285006452/zip > rendering.zip
+          echo 'f8b1ad77a162dad44e3e2ff595d6af71786c9503fe6190b444df57b1e4bd94ea  rendering.zip' | sha256sum --check --strict
+          unzip -q rendering.zip
+          tar -xzf rendering.tar.gz
+          file test-tools/native/rendering
+          lscpu
+      - name: Sample the first substantive case
+        run: |
+          node --input-type=module <<'JS'
+          import {spawn} from 'node:child_process';
+          import {readFileSync} from 'node:fs';
+          import {createInterface} from 'node:readline';
+          import assert from 'node:assert/strict';
+          const child = spawn('./test-tools/native/rendering', {stdio:['ignore','ignore','pipe']});
+          const done = new Promise(resolve => child.once('close', resolve));
+          const started = performance.now();
+          function sample() {
+            const fields = readFileSync('/proc/' + child.pid + '/stat', 'utf8').split(' ');
+            const io = readFileSync('/proc/' + child.pid + '/io', 'utf8').trim();
+            console.log(JSON.stringify({seconds:(performance.now()-started)/1000,
+              userTicks:fields[13], systemTicks:fields[14], minorFaults:fields[9],
+              majorFaults:fields[11], residentPages:fields[23], io}));
+          }
+          const timer = setInterval(sample, 10000);
+          let witnessed = false;
+          try {
+            for await (const line of createInterface({input:child.stderr})) {
+              console.log(line);
+              if (line.includes('native render frame retains truthful full count and oldest ordered bounded entries...OK')) {
+                sample();
+                witnessed = true;
+                break;
+              }
+            }
+          } finally {
+            clearInterval(timer);
+            child.kill();
+            await done;
+          }
+          assert(witnessed, 'rendering case did not finish');
+          JS
