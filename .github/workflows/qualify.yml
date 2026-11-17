@@ -38,6 +38,7 @@ jobs:
     outputs:
       key: ${{ steps.inputs.outputs.key }}
       sha256: ${{ steps.archive.outputs.sha256 }}
+      execution: ${{ steps.matrix.outputs.execution }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -48,6 +49,11 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
+      - name: Select execution groups
+        id: matrix
+        run: |
+          execution=$(node .github/native-execution.mjs)
+          echo "execution=$execution" >> "$GITHUB_OUTPUT"
       - &identify_inputs
         name: Identify exact native inputs
         id: inputs
@@ -217,6 +223,9 @@ jobs:
               zig build build-native-tests -Dnative-tests=true -Dnative-group=transitions -Dnative-partition="${PART##*-}" -Dtest-product-assets=false -Doptimize=safe -j2 --verbose --summary all ;;
             *) zig build build-native-tests -Dnative-tests=true -Dnative-group="$PART" -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
           esac
+          if [[ -d zig-out/test-tools/native ]]; then
+            cp zig-pkg/protean-*/tools/native/qualification_tests.mjs zig-out/test-tools/native/
+          fi
           tar -C zig-out -czf "$RUNNER_TEMP/$PART.tar.gz" .
           sha256sum "$RUNNER_TEMP/$PART.tar.gz"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -227,29 +236,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   execute:
-    name: Execute / ${{ matrix.part }}
-    needs: build
+    name: Execute / ${{ matrix.name }}
+    needs: [acquire, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {part: authority, count: 95}
-          - {part: providers, count: 40}
-          - {part: transitions-first, count: 15}
-          - {part: transitions-third, count: 11}
-          - {part: transitions-second, count: 25}
-          - {part: rendering, count: 63}
-          - {part: methods, count: 21}
-          - {part: continuity-first, count: 7}
-          - {part: continuity-third, count: 13}
-          - {part: continuity-second, count: 21}
-          - {part: product, count: 5}
-          - {part: crash, count: 12}
+      matrix: ${{ fromJSON(needs.acquire.outputs.execution) }}
     env:
       PART: ${{ matrix.part }}
       EXPECTED: ${{ matrix.count }}
+      INVENTORY: ${{ matrix.inventory }}
+      TEST_FILTERS: ${{ toJSON(matrix.filters) }}
+      TEST_INDEX: ${{ matrix.index }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -269,14 +268,20 @@ jobs:
             crash) uv run --no-project python tests/process_crash.py zig-out/test-tools/paredros-crash-tests --report "$RUNNER_TEMP/report.json" ;;
             *)
               set -o pipefail
-              zig-out/test-tools/native/"$PART" 2>&1 | tee "$RUNNER_TEMP/tests.log"
-              grep -Fxq "All $EXPECTED tests passed." "$RUNNER_TEMP/tests.log"
+              if [[ -n "$TEST_INDEX" ]]; then
+                node zig-out/test-tools/native/qualification_tests.mjs "zig-out/test-tools/native/$PART" \
+                  "$TEST_FILTERS" "[$TEST_INDEX]" 2>&1 | tee "$RUNNER_TEMP/tests.log"
+                grep -Fxq "$EXPECTED/$EXPECTED tests passed across 1 independent groups ($INVENTORY tests in complete inventory)." "$RUNNER_TEMP/tests.log"
+              else
+                zig-out/test-tools/native/"$PART" 2>&1 | tee "$RUNNER_TEMP/tests.log"
+                grep -Fxq "All $EXPECTED tests passed." "$RUNNER_TEMP/tests.log"
+              fi
               ;;
           esac
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: results-${{ matrix.part }}
+          name: results-${{ matrix.name }}
           path: |
             ${{ runner.temp }}/report.json
             ${{ runner.temp }}/tests.log
