@@ -1,0 +1,51 @@
+name: Sample native comparison CPU time
+on:
+  push:
+    branches: [diagnostic/campaign-cpu]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  sample:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {backend: direct, artifact: 14373798093, digest: 7b4aefb2a75179d06ff864e865e603f0ff07df72f3c71f974393dac853cfbe2f, archive: methods.tar.gz, program: test-tools/native/methods}
+          - {backend: gcc, artifact: 14376321918, digest: c9df3e982e2325808e626677861832e0baacea27cb442adcc8e37b87a3eb82ab, archive: methods.tar.gz, program: methods}
+    steps:
+      - name: Verify original executable and sample the interrupted campaign
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+          SHA256: ${{ matrix.digest }}
+          ARCHIVE: ${{ matrix.archive }}
+          PROGRAM: ${{ matrix.program }}
+        run: |
+          set -euo pipefail
+          gh api "repos/tkersey/paredros/actions/artifacts/$ARTIFACT/zip" > input.zip
+          echo "$SHA256  input.zip" | sha256sum --check --strict
+          unzip -p input.zip "$ARCHIVE" | tar -xzf -
+          file "$PROGRAM"
+          sha256sum "$PROGRAM"
+          "./$PROGRAM" > suite.log 2>&1 &
+          target=$!
+          trap 'kill "$target" 2>/dev/null || true' EXIT
+          sleep 22
+          cat suite.log
+          perfbin=$(find /usr/lib/linux-tools* -type f -name perf -print -quit 2>/dev/null || true)
+          if [ -n "$perfbin" ] && sudo "$perfbin" record -q -F 79 -e cpu-clock:u --call-graph dwarf,4096 -p "$target" -o samples.data -- sleep 150; then
+            sudo "$perfbin" report -i samples.data --stdio --no-children -g none --percent-limit 0.4 --sort comm,symbol | tee leaves.txt > /dev/null
+            sudo "$perfbin" report -i samples.data --stdio --children -g none --percent-limit 1 --sort comm,symbol | tee inclusive.txt > /dev/null
+            head -100 leaves.txt
+            head -100 inclusive.txt
+          else
+            for _ in $(seq 1 24); do
+              sudo gdb -nx -batch -p "$target" -ex 'set print frame-arguments none' -ex 'bt 24' -ex detach | tee -a stacks.txt > /dev/null
+              sleep 2
+            done
+            cat stacks.txt
+          fi
+          cat suite.log
