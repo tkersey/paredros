@@ -2,7 +2,7 @@ name: Offline qualification
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, diagnostic/render-cost-f493826]
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,17 +52,28 @@ jobs:
         name: Identify exact native inputs
         id: inputs
         run: |
+          if ! command -v musl-gcc >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends musl-tools
+          fi
+          zig build --fetch
+          probes=(zig-pkg/protean-*/tools/native/gcc-identity.sh)
+          test "${#probes[@]}" -eq 1
+          gcc_identity=$(bash "${probes[0]}" "$(command -v musl-gcc)" x86_64-linux-musl)
+          headers=$(tar -C /usr/include --sort=name --mtime=@0 --owner=0 --group=0 \
+            --numeric-owner --dereference -cf - x86_64-linux-musl | sha256sum | cut -d' ' -f1)
           compiler_root="$(dirname "$(realpath "$(command -v zig)")")"
           compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
             --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
             | sha256sum | cut -d' ' -f1)
-          COMPILER_SHA256="$compiler" node <<'JS'
+          GCC_IDENTITY="$gcc_identity" MUSL_HEADERS_SHA256="$headers" COMPILER_SHA256="$compiler" node <<'JS'
           const fs = require('node:fs');
           const {execFileSync} = require('node:child_process');
           const {createHash} = require('node:crypto');
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
           const files = execFileSync('git', ['ls-files', '-z'], {encoding: 'utf8'}).split('\0').filter(Boolean).sort();
-          const inputs = {compiler: process.env.COMPILER_SHA256, host: process.platform + '-' + process.arch,
+          const inputs = {compiler: process.env.COMPILER_SHA256, gcc: JSON.parse(process.env.GCC_IDENTITY),
+            muslHeaders: process.env.MUSL_HEADERS_SHA256, host: process.platform + '-' + process.arch,
             target: 'x86_64-linux-musl', optimize: 'safe', finalBackend: 'self-hosted',
             jitHelpers: process.env.ZIG_DEBUG_CMD, jobs: 2,
             files: files.map(file => [file, fs.statSync(file).mode & 0o777, hash(fs.readFileSync(file))])};

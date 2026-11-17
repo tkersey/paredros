@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "horos", .module = dependency.module("horos_host_authoring") },
         },
     });
-    _ = testStep(b, source_root, filter, "test", "Run PAREDROS contract tests");
+    sourceTests(b, dependency, source_root, filter);
     const assets = if (native_product or crash_tests or scale_tests or
         (native_tests and test_product_assets))
         product(b, dependency)
@@ -52,20 +52,22 @@ pub fn build(b: *std.Build) void {
     }
     if (crash_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig");
-        const checks = addSelfHostedTest(b, .{
+        const checks = protean_build.NativeBinary.addTest(b, dependency, .{
+            .use_llvm = false,
             .filters = &.{"process crash owner fixture"},
             .root_module = root,
-        });
-        const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-crash-tests");
+        }, true);
+        const install = b.addInstallFile(checks.path, "test-tools/paredros-crash-tests");
         b.step("build-crash-tests", "Build process-death witnesses").dependOn(&install.step);
     }
     if (scale_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "scale_test.zig");
-        const checks = addSelfHostedTest(b, .{
+        const checks = protean_build.NativeBinary.addTest(b, dependency, .{
+            .use_llvm = false,
             .filters = &.{"native scale measurement"},
             .root_module = root,
-        });
-        const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-scale");
+        }, true);
+        const install = b.addInstallFile(checks.path, "test-tools/paredros-scale");
         b.step("build-scale-tests", "Build native storage measurements").dependOn(&install.step);
     }
 }
@@ -92,14 +94,14 @@ fn nativeTests(
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
-        const checks = addSelfHostedTest(b, .{
+        const checks = protean_build.NativeBinary.addTest(b, dependency, .{
+            .use_llvm = false,
             .filters = if (partition) |part|
                 nativePartitionFilters(group, part)
             else if (filter) |value| &.{value} else &.{},
             .root_module = root,
-        });
-        const run = b.addRunArtifact(checks);
-        if (checks.test_runner != null) run.expectExitCode(0);
+        }, true);
+        const run = checks.run(b);
         run.has_side_effects = true;
         execute.dependOn(&run.step);
         const artifact = if (partition) |part|
@@ -107,7 +109,7 @@ fn nativeTests(
         else
             name;
         const install = b.addInstallFile(
-            checks.getEmittedBin(),
+            checks.path,
             b.fmt("test-tools/native/{s}", .{artifact}),
         );
         compile.dependOn(&install.step);
@@ -192,29 +194,8 @@ fn dependencyGraph(
     });
 }
 
-fn addSelfHostedTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
-    var selected = options;
-    selected.use_llvm = false;
-    const target = selected.root_module.resolved_target.?.result;
-    if (target.os.tag == .macos and target.cpu.arch == .aarch64) {
-        // The stock simple runner omits the environment and per-test leak checks.
-        // Select the pinned compiler's full terminal entry for native macOS.
-        const runner = b.addSystemCommand(&.{
-            "sed",
-            \\/^pub fn main(/,/^}/c\
-            \\pub fn main(init: std.process.Init.Minimal) void { mainTerminal(init); }
-        });
-        runner.addFileArg2(b.graph.path(.zig_lib, "compiler/test_runner.zig"), .{});
-        selected.test_runner = .{
-            .path = runner.captureStdOut(.{ .basename = "test_runner.zig" }),
-            .mode = .simple,
-        };
-    }
-    return b.addTest(selected);
-}
-
 fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
-    const bootstrap = b.addExecutable(.{
+    const bootstrap = protean_build.NativeBinary.addExecutable(b, dependency, .{
         .use_llvm = false,
         .name = "paredros-dependencies",
         .root_module = b.createModule(.{
@@ -222,8 +203,8 @@ fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
             .target = b.graph.host,
             .optimize = .safe,
         }),
-    });
-    const setup = b.addRunArtifact(bootstrap);
+    }, false);
+    const setup = bootstrap.run(b);
     setup.addArg("setup");
     setup.addFileArg2(dependency.path("conformance/protean/dependencies.lock.json"), .{});
     setup.addFileArg2(dependency.path("conformance/protean/native-dependencies.lock.json"), .{});
@@ -253,22 +234,20 @@ fn typesModule(
     });
 }
 
-fn testStep(
+fn sourceTests(
     b: *std.Build,
+    dependency: *std.Build.Dependency,
     root: *std.Build.Module,
     filter: ?[]const u8,
-    name: []const u8,
-    description: []const u8,
-) *std.Build.Step.Compile {
-    const checks = addSelfHostedTest(b, .{
+) void {
+    const checks = protean_build.NativeBinary.addTest(b, dependency, .{
+        .use_llvm = false,
         .filters = if (filter) |value| &.{value} else &.{},
         .root_module = root,
-    });
-    const run = b.addRunArtifact(checks);
-    if (checks.test_runner != null) run.expectExitCode(0);
+    }, false);
+    const run = checks.run(b);
     run.has_side_effects = true;
-    b.step(name, description).dependOn(&run.step);
-    return checks;
+    b.step("test", "Run PAREDROS contract tests").dependOn(&run.step);
 }
 
 fn nativeTestRoot(
@@ -321,8 +300,10 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
         "emitted-application",
         "Verified emitted application directory",
     );
+    const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     const result = protean_build.addNativeSystem(b, dependency, .{
         .name = "paredros",
+        .strip = if (symbols) false else null,
         .entry = b.path("main.zig"),
         .environment = b.path("environment.zig"),
         .application = if (emitted) |directory| .{ .emitted = .{
@@ -334,12 +315,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
             .types = b.path("app/types.zig"),
         } },
     });
-    result.executable.use_llvm = false;
-    const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
-    if (symbols) {
-        result.executable.root_module.strip = false;
-        dependency.module("protean_native").strip = false;
-    }
+    if (symbols) dependency.module("protean_native").strip = false;
     const environment = result.executable.root_module.import_table.get("environment").?;
     const protean = dependency.module("protean_native_types");
     environment.addImport("protean", protean);
