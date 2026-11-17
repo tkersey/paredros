@@ -87,7 +87,9 @@ fn finish(fixture: *Fixture, session: *native.Session(Types), task: t.Id) !void 
         _ = try session.tick(a);
         var status = try fixture.service.?.task(a, task);
         defer status.deinit();
-        if (status.value.cancellation != null and !session.busy()) {
+        // A joined reply can leave the cancellation queued for a later tick.
+        const settled = status.value.terminal() or status.value.schedule == .parked;
+        if (status.value.cancellation != null and !session.busy() and settled) {
             if (status.value.terminal()) {
                 try std.testing.expectEqual(.cancelled, status.value.outcome_kind);
             } else {

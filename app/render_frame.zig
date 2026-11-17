@@ -38,7 +38,9 @@ pub const Function = a.Function(struct { input: Input }, Result);
 const Frame = struct { text: Text, listed_oids: Oids, invalid_highlights: u64, abbreviated: bool };
 const ClipResult = struct { text: cts.Utf8, abbreviated: bool };
 const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, start: u64, output: cts.Utf8 };
-const Clip = a.Function(struct { state: ClipInput }, ClipResult);
+const Clip = a.Function(struct { text: cts.Utf8, budget: u64 }, ClipResult);
+const ScalarClip = a.Function(struct { state: ClipInput }, ClipResult);
+const Scan = a.Function(struct { text: cts.Utf8, index: u64 }, u64);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
 const Notes = a.Function(struct {
@@ -86,17 +88,97 @@ fn clipped(
     value: anytype,
     budget: u64,
 ) !a.Value(ClipResult) {
-    return b.call(clip, .{ .state = try b.product(try c.schema(ClipInput), .{
+    return b.call(clip, .{
         .text = try widen(c, b, value),
-        .index = try b.constant(u64, 0),
         .budget = try b.constant(u64, budget - 3),
-        .start = try b.constant(u64, 0),
-        .used = try b.constant(u64, 0),
-        .output = try literal(c, ""),
-    }) });
+    });
+}
+
+// Text is admitted UTF-8. A control or markup byte is ASCII and therefore
+// starts a scalar. Until then the escaped cost equals the original byte count.
+fn scanFunction(c: protean.Context) !Scan {
+    const function = try c.author.function("scan unchanged frame text", .{
+        .text = try c.schema(cts.Utf8),
+        .index = try c.schema(u64),
+    }, try c.schema(u64), &.{});
+    const b = try c.author.body(function);
+    const text = try b.parameter("text");
+    const index = try b.parameter("index");
+    const byte = try b.blobByte(text, index);
+    const ended = try b.caseOf(byte, "none");
+    const present = try b.caseOf(byte, "some");
+    const active = present.body();
+    const ordinary = comptime blk: {
+        var flags: [256]u8 = @splat(1);
+        @memset(flags[0..32], 0);
+        for ([_]u8{ 127, '&', '<', '>' }) |special| flags[special] = 0;
+        break :blk flags;
+    };
+    const position = try active.convertInteger(try c.schema(u64), present.payload(), .{});
+    const flag = try active.variantPayload(
+        try active.blobByte(try c.literal(cts.Utf8, .{ .bytes = &ordinary }), position),
+        "some",
+        try failure(c),
+    );
+    const keep = try active.branch();
+    const stop = try active.branch();
+    const next = try keep.call(function, .{
+        .text = text,
+        .index = try add(c, keep, index, try keep.constant(u64, 1)),
+    });
+    try c.author.define(function, try b.ret(try b.match(byte, .{
+        .none = try ended.ret(index),
+        .some = try present.ret(try active.conditional(
+            try active.equal(flag, try active.constant(u8, 0)),
+            try stop.ret(index),
+            try keep.ret(next),
+        )),
+    })));
+    return function;
 }
 
 fn clipFunction(c: protean.Context) !Clip {
+    const scan = try scanFunction(c);
+    const scalar = try scalarClipFunction(c);
+    const function = try c.author.function("clip frame text within its escaped budget", .{
+        .text = try c.schema(cts.Utf8),
+        .budget = try c.schema(u64),
+    }, try c.schema(ClipResult), &.{});
+    const b = try c.author.body(function);
+    const text = try b.parameter("text");
+    const budget = try b.parameter("budget");
+    const length = try b.blobLength(text);
+    const zero = try b.constant(u64, 0);
+    const large = try b.branch();
+    const fits = try b.branch();
+    const index = try b.conditional(
+        try b.less(budget, length),
+        try large.ret(zero),
+        try fits.ret(try fits.call(scan, .{ .text = text, .index = zero })),
+    );
+    const unchanged = try b.branch();
+    const rest = try b.branch();
+    const result = try unchanged.product(try c.schema(ClipResult), .{
+        .text = text,
+        .abbreviated = try unchanged.constant(bool, false),
+    });
+    const remaining = try rest.call(scalar, .{ .state = try rest.product(try c.schema(ClipInput), .{
+        .text = text,
+        .index = index,
+        .budget = budget,
+        .start = zero,
+        .used = index,
+        .output = try literal(c, ""),
+    }) });
+    try c.author.define(function, try b.ret(try b.conditional(
+        try b.equal(index, length),
+        try unchanged.ret(result),
+        try rest.ret(remaining),
+    )));
+    return function;
+}
+
+fn scalarClipFunction(c: protean.Context) !ScalarClip {
     const function = try c.author.function("bounded scalar-safe inert text", .{
         .state = try c.schema(ClipInput),
     }, try c.schema(ClipResult), &.{});
@@ -152,7 +234,7 @@ fn escapedCost(b: anytype, byte: a.Value(u8), length: a.Value(u64)) !a.Value(u64
 fn clipScalar(
     c: protean.Context,
     b: anytype,
-    function: Clip,
+    function: ScalarClip,
     state: a.Value(ClipInput),
 ) !a.Value(ClipResult) {
     const text = try b.field(state, "text");

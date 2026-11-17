@@ -1,52 +1,100 @@
-name: Measure independent cases from the retained native Linux executables
+name: Compare authored frame scanning and check session settlement on native Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
 permissions:
   contents: read
   actions: read
+env:
+  ZIG_DEBUG_CMD: '1'
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+  ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
-  measure:
-    name: Measure / ${{ matrix.case }}
+  compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [prior, candidate, session]
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      -
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      -
+        name: Restore authenticated Linux build inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/tkersey/paredros/actions/artifacts/14374131920/zip > preparation.zip
+          echo '394ed18da33bbad88976d1dfca9d4f5f543fbfabec8c1541ec72b98cd6ed93f6  preparation.zip' | sha256sum --check --strict
+          unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
+      -
+        name: Install the native musl C compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Select unchanged control frame
+        if: matrix.part == 'prior'
+        run: git restore --source=f43f895 -- app/render_frame.zig
+      - name: Compile the selected existing suite
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          if [ "$PART" = session ]; then
+            zig build build-native-tests -Dnative-tests=true -Dnative-group=authority -Dtest-product-assets=false -Dtest-filter='native public session serves two control clients while a worker is held' -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
+            cp zig-out/test-tools/native/authority check
+          else
+            zig build build-native-tests -Dnative-tests=true -Dnative-group=rendering -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
+            cp zig-out/test-tools/native/rendering check
+          fi
+          sha256sum check
+          tar -czf check.tar.gz check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.part }}
+          path: check.tar.gz
+          compression-level: 0
+          retention-days: 1
+  execute:
+    needs: compile
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {part: authority, count: 95, artifact: 14374167715, digest: a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1, case: control proposal consumer shows and confirms maximal retained body by authored zero ordinal}
+          - {part: prior, case: native render frame retains truthful full count and oldest ordered bounded entries}
+          - {part: candidate, case: native render frame retains truthful full count and oldest ordered bounded entries}
+          - {part: prior, case: native render frame budgets hostile escaping and all sections at their upper bounds}
+          - {part: candidate, case: native render frame budgets hostile escaping and all sections at their upper bounds}
+          - {part: candidate, case: native render frame keeps Unicode mentions and URLs inert and flattens text controls}
+          - {part: session, case: native public session serves two control clients while a worker is held}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
+      - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - name: Run the selected original case with Zig's standard test server
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.part }}
+      - name: Execute the original native case
         env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT: ${{ matrix.artifact }}
-          SHA256: ${{ matrix.digest }}
           PART: ${{ matrix.part }}
           CASE: ${{ matrix.case }}
-          COUNT: ${{ matrix.count }}
         run: |
-          gh api "repos/tkersey/paredros/actions/artifacts/$ARTIFACT/zip" > binary.zip
-          echo "$SHA256  binary.zip" | sha256sum --check --strict
-          unzip -p binary.zip "$PART.tar.gz" | tar -xzf -
-          uv run --no-project --isolated python .github/measure-native-case.py "./test-tools/native/$PART" "$COUNT" "$CASE"
-  clock:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - name: Observe durable campaign progress in the optimized Linux runtime
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/tkersey/paredros/actions/artifacts/14376321918/zip > binary.zip
-          echo 'c9df3e982e2325808e626677861832e0baacea27cb442adcc8e37b87a3eb82ab  binary.zip' | sha256sum --check --strict
-          unzip -p binary.zip methods.tar.gz | tar -xzf -
-          lscpu | sed -n '/^Model name:/p'
-          uv run --no-project --isolated python .github/observe-experiment-clock.py ./methods
+          tar -xzf check.tar.gz
+          if [ "$PART" = session ]; then
+            set -o pipefail
+            ./check 2>&1 | tee results.log
+            grep -Fxq 'All 2 tests passed.' results.log
+          else
+            uv run --no-project --isolated python .github/measure-native-case.py ./check 63 "$CASE"
+          fi
