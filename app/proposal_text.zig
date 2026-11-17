@@ -8,10 +8,13 @@ pub const Text = t.Text;
 pub const Input = struct { target: ?t.Id, body: @FieldType(t.Proposal, "body") };
 pub const Description = @FieldType(t.Proposal, "description");
 pub const Function = a.Function(struct { input: Input }, Description);
+const budget: u64 = 4000;
 const Complete = struct { text: Text, cost: u64 };
 const Rendering = union(enum) { complete: Complete, cli: void };
 const Append = a.Function(struct { rendering: Rendering, text: Text, cost: u64 }, Rendering);
 const Piece = struct { text: Text, cost: u64, width: u64 };
+const Span = struct { end: u64, cost: u64 };
+const Scan = a.Function(struct { input: cts.Utf8, end: u64, cost: u64, limit: u64 }, Span);
 fn Blob(comptime hex: bool) type {
     return if (hex) cts.Bytes(null) else cts.Utf8;
 }
@@ -81,7 +84,7 @@ fn appender(c: protean.Context) !Append {
         .{ .text = text_next, .cost = total },
     ));
     const result = try cb.conditional(
-        try cb.less(try cb.constant(u64, 4000), total),
+        try cb.less(try cb.constant(u64, budget), total),
         try oversized.ret(try c.literal(Rendering, .{ .cli = {} })),
         try fits.ret(next),
     );
@@ -366,7 +369,15 @@ fn converter(c: protean.Context, comptime hex: bool, append: Append) !Convert(he
         .text = try byteEncoding(c, more, byte, true),
         .cost = try more.constant(u64, 2),
         .width = try more.constant(u64, 1),
-    }) else try textPiece(c, more, input, index, byte);
+    }) else try textPiece(
+        c,
+        more,
+        try spanScanner(c),
+        input,
+        index,
+        byte,
+        try more.field(complete.payload(), "cost"),
+    );
     const next = try more.call(append, .{
         .rendering = state,
         .text = try more.field(piece, "text"),
@@ -434,56 +445,110 @@ fn byteEncoding(
     );
 }
 
-fn asciiCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    var result = try b.constant(u64, 1);
-    inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 }, .{ '"', 2 }, .{ '\\', 2 } }) |entry|
-        result = try b.select(
-            try b.equal(byte, try b.constant(u8, entry[0])),
-            try b.constant(u64, entry[1]),
-            result,
-        );
-    return b.select(try b.less(byte, try b.constant(u8, 32)), try b.constant(u64, 6), result);
+fn needsEscape(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
+    const yes = try b.constant(bool, true);
+    return b.select(
+        try b.less(byte, try b.constant(u8, 32)),
+        yes,
+        try b.select(
+            try b.equal(byte, try b.constant(u8, '"')),
+            yes,
+            try b.equal(byte, try b.constant(u8, '\\')),
+        ),
+    );
+}
+
+fn rawWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+    var width = try b.constant(u64, 4);
+    inline for (.{ .{ 240, 3 }, .{ 224, 2 }, .{ 128, 1 } }) |entry|
+        width = try b.select(try b.less(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), width);
+    return width;
+}
+
+fn rawCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+    var cost = try b.constant(u64, 1);
+    inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 } }) |entry|
+        cost = try b.select(try b.equal(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), cost);
+    return cost;
+}
+
+// Walk admitted UTF-8 by scalar without carrying or copying the growing description.
+fn spanScanner(c: protean.Context) !Scan {
+    const scan = try c.author.function("measure unchanged proposal text", .{
+        .input = try c.schema(cts.Utf8),
+        .end = try c.schema(u64),
+        .cost = try c.schema(u64),
+        .limit = try c.schema(u64),
+    }, try c.schema(Span), &.{});
+    const b = try c.author.body(scan);
+    const input = try b.parameter("input");
+    const end = try b.parameter("end");
+    const cost = try b.parameter("cost");
+    const limit = try b.parameter("limit");
+    const span = try b.product(try c.schema(Span), .{ .end = end, .cost = cost });
+    const more = try b.branch();
+    const done = try b.branch();
+    const byte = try more.variantPayload(
+        try more.blobByte(input, end),
+        "some",
+        try a.failure(c, "proposal_text_bounds"),
+    );
+    const escape = try more.branch();
+    const raw = try more.branch();
+    const bounds = try a.failure(c, "proposal_scalar_bounds");
+    const overflow = try a.failure(c, "proposal_description_budget");
+    const next = try raw.call(scan, .{
+        .input = input,
+        .end = try raw.checked(.add, end, try rawWidth(raw, byte), .{ .overflow = bounds }),
+        .cost = try raw.checked(.add, cost, try rawCost(raw, byte), .{ .overflow = overflow }),
+        .limit = limit,
+    });
+    const scanned = try more.conditional(try needsEscape(more, byte), try escape.ret(span), try raw.ret(next));
+    const active = try b.select(
+        try b.less(cost, limit),
+        try b.less(end, try b.blobLength(input)),
+        try b.constant(bool, false),
+    );
+    try c.author.define(scan, try b.ret(try b.conditional(active, try more.ret(scanned), try done.ret(span))));
+    return scan;
 }
 
 fn textPiece(
     c: protean.Context,
     b: anytype,
+    scan: Scan,
     input: a.Value(cts.Utf8),
     index: a.Value(u64),
     byte: a.Value(u8),
+    used: a.Value(u64),
 ) !a.Value(Piece) {
-    const ascii = try b.branch();
-    const unicode = try b.branch();
-    const width = try unicode.select(
-        try unicode.less(byte, try unicode.constant(u8, 224)),
-        try unicode.constant(u64, 2),
-        try unicode.select(
-            try unicode.less(byte, try unicode.constant(u8, 240)),
-            try unicode.constant(u64, 3),
-            try unicode.constant(u64, 4),
-        ),
-    );
-    const end = try unicode.checked(
-        .add,
-        index,
-        width,
-        .{ .overflow = try a.failure(c, "proposal_scalar_bounds") },
-    );
-    const scalar = try unicode.blobSlice(try c.schema(Text), input, index, end, .{
+    const escape = try b.branch();
+    const raw = try b.branch();
+    const encoded = try byteEncoding(c, escape, byte, false);
+    const bounds = try a.failure(c, "proposal_scalar_bounds");
+    const overflow = try a.failure(c, "proposal_description_budget");
+    const span = try raw.call(scan, .{
+        .input = input,
+        .end = try raw.checked(.add, index, try rawWidth(raw, byte), .{ .overflow = bounds }),
+        .cost = try rawCost(raw, byte),
+        .limit = try raw.checked(.subtract, try raw.constant(u64, budget + 1), used, .{ .overflow = overflow }),
+    });
+    const end = try raw.field(span, "end");
+    const text = try raw.blobSlice(try c.schema(Text), input, index, end, .{
         .capacity = try a.failure(c, "proposal_scalar_capacity"),
         .invalid_utf8 = try a.failure(c, "proposal_scalar_utf8"),
     });
     return b.conditional(
-        try b.less(byte, try b.constant(u8, 128)),
-        try ascii.ret(try ascii.product(try c.schema(Piece), .{
-            .text = try byteEncoding(c, ascii, byte, false),
-            .cost = try asciiCost(ascii, byte),
-            .width = try ascii.constant(u64, 1),
+        try needsEscape(b, byte),
+        try escape.ret(try escape.product(try c.schema(Piece), .{
+            .text = encoded,
+            .cost = try escape.blobLength(encoded),
+            .width = try escape.constant(u64, 1),
         })),
-        try unicode.ret(try unicode.product(try c.schema(Piece), .{
-            .text = scalar,
-            .cost = try unicode.constant(u64, 1),
-            .width = width,
+        try raw.ret(try raw.product(try c.schema(Piece), .{
+            .text = text,
+            .cost = try raw.field(span, "cost"),
+            .width = try raw.checked(.subtract, end, index, .{ .overflow = bounds }),
         })),
     );
 }
