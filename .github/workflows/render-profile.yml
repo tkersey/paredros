@@ -13,10 +13,6 @@ jobs:
   compile:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [prior, candidate]
     steps:
       - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -43,9 +39,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Select unchanged settlement
-        if: matrix.part == 'prior'
-        run: git restore --source=c4519a3 -- app/settlement.zig
       - name: Compile the selected existing suite
         run: |
           zig build build-native-tests -Dnative-tests=true -Dnative-group=transitions -Dnative-partition=second -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
@@ -54,7 +47,7 @@ jobs:
           tar -czf check.tar.gz check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: ${{ matrix.part }}
+          name: candidate
           path: check.tar.gz
           compression-level: 0
           retention-days: 1
@@ -72,9 +65,18 @@ jobs:
     steps:
       - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      - if: matrix.part == 'candidate'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ matrix.part }}
+      - name: Verify previously built control executable
+        if: matrix.part == 'prior'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/tkersey/paredros/actions/artifacts/14380597702/zip > input.zip
+          echo '8fb3a525685d75f2952f52e77eec7dca9a947aaadb6120b63fc8bbfa791b8744  input.zip' | sha256sum --check --strict
+          unzip -q input.zip check.tar.gz
       - name: Execute the original native case
         env:
           CASE: ${{ matrix.case }}

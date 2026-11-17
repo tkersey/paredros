@@ -479,7 +479,7 @@ fn validCoverage(
     );
 }
 
-inline fn sameIf(
+fn sameIf(
     c: protean.Context,
     b: anytype,
     condition: a.Value(bool),
@@ -505,7 +505,7 @@ fn needsTraversal(comptime T: type) bool {
     };
 }
 
-inline fn same(
+fn same(
     c: protean.Context,
     b: anytype,
     comptime T: type,
