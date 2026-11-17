@@ -1,4 +1,4 @@
-name: Verify a GCC and self-hosted Zig native archive on Linux
+name: Verify the downstream native build graph on Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -30,23 +30,13 @@ jobs:
           gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
           echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
-      - name: Build the admitted C sources with musl GCC
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools
-          musl-gcc --version
-          src=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/runtime/native
-          flags=(-std=c99 -march=x86-64 -mtune=generic -fno-omit-frame-pointer -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fsanitize=undefined -fsanitize-undefined-trap-on-error -Werror=date-time)
-          musl-gcc "${flags[@]}" -O1 -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_MEMSTATUS=1 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -c .protean-native/inputs/sqlite/sqlite3.c -o sqlite.o
-          musl-gcc "${flags[@]}" -O2 -D_POSIX_C_SOURCE=200809L -I.protean-native/inputs/sqlite -c "$src/native_c.c" -o native_c.o
-          zig build-obj -fno-llvm -Osafe -target x86_64-linux-musl -mcpu baseline "$src/hash.zig" -femit-bin=hash.o
-          ar rcs libprobe-native.a sqlite.o native_c.o hash.o
-          ar t libprobe-native.a
-      - name: Run the fresh-head and restart witness against the rebuilt archive
+      - name: Exercise the downstream build graph with the candidate Protean changes
         env:
           WITNESS: native genesis retains exact fresh head and rejects invalid inputs across restart
         run: |
-          set -o pipefail
-          zig test -fno-llvm -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline --dep application_types --dep protean_native --dep protean_contracts --dep protean --dep horos -Mroot=native_continuity_test.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep protean --dep protean_contracts -Mapplication_types=app/types.zig libprobe-native.a -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline -I .zig-cache/o/31862b6f660dd84890962575457bffc9 --dep kosmos --dep horos_data --dep protean_contracts --dep horos --dep protean --dep _native_dependency_admission --dep native_c --dep native_options -Mprotean_native=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/runtime/native/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mprotean_contracts=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/contracts.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos --dep horos_data --dep protean_contracts -Mprotean=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/protean.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mhoros=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data --dep horos --dep packaged_runtime -Mkosmos=.protean-native/inputs/kosmos/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mhoros_data=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/data/root.zig -M_native_dependency_admission=.zig-cache/o/a05536e176de12acf3398b34b179c597/native_dependency_admission.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mnative_c=.zig-cache/o/c1774b413f703d637f992daf9e513a37/native_c.zig -Mnative_options=.zig-cache/o/358b8ae923fbc2f6fdc6b74bcb23b219/options.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mpackaged_runtime=.zig-cache/o/7f17a83969290ee174dc1066eb4111eb/runtime.zig -lc --cache-dir .zig-cache --global-cache-dir .zig-cache --build-root . --name test --zig-lib-dir /opt/hostedtoolcache/zig/0.17.1/x64/lib/ --test-no-exec -femit-bin=continuity-case --test-filter "$WITNESS"
-          ./continuity-case 2>&1 | tee observed.log
-          grep -Fxq 'All 2 tests passed.' observed.log
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          cp -a zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP diagnostic-protean
+          git apply --unidiff-zero --directory=diagnostic-protean .github/protean-build.patch
+          zig build test-native -Dnative-tests=true -Dnative-group=continuity -Dtest-product-assets=false -Dtest-filter="$WITNESS" -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee observed.log
+          grep -Eq '2/2 tests passed|2 tests passed' observed.log

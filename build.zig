@@ -167,14 +167,18 @@ fn dependencyGraph(
     optimize: std.lang.Optimize,
     enabled: bool,
 ) *std.Build.Dependency {
+    const gcc = b.option([]const u8, "native-gcc", "GNU C compiler for the native target") orelse
+        if (target.result.os.tag == .macos) "gcc-16" else "musl-gcc";
     if (!enabled) return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
         .native = false,
+        .@"native-gcc" = gcc,
     });
     return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
+        .@"native-gcc" = gcc,
         .@"kosmos-source" = b.option(
             std.Build.LazyPath,
             "kosmos-source",

@@ -1,0 +1,299 @@
+diff --git a/build_native.zig b/build_native.zig
+index 856c0c3..c84d9fb 100644
+--- a/build_native.zig
++++ b/build_native.zig
+@@ -19,0 +20,39 @@ pub fn sqliteFlags(optimize: std.lang.Optimize) []const []const u8 {
++pub const shim_flags: []const []const u8 = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" };
++
++pub fn gccFlags(
++    b: *std.Build,
++    target: std.Build.ResolvedTarget,
++    optimize: std.lang.Optimize,
++) struct { sqlite: []const []const u8, shim: []const []const u8 } {
++    const arch: []const []const u8 = switch (target.result.os.tag) {
++        .linux => &.{ "-march=x86-64", "-mtune=generic" },
++        .macos => &.{ "-march=armv8-a", b.fmt("-mmacosx-version-min={f}", .{
++            target.result.os.version_range.semver.min,
++        }) },
++        else => &.{},
++    };
++    const safety: []const []const u8 = switch (optimize) {
++        .safe, .debug => &.{
++            "-fno-omit-frame-pointer",            "-fstack-protector-strong",
++            "-D_FORTIFY_SOURCE=2",                "-fsanitize=undefined",
++            "-fsanitize-undefined-trap-on-error",
++        },
++        else => &.{},
++    };
++    const mode: []const []const u8 = switch (optimize) {
++        .safe => &.{"-O2"},
++        .debug => &.{ "-Og", "-g" },
++        .fast => &.{"-O3"},
++        .small => &.{"-Os"},
++    };
++    const common = [_][]const []const u8{ arch, safety, &.{"-Werror=date-time"} };
++    const sqlite_mode: []const []const u8 = if (optimize == .safe) &.{"-O1"} else mode;
++    const sql = common ++ .{ sqlite_flags, sqlite_mode };
++    return .{
++        .sqlite = std.mem.concat(b.allocator, []const u8, &sql) catch
++            @panic("out of memory"),
++        .shim = std.mem.concat(b.allocator, []const u8, &(common ++ .{ shim_flags, mode })) catch
++            @panic("out of memory"),
++    };
++}
++
+@@ -55,0 +95 @@ pub fn addNativeSystem(b: *std.Build, dependency: *std.Build.Dependency, options
++        .gcc_identity = dependency.builder.named_lazy_paths.get("native-gcc-identity"),
+@@ -74,0 +115 @@ pub const Modules = struct {
++    gcc_identity: ?std.Build.LazyPath = null,
+@@ -125,0 +167 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
++    const product_backend: ?bool = if (linuxX86(target)) true else null;
+@@ -129 +171 @@ pub fn addWithModules(b: *std.Build, modules: Modules, options: Options) Product
+-        .use_llvm = if (linuxX86(target)) true else null,
++        .use_llvm = if (modules.gcc_identity != null) false else product_backend,
+@@ -167,9 +209,4 @@ fn createManifest(
+-    manifest.addArg(
+-        std.json.Stringify.valueAlloc(
+-            b.allocator,
+-            sqliteFlags(optimize),
+-            .{},
+-        ) catch @panic(
+-            "out of memory",
+-        ),
+-    );
++    const gcc_flags = if (modules.gcc_identity != null) gccFlags(b, target, optimize) else null;
++    const sqlite_flags_used = if (gcc_flags) |flags| flags.sqlite else sqliteFlags(optimize);
++    manifest.addArg(std.json.Stringify.valueAlloc(b.allocator, sqlite_flags_used, .{}) catch
++        @panic("out of memory"));
+@@ -194,0 +232,8 @@ fn createManifest(
++    if (modules.gcc_identity) |identity| {
++        manifest.addFileArg2(identity, .{});
++        manifest.addArg(std.json.Stringify.valueAlloc(
++            b.allocator,
++            gcc_flags.?.shim,
++            .{},
++        ) catch @panic("out of memory"));
++    }
+@@ -234 +279 @@ fn generate(b: *std.Build, modules: Modules, source: Source) Assets {
+-        .use_llvm = if (linuxX86(b.graph.host)) false else null,
++        .use_llvm = if (modules.gcc_identity != null or linuxX86(b.graph.host)) false else null,
+diff --git a/build_protean.zig b/build_protean.zig
+index 195b1af..877314b 100644
+--- a/build_protean.zig
++++ b/build_protean.zig
+@@ -159,0 +160,2 @@ const BuildGraph = struct {
++    native_gcc: ?std.Build.LazyPath = null,
++    gcc_identity: ?std.Build.LazyPath = null,
+@@ -177 +179 @@ const BuildGraph = struct {
+-    host_environment: *std.Build.Module = undefined,
++    host_environment: NativeEnvironment = undefined,
+@@ -246,0 +249,2 @@ const BuildGraph = struct {
++        if (s.b.option([]const u8, "native-gcc", "Target GCC for self-hosted embedding")) |name|
++            s.native_gcc = s.b.findProgramLazy(.{ .names = &.{name} });
+@@ -320 +324 @@ const BuildGraph = struct {
+-            .use_llvm = if (linuxX86(s.b.graph.host)) false else null,
++            .use_llvm = if (s.native_gcc != null or linuxX86(s.b.graph.host)) false else null,
+@@ -322,2 +325,0 @@ const BuildGraph = struct {
+-        // Keep the driver on its existing backend and reuse the optimized primitive
+-        // without linking SQLite or any dependency that this driver must first admit.
+@@ -332 +334 @@ const BuildGraph = struct {
+-            .use_llvm = true,
++            .use_llvm = s.native_gcc == null,
+@@ -501 +503 @@ const BuildGraph = struct {
+-        if (linuxX86(s.b.graph.host)) adaptive_emitter.use_llvm = false;
++        if (s.native_gcc != null or linuxX86(s.b.graph.host)) adaptive_emitter.use_llvm = false;
+@@ -706,0 +709 @@ const BuildGraph = struct {
++        if (s.native_gcc != null) runtime_emitter.use_llvm = false;
+@@ -744,0 +748 @@ const BuildGraph = struct {
++            s.native_gcc,
+@@ -812 +816 @@ const BuildGraph = struct {
+-        s.public_environment = if (host_target) s.host_environment else nativeEnvironment(
++        const public = if (host_target) s.host_environment else nativeEnvironment(
+@@ -821,0 +826 @@ const BuildGraph = struct {
++            s.native_gcc,
+@@ -824,0 +830,2 @@ const BuildGraph = struct {
++        s.public_environment = public.module;
++        s.gcc_identity = public.gcc_identity;
+@@ -839 +846,4 @@ const BuildGraph = struct {
+-        s.checked_environment = if (native_on_host) s.public_environment else s.host_environment;
++        s.checked_environment = if (native_on_host)
++            s.public_environment
++        else
++            s.host_environment.module;
+@@ -1005,0 +1016 @@ const BuildGraph = struct {
++        if (s.gcc_identity) |identity| s.b.addNamedLazyPath("native-gcc-identity", identity);
+@@ -1041,0 +1053 @@ const BuildGraph = struct {
++            .gcc_identity = s.gcc_identity,
+@@ -1426,0 +1439,5 @@ const BuildGraph = struct {
++const NativeEnvironment = struct {
++    module: *std.Build.Module,
++    gcc_identity: ?std.Build.LazyPath,
++};
++
+@@ -1436,0 +1454 @@ fn nativeEnvironment(
++    gcc: ?std.Build.LazyPath,
+@@ -1439 +1457 @@ fn nativeEnvironment(
+-) *std.Build.Module {
++) NativeEnvironment {
+@@ -1460 +1477,0 @@ fn nativeEnvironment(
+-    const c_library = nativeLibrary(b, target, optimize, sqlite_source, gate);
+@@ -1478,2 +1495,6 @@ fn nativeEnvironment(
+-    module.linkLibrary(c_library);
+-    return module;
++    const toolchain = if (gcc) |driver| Gcc.init(b, target, driver) else null;
++    module.linkLibrary(nativeLibrary(b, target, optimize, sqlite_source, gate, toolchain));
++    return .{
++        .module = module,
++        .gcc_identity = if (toolchain) |selected| selected.identity else null,
++    };
+@@ -1523,0 +1545 @@ fn nativeLibrary(
++    gcc: ?Gcc,
+@@ -1532,11 +1554,13 @@ fn nativeLibrary(
+-    c_module.addIncludePath(sqlite_source);
+-    c_module.addCSourceFile(.{
+-        .file = sqlite_source.path(b, "sqlite3.c"),
+-        .flags = @import("build_native.zig").sqliteFlags(optimize),
+-    });
+-    c_module.addCSourceFile(
+-        .{
+-            .file = b.path("runtime/native/native_c.c"),
+-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
+-        },
+-    );
++    const native = @import("build_native.zig");
++    const sqlite = sqlite_source.path(b, "sqlite3.c");
++    const shim = b.path("runtime/native/native_c.c");
++    if (gcc) |selected| {
++        const flags = native.gccFlags(b, target, optimize);
++        const sql = selected.object(b, sqlite, sqlite_source, flags.sqlite, gate, "sqlite3.o");
++        c_module.addObjectFile(sql);
++        c_module.addObjectFile(selected.object(b, shim, sqlite_source, flags.shim, gate, "shim.o"));
++    } else {
++        c_module.addIncludePath(sqlite_source);
++        c_module.addCSourceFile(.{ .file = sqlite, .flags = native.sqliteFlags(optimize) });
++        c_module.addCSourceFile(.{ .file = shim, .flags = native.shim_flags });
++    }
+@@ -1547 +1571 @@ fn nativeLibrary(
+-        .use_llvm = true,
++        .use_llvm = gcc == null,
+@@ -1551,0 +1576,40 @@ fn nativeLibrary(
++
++const Gcc = struct {
++    driver: std.Build.LazyPath,
++    identity: std.Build.LazyPath,
++
++    fn init(b: *std.Build, target: std.Build.ResolvedTarget, driver: std.Build.LazyPath) Gcc {
++        const probe = b.addSystemCommand(&.{"bash"});
++        probe.addFileArg2(b.path("tools/native/gcc-identity.sh"), .{});
++        probe.addFileArg2(driver, .{ .make_absolute = true });
++        probe.addArg(target.result.zigTriple(b.allocator) catch @panic("out of memory"));
++        probe.has_side_effects = true;
++        return .{
++            .driver = driver,
++            .identity = probe.captureStdOut(.{ .basename = "gcc-identity.json" }),
++        };
++    }
++
++    fn object(
++        gcc: Gcc,
++        b: *std.Build,
++        source: std.Build.LazyPath,
++        includes: std.Build.LazyPath,
++        flags: []const []const u8,
++        gate: *std.Build.Step,
++        name: []const u8,
++    ) std.Build.LazyPath {
++        const run = std.Build.Step.Run.create(b, "compile native C with GCC");
++        run.addFileArg2(gcc.driver, .{ .make_absolute = true });
++        run.addFileInput(gcc.identity);
++        run.addArgs(flags);
++        run.addDirectoryArg2(includes, .{ .prefix = "-I" });
++        run.addArgs(&.{ "-MD", "-MF" });
++        _ = run.addDepFileOutputArg2("headers.d", .{});
++        run.addArg("-c");
++        run.addFileArg2(source, .{});
++        run.addArg("-o");
++        run.step.dependOn(gate);
++        return run.addOutputFileArg2(name, .{});
++    }
++};
+diff --git a/tools/native/dependencies.zig b/tools/native/dependencies.zig
+index 780f729..e4a9282 100644
+--- a/tools/native/dependencies.zig
++++ b/tools/native/dependencies.zig
+@@ -359 +359 @@ fn manifest(c: Context, args: []const []const u8) !void {
+-    if (args.len != 17) return error.ExpectedManifestArguments;
++    if (args.len != 17 and args.len != 19) return error.ExpectedManifestArguments;
+@@ -380,0 +381,14 @@ fn manifest(c: Context, args: []const []const u8) !void {
++    var compiler = try c.value(.{
++        .version = @import("builtin").zig_version_string,
++        .executable_sha256 = compiler_digest,
++        .library_inventory_sha256 = try library.libraryIdentity(c),
++        .library_entries = library.files.items.len,
++        .library_bytes = library.bytes,
++    });
++    if (args.len == 19) {
++        try c.put(&compiler, "backend", "self-hosted");
++        try sqlite.object.put(c.a, "compiler", try c.json(args[17]));
++        const shim = try std.json.parseFromSliceLeaky(Value, c.a, args[18], .{});
++        if (shim != .array) return error.InvalidMetadata;
++        try sqlite.object.put(c.a, "posix_shim_compile_flags", shim);
++    }
+@@ -401,7 +415 @@ fn manifest(c: Context, args: []const []const u8) !void {
+-        .compiler = .{
+-            .version = @import("builtin").zig_version_string,
+-            .executable_sha256 = compiler_digest,
+-            .library_inventory_sha256 = try library.libraryIdentity(c),
+-            .library_entries = library.files.items.len,
+-            .library_bytes = library.bytes,
+-        },
++        .compiler = compiler,
+diff --git a/tools/native/gcc-identity.sh b/tools/native/gcc-identity.sh
+new file mode 100644
+index 0000000..a1d4abb
+--- /dev/null
++++ b/tools/native/gcc-identity.sh
+@@ -0,0 +1,43 @@
++#!/usr/bin/env bash
++set -euo pipefail
++export LC_ALL=C
++driver=$1
++target=$2
++macros=$("$driver" -dM -E -x c - </dev/null)
++has_macro() { grep -Eq "^#define $1 " <<<"$macros"; }
++fail() { printf '%s\n' "$*" >&2; exit 1; }
++if ! has_macro __GNUC__ || has_macro __clang__; then fail "native-gcc requires GNU GCC"; fi
++case "$target" in
++  x86_64-linux*-musl)
++    if ! has_macro __linux__ || ! has_macro __x86_64__; then fail "expected x86_64-linux-musl GCC"; fi
++    headers=$("$driver" -include features.h -dM -E -x c - </dev/null)
++    if grep -Eq '^#define (__GLIBC__|__UCLIBC__|__BIONIC__) ' <<<"$headers"; then
++      fail "native-gcc must use musl headers"
++    fi
++    link=$("$driver" -### -x c - -o /dev/null </dev/null 2>&1)
++    grep -Fq '/ld-musl-x86_64.so.1' <<<"$link" || fail "native-gcc must target musl"
++    ;;
++  aarch64-macos*)
++    if ! has_macro __APPLE__ || ! has_macro __aarch64__; then fail "expected aarch64-macos GCC"; fi
++    ;;
++  *) fail "unsupported native-gcc target $target" ;;
++esac
++version=$("$driver" -dumpfullversion)
++machine=$("$driver" -dumpmachine)
++[[ $version =~ ^[0-9.]+$ && $machine =~ ^[a-zA-Z0-9._-]+$ ]] || fail "invalid GCC identity"
++configuration=$("$driver" -v -E -x c - -o /dev/null </dev/null 2>&1)
++digest=$({
++  set -e
++  printf '%s\n' "$configuration" "$macros"
++  "$driver" -dumpspecs
++  shasum -a 256 "$driver"
++  while IFS= read -r component; do
++    shasum -a 256 "$(command -v "$component")"
++  done < <(sed -n 's/^COLLECT_GCC=//p; s/^Reading specs from //p' <<<"$configuration")
++  for tool in cc1 as; do
++    component=$("$driver" "-print-prog-name=$tool")
++    shasum -a 256 "$(command -v "$component")"
++  done
++} | shasum -a 256)
++printf '{"family":"gcc","version":"%s","driver_machine":"%s","toolchain_sha256":"%s"}\n' \
++  "$version" "$machine" "${digest%% *}"
