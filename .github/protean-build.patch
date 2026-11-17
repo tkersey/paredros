@@ -250,10 +250,10 @@ index 780f729..e4a9282 100644
 +        .compiler = compiler,
 diff --git a/tools/native/gcc-identity.sh b/tools/native/gcc-identity.sh
 new file mode 100644
-index 0000000..a1d4abb
+index 0000000..196067a
 --- /dev/null
 +++ b/tools/native/gcc-identity.sh
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +export LC_ALL=C
@@ -287,12 +287,14 @@ index 0000000..a1d4abb
 +  printf '%s\n' "$configuration" "$macros"
 +  "$driver" -dumpspecs
 +  shasum -a 256 "$driver"
-+  while IFS= read -r component; do
-+    shasum -a 256 "$(command -v "$component")"
-+  done < <(sed -n 's/^COLLECT_GCC=//p; s/^Reading specs from //p' <<<"$configuration")
-+  for tool in cc1 as; do
-+    component=$("$driver" "-print-prog-name=$tool")
-+    shasum -a 256 "$(command -v "$component")"
++  while IFS= read -r spec; do
++    [[ -r $spec ]] || fail "cannot read GCC specs file: $spec"
++    shasum -a 256 "$spec"
++  done < <(sed -n 's/^Reading specs from //p' <<<"$configuration")
++  for tool in "$(sed -n 's/^COLLECT_GCC=//p' <<<"$configuration")" \
++      "$("$driver" -print-prog-name=cc1)" "$("$driver" -print-prog-name=as)"; do
++    component=$(command -v "$tool") || fail "cannot locate GCC component: $tool"
++    shasum -a 256 "$component"
 +  done
 +} | shasum -a 256)
 +printf '{"family":"gcc","version":"%s","driver_machine":"%s","toolchain_sha256":"%s"}\n' \
