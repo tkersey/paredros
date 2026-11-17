@@ -223,9 +223,6 @@ jobs:
               zig build build-native-tests -Dnative-tests=true -Dnative-group=transitions -Dnative-partition="${PART##*-}" -Dtest-product-assets=false -Doptimize=safe -j2 --verbose --summary all ;;
             *) zig build build-native-tests -Dnative-tests=true -Dnative-group="$PART" -Demitted-application=prepared -Doptimize=safe -j2 --verbose --summary all ;;
           esac
-          if [[ -d zig-out/test-tools/native ]]; then
-            cp zig-pkg/protean-*/tools/native/qualification_tests.mjs zig-out/test-tools/native/
-          fi
           tar -C zig-out -czf "$RUNNER_TEMP/$PART.tar.gz" .
           sha256sum "$RUNNER_TEMP/$PART.tar.gz"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
