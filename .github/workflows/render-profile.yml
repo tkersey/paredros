@@ -1,4 +1,4 @@
-name: Run all native methods with the GNU-compiled application runtime on Linux
+name: Verify the pinned Protean compiler selection on native Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -10,7 +10,7 @@ env:
   ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
   ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
-  compile:
+  prepare:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     outputs:
@@ -40,75 +40,84 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - name: Emit the unfiltered methods suite and its complete application runtime
-        run: |
-          set -o pipefail
-          zig build build-native-tests -Dnative-tests=true -Dnative-group=methods -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee compile.log
-          uv run --no-project python .github/emit-gcc-comparison.py
-      - name: Seal compiler inputs
+      - name: Emit the authored application
+        run: zig build prepare-native -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
+      - name: Seal the prepared application
         id: seal
         run: |
-          tar -cf - -C compiler-comparison . | zstd -T2 -1 -o comparison.tar.zst
-          echo "sha256=$(sha256sum comparison.tar.zst | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          cmp app/types.zig zig-out/prepared/types.zig
+          tar -cf selected.tar -C zig-out/prepared program.bpi3 application.json types.zig
+          echo "sha256=$(sha256sum selected.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: compiler-comparison
-          path: comparison.tar.zst
-          compression-level: 0
+          name: selected-application
+          path: selected.tar
           retention-days: 1
-  gcc:
-    needs: compile
+  build:
+    needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     outputs:
-      sha256: ${{ steps.link.outputs.sha256 }}
+      sha256: ${{ steps.seal.outputs.sha256 }}
     steps:
+      - *checkout
       - *zig
+      - *restore
       - *compiler
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: compiler-comparison
-      - name: Build and link the checked methods executable with GNU musl GCC
-        id: link
+          name: selected-application
+      - name: Compile against the verified emitted image
         env:
-          SHA256: ${{ needs.compile.outputs.sha256 }}
+          SHA256: ${{ needs.prepare.outputs.sha256 }}
         run: |
-          echo "$SHA256  comparison.tar.zst" | sha256sum --check --strict
-          zstd -dc comparison.tar.zst | tar -xpf -
-          echo 'c69e0c213f34af01002bdd649fd0a97af7cdb676e0809dcf4e24b18ebe3c9405  zig.h' | sha256sum --check --strict
-          flags=(-std=gnu17 -fno-strict-aliasing -fno-ipa-modref -Wno-builtin-declaration-mismatch -fmax-errors=8 -march=x86-64 -mtune=generic -I.)
-          ziglib=$(dirname "$(realpath "$(command -v zig)")")/lib
-          musl="$ziglib/libc/musl"
-          musl-gcc -std=c99 -O2 -I"$musl/arch/x86_64" -I"$musl/arch/generic" -I"$musl/src/include" -I"$musl/src/internal" -I"$ziglib/libc/include/x86_64-linux-musl" -I"$ziglib/libc/include/generic-musl" -c "$musl/src/linux/statx.c" -o statx.o
-          musl-gcc "${flags[@]}" -O2 -fno-builtin -c compiler-rt.c -o compiler-rt.o
-          ar rcs libzig-rt.a compiler-rt.o
-          /usr/bin/time -f 'compile elapsed=%e rss=%M' musl-gcc "${flags[@]}" -O2 -c methods.c -o methods.o
-          aliases=()
-          while read -r name; do aliases+=("-Wl,--undefined=$name,--defsym=protean_posix_$name=$name"); done < aliases
-          musl-gcc -static methods.o statx.o libprotean-native-c.a libzig-rt.a "${aliases[@]}" -lm -lpthread -o methods
-          tar -czf methods.tar.gz methods
-          echo "sha256=$(sha256sum methods.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "$SHA256  selected.tar" | sha256sum --check --strict
+          mkdir selected
+          tar -xf selected.tar -C selected
+          cmp app/types.zig selected/types.zig
+          zig build -Dnative=true -Dtarget=x86_64-linux-musl -Demitted-application=selected -Doptimize=safe -j2 --verbose --summary all
+          zig-out/bin/paredros describe-build > manifest.json
+          jq -e '.compiler.backend == "self-hosted" and
+            .dependencies.sqlite.compiler.family == "gcc" and
+            (.dependencies.sqlite.compiler.toolchain_sha256 | test("^[0-9a-f]{64}$")) and
+            (.dependencies.sqlite.compile_flags | index("-O1") != null) and
+            (.dependencies.sqlite.posix_shim_compile_flags | index("-O2") != null)' manifest.json
+      - name: Seal the built executable
+        id: seal
+        run: |
+          tar -cf product.tar -C zig-out/bin paredros
+          echo "sha256=$(sha256sum product.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: gcc-methods
-          path: methods.tar.gz
-          compression-level: 0
+          name: selected-product
+          path: product.tar
           retention-days: 1
-  execute:
-    needs: gcc
+  smoke:
+    needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
+      - *checkout
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: gcc-methods
-      - name: Execute all 21 native methods checks
+          name: selected-product
+      - name: Run the five product smoke cases
         env:
-          SHA256: ${{ needs.gcc.outputs.sha256 }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
         run: |
-          echo "$SHA256  methods.tar.gz" | sha256sum --check --strict
-          tar -xzf methods.tar.gz
+          echo "$SHA256  product.tar" | sha256sum --check --strict
+          tar -xpf product.tar
+          uv run --no-project python tests/product_smoke.py ./paredros --report "$RUNNER_TEMP/report.json"
+          jq -e '.count == 5 and .live_services == false' "$RUNNER_TEMP/report.json"
+  contracts:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - *zig
+      - name: Run every source contract test against the pinned package
+        run: |
           set -o pipefail
-          /usr/bin/time -f 'execution elapsed=%e rss=%M' ./methods 2>&1 | tee observed.log
-          grep -Fxq 'All 21 tests passed.' observed.log
+          zig build test -Dnative=false -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee source.log
+          grep -Fq '106/106 tests passed' source.log
