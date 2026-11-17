@@ -1,4 +1,4 @@
-name: Verify the downstream product and compiler manifest on Linux
+name: Verify the pinned Protean compiler selection on native Linux
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -36,12 +36,10 @@ jobs:
           echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
       - &compiler
-        name: Select the candidate compiler and dependency
+        name: Install the native musl C compiler
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
-          cp -a zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP diagnostic-protean
-          git apply --unidiff-zero --directory=diagnostic-protean .github/protean-build.patch
       - name: Emit the authored application
         run: zig build prepare-native -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
       - name: Seal the prepared application
@@ -112,3 +110,14 @@ jobs:
           tar -xpf product.tar
           uv run --no-project python tests/product_smoke.py ./paredros --report "$RUNNER_TEMP/report.json"
           jq -e '.count == 5 and .live_services == false' "$RUNNER_TEMP/report.json"
+  contracts:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - *zig
+      - name: Run every source contract test against the pinned package
+        run: |
+          set -o pipefail
+          zig build test -Dnative=false -Doptimize=safe -j2 --verbose --summary all 2>&1 | tee source.log
+          grep -Fq '106/106 tests passed' source.log
