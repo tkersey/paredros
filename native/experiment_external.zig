@@ -48,7 +48,8 @@ pub fn clockDeclaration() native.Declaration {
     }, stamp);
 }
 
-fn stamp(ctx: native.Context, _: e.Stamp) !i64 {
+fn stamp(ctx: native.Context, mark: e.Stamp) !i64 {
+    std.debug.print("experiment clock case={d} arm={d} {s}\n", .{ mark.case_index, mark.arm, @tagName(mark.edge) });
     return std.math.cast(i64, std.Io.Clock.real.now(ctx.io).toMilliseconds()) orelse
         error.ClockRange;
 }

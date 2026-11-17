@@ -47,6 +47,7 @@ const Witness = struct {
         const self: *Witness = @ptrCast(@alignCast(ctx.environment.?));
         var request = try c.decodeOwned(e.CodecRequest, ctx.allocator, bytes);
         defer request.deinit();
+        std.debug.print("experiment codec {s}\n", .{@tagName(request.value)});
         switch (request.value) {
             .checkpoint => _ = self.checkpoints.fetchAdd(1, .release),
             .scripted_completion => _ = self.scripted_calls.fetchAdd(1, .release),
