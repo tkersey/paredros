@@ -384,13 +384,9 @@ fn receiptMatches(
     receipt: a.Value(t.Receipt),
     confirmation: a.Value(Confirmation),
 ) !a.Value(bool) {
-    const key = try same(
-        c,
-        b,
-        t.DeliveryKey,
-        try b.field(delivery, "key"),
-        try b.field(receipt, "key"),
-    );
+    const timestamp = try b.field(receipt, "timestamp");
+    const nonempty = try b.less(try b.constant(u64, 0), try b.blobLength(timestamp));
+    const confirmed = try same(c, b, t.Timestamp, try b.field(confirmation, "timestamp"), timestamp);
     const destination = try same(
         c,
         b,
@@ -398,33 +394,16 @@ fn receiptMatches(
         try b.field(delivery, "destination"),
         try b.field(receipt, "destination"),
     );
-    const content = try same(
+    const no = try b.constant(bool, false);
+    const addressed = try b.select(nonempty, try b.select(confirmed, destination, no), no);
+    const key = try sameIf(c, b, addressed, t.DeliveryKey, try b.field(delivery, "key"), try b.field(receipt, "key"));
+    return sameIf(
         c,
         b,
+        key,
         t.Digest,
         try b.field(try b.field(delivery, "payload"), "content_digest"),
         try b.field(receipt, "payload_digest"),
-    );
-    const timestamp = try same(
-        c,
-        b,
-        t.Timestamp,
-        try b.field(confirmation, "timestamp"),
-        try b.field(receipt, "timestamp"),
-    );
-    const nonempty = try b.less(
-        try b.constant(u64, 0),
-        try b.blobLength(try b.field(receipt, "timestamp")),
-    );
-    const no = try b.constant(bool, false);
-    return b.select(
-        key,
-        try b.select(
-            destination,
-            try b.select(content, try b.select(timestamp, nonempty, no), no),
-            no,
-        ),
-        no,
     );
 }
 
@@ -490,12 +469,40 @@ fn validCoverage(
         ),
         no,
     );
-    const endpoint = try b.select(
-        try b.equal(through, try b.field(observed, "sequence")),
-        try same(c, b, t.Frontier, coverage, observed),
-        try b.constant(bool, true),
+    const at_endpoint = try b.equal(through, try b.field(observed, "sequence"));
+    const compare = try b.branch();
+    const done = try b.branch();
+    return b.conditional(
+        try b.select(valid, at_endpoint, no),
+        try compare.ret(try same(c, compare, t.Frontier, coverage, observed)),
+        try done.ret(valid),
     );
-    return b.select(valid, endpoint, no);
+}
+
+inline fn sameIf(
+    c: protean.Context,
+    b: anytype,
+    condition: a.Value(bool),
+    comptime T: type,
+    left: a.Value(T),
+    right: a.Value(T),
+) anyerror!a.Value(bool) {
+    const compare = try b.branch();
+    const different = try b.branch();
+    return b.conditional(
+        condition,
+        try compare.ret(try same(c, compare, T, left, right)),
+        try different.ret(try different.constant(bool, false)),
+    );
+}
+
+fn needsTraversal(comptime T: type) bool {
+    const S = @import("horos").authoring.Shape(T);
+    if (S.contract == .text or S.contract == .bytes) return false;
+    return switch (@typeInfo(T)) {
+        .int, .bool, .@"enum" => false,
+        else => true,
+    };
 }
 
 inline fn same(
@@ -523,18 +530,25 @@ inline fn same(
             .index = try b.constant(u64, 0),
         }),
         .@"struct" => {
-            var result = try b.constant(bool, true);
-            inline for (comptime std.meta.fieldNames(T)) |field| {
-                const equal = try same(
-                    c,
-                    b,
-                    @FieldType(T, field),
-                    try b.field(left, field),
-                    try b.field(right, field),
-                );
-                result = try b.select(result, equal, try b.constant(bool, false));
+            var result: ?a.Value(bool) = null;
+            inline for (.{ false, true }) |traverse| {
+                inline for (comptime std.meta.fieldNames(T)) |field| {
+                    const F = @FieldType(T, field);
+                    if (comptime needsTraversal(F) == traverse) {
+                        const x = try b.field(left, field);
+                        const y = try b.field(right, field);
+                        if (result) |prior| {
+                            result = if (traverse)
+                                try sameIf(c, b, prior, F, x, y)
+                            else
+                                try b.select(prior, try same(c, b, F, x, y), try b.constant(bool, false));
+                        } else {
+                            result = try same(c, b, F, x, y);
+                        }
+                    }
+                }
             }
-            return result;
+            return result orelse b.constant(bool, true);
         },
         .optional => |optional| {
             const none = try b.caseOf(left, "none");

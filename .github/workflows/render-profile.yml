@@ -1,7 +1,7 @@
-name: Compare authored frame scanning and check session settlement on native Linux
+name: Measure short-circuit settlement on native Linux
 on:
   push:
-    branches: [diagnostic/render-cost-f493826]
+    branches: [diagnostic/settlement-cost]
 permissions:
   contents: read
   actions: read
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [prior, candidate, session]
+        part: [prior, candidate]
     steps:
       - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -43,20 +43,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Select unchanged control frame
+      - name: Select unchanged settlement
         if: matrix.part == 'prior'
-        run: git restore --source=f43f895 -- app/render_frame.zig
+        run: git restore --source=c4519a3 -- app/settlement.zig
       - name: Compile the selected existing suite
-        env:
-          PART: ${{ matrix.part }}
         run: |
-          if [ "$PART" = session ]; then
-            zig build build-native-tests -Dnative-tests=true -Dnative-group=authority -Dtest-product-assets=false -Dtest-filter='native public session serves two control clients while a worker is held' -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
-            cp zig-out/test-tools/native/authority check
-          else
-            zig build build-native-tests -Dnative-tests=true -Dnative-group=rendering -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
-            cp zig-out/test-tools/native/rendering check
-          fi
+          zig build build-native-tests -Dnative-tests=true -Dnative-group=transitions -Dnative-partition=second -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
+          cp zig-out/test-tools/native/transitions-second check
           sha256sum check
           tar -czf check.tar.gz check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -72,13 +65,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {part: prior, case: native render frame retains truthful full count and oldest ordered bounded entries}
-          - {part: candidate, case: native render frame retains truthful full count and oldest ordered bounded entries}
-          - {part: prior, case: native render frame budgets hostile escaping and all sections at their upper bounds}
-          - {part: candidate, case: native render frame budgets hostile escaping and all sections at their upper bounds}
-          - {part: candidate, case: native render frame keeps Unicode mentions and URLs inert and flattens text controls}
-          - {part: session, case: native public session serves two control clients while a worker is held}
+        part: [prior, candidate]
+        case:
+          - native settlements retain unrelated superseded malformed or unproven delivery evidence
+          - native settlements advance only exact contiguous confirmed coverage and retain receipt
     steps:
       - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
@@ -87,14 +77,18 @@ jobs:
           name: ${{ matrix.part }}
       - name: Execute the original native case
         env:
-          PART: ${{ matrix.part }}
           CASE: ${{ matrix.case }}
         run: |
           tar -xzf check.tar.gz
-          if [ "$PART" = session ]; then
-            set -o pipefail
-            ./check 2>&1 | tee results.log
-            grep -Fxq 'All 2 tests passed.' results.log
-          else
-            uv run --no-project --isolated python .github/measure-native-case.py ./check 63 "$CASE"
-          fi
+          (
+            while sleep 45; do
+              for db in .zig-cache/tmp/*/native/state.sqlite; do
+                if [ -f "$db" ]; then
+                  sqlite3 -readonly -cmd '.timeout 250' "$db" 'select count(*),sum(terminal) from tasks;' || true
+                fi
+              done
+            done
+          ) &
+          watcher=$!
+          trap 'kill "$watcher" 2>/dev/null || true' EXIT
+          uv run --no-project --isolated python .github/measure-native-case.py ./check 25 "$CASE"
