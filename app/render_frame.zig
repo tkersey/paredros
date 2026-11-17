@@ -216,6 +216,7 @@ fn containsFunction(c: protean.Context) !Contains {
         .{
             .left = oid,
             .right = try active.field(commit, "oid"),
+            .index = try active.constant(u64, 0),
         },
     );
     const found = try active.branch();

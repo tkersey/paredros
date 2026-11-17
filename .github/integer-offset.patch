@@ -1,0 +1,20 @@
+--- a/src/interpreter_v2/values.zig
++++ b/src/interpreter_v2/values.zig
+@@ -45,6 +45,17 @@
+                     const element: usize = @intCast(collection.element);
+                     if (facts.exportable[element] and facts.minimum[element] == 0)
+                         break :blk .{ .encoded = &.{} };
++                    const schema = values.schemas[element];
++                    if (data.admission.integer(schema)) {
++                        const width = data.scalar.width(schema).?;
++                        if (start > encoded.len / width) return error.Truncated;
++                        const offset: usize = @as(usize, @intCast(start)) * width;
++                        byte_offset += offset;
++                        const tail = encoded[offset..];
++                        if (start + count == collection.count) break :blk .{ .encoded = tail };
++                        if (count > tail.len / width) return error.Truncated;
++                        break :blk .{ .encoded = tail[0 .. @as(usize, @intCast(count)) * width] };
++                    }
+                     var reader: data.wire.Reader = .{ .input = encoded };
+                     var remaining = start;
+                     while (remaining != 0) : (remaining -= 1)

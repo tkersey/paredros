@@ -173,6 +173,7 @@ fn releaseRecovery(
         try sb.call(h.ids, .{
             .left = try sb.field(some.payload(), "task"),
             .right = try sb.field(reference, "task"),
+            .index = try sb.constant(u64, 0),
         }),
         try digestEqual(
             sb,
@@ -352,6 +353,7 @@ fn sourceConditionValid(
     const same_base = try some.body().call(h.oids, .{
         .left = some.payload(),
         .right = try some.body().field(condition, "base"),
+        .index = try some.body().constant(u64, 0),
     });
     const base = try b.match(tip, .{
         .none = try none.ret(try none.body().constant(bool, false)),
@@ -792,7 +794,7 @@ fn digestEqual(
     left: a.Value(t.Digest),
     right: a.Value(t.Digest),
 ) !a.Value(bool) {
-    return b.call(h.digests, .{ .left = left, .right = right });
+    return b.call(h.digests, .{ .left = left, .right = right, .index = try b.constant(u64, 0) });
 }
 
 fn keyEqual(

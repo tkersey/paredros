@@ -95,6 +95,7 @@ fn validate(c: protean.Context, b: anytype, input: a.Value(t.Step)) !void {
     const bound = try retained.body().call(ids, .{
         .left = retained.payload(),
         .right = try retained.body().field(input, "obligation"),
+        .index = try retained.body().constant(u64, 0),
     });
     try a.require(c, b, try b.match(identity, .{
         .self = try self.ret(try self.body().select(original, try self.body().equal(

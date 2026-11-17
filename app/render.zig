@@ -374,6 +374,7 @@ fn validateTransition(
     try a.require(c, b, try b.call(oids, .{
         .left = try b.select(first, prior, try b.field(prefix, "tip")),
         .right = try b.field(batch, "base"),
+        .index = try b.constant(u64, 0),
     }), "render_base_mismatch");
     const gap_epoch = try b.branch();
     const same_epoch = try b.branch();
@@ -965,7 +966,7 @@ fn renderBody(
 }
 
 fn same(b: anytype, function: anytype, left: anytype, right: anytype) !a.Value(bool) {
-    return b.call(function, .{ .left = left, .right = right });
+    return b.call(function, .{ .left = left, .right = right, .index = try b.constant(u64, 0) });
 }
 
 fn sourceMatches(

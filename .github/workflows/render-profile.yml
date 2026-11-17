@@ -1,4 +1,4 @@
-name: Compare fixed-width settlement identity checks
+name: Measure direct indexing of encoded integer collections
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [recursive, fixed]
+        variant: [scan, offset]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -31,8 +31,12 @@ jobs:
           gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
           echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xf -
-      - if: matrix.variant == 'recursive'
-        run: git restore --source=14a9116dc38cffb6aab8700ca0041d463ed56f08 -- app
+      - if: matrix.variant == 'offset'
+        name: Apply the experimental runtime change to the pinned source
+        run: |
+          cd .protean-native/inputs/kosmos
+          echo 'df4053988f3f981b9edddd76c1a95b85dcec86fe8986af6a7807410a9190ec1a  src/interpreter_v2/values.zig' | sha256sum --check --strict
+          patch -p1 < "$GITHUB_WORKSPACE/.github/integer-offset.patch"
       - name: Compile the focused test with the self-hosted backend
         env:
           WITNESS: native settlements advance only exact contiguous confirmed coverage and retain receipt

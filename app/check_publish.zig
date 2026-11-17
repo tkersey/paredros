@@ -186,7 +186,7 @@ fn continued(
         b,
         try b.call(
             equal,
-            .{ .left = base, .right = declared_base },
+            .{ .left = base, .right = declared_base, .index = try b.constant(u64, 0) },
         ),
         "comparison_base_mismatch",
     );
@@ -273,7 +273,7 @@ fn unchangedCheck(
     try a.require(
         c,
         b,
-        try b.call(equal, .{ .left = base, .right = tip }),
+        try b.call(equal, .{ .left = base, .right = tip, .index = try b.constant(u64, 0) }),
         "unchanged_tip_mismatch",
     );
     try a.require(
@@ -537,6 +537,7 @@ fn preserveQuestion(
             .{
                 .left = try pb.field(present.payload(), field),
                 .right = try pb.field(next_condition, field),
+                .index = try pb.constant(u64, 0),
             },
         ),
         try pb.constant(bool, false),
