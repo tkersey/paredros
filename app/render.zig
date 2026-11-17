@@ -3,6 +3,7 @@ const protean = @import("protean");
 const cts = @import("protean_contracts");
 const t = @import("application_types");
 const a = @import("author.zig");
+const oid_text = @import("oid_text.zig");
 const bytes = @import("bytes.zig");
 const step = @import("step.zig");
 const model = @import("model.zig");
@@ -42,7 +43,6 @@ const ContextCommits = a.Function(struct {
     limit: u64,
     text: Context,
 }, ?Context);
-const OidText = a.Function(struct { oid: t.Oid, index: u64, text: Context }, Context);
 const RenderBody = struct { body: m.Summary, head: t.Head };
 const Retained = @FieldType(t.Method, "retained");
 const Helpers = struct {
@@ -60,10 +60,11 @@ pub fn emit(
     retained: method.Function,
     effects: anytype,
 ) !step.Render {
+    const oid = try oid_text.emit(c);
     const helpers: Helpers = .{
         .select = try selection(c),
-        .frame = try frame.emit(c),
-        .context = try contextBatches(c, try contextCommits(c, try oidText(c))),
+        .frame = try frame.emit(c, oid),
+        .context = try contextBatches(c, try contextCommits(c, oid)),
         .method = retained,
         .digest = try bytes.emit(c, 32),
         .id = try bytes.emit(c, 16),
@@ -443,73 +444,6 @@ fn literal(c: protean.Context, text: []const u8) !a.Value(Context) {
     return c.literal(Context, .{ .bytes = text });
 }
 
-fn oidText(c: protean.Context) !OidText {
-    const function = try c.author.function("render exact evidence object identity", .{
-        .oid = try c.schema(t.Oid),
-        .index = try c.schema(u64),
-        .text = try c.schema(Context),
-    }, try c.schema(Context), &.{});
-    const b = try c.author.body(function);
-    const oid = try b.parameter("oid");
-    const index = try b.parameter("index");
-    const text = try b.parameter("text");
-    const more = try b.branch();
-    const done = try b.branch();
-    const byte = try more.variantPayload(
-        try more.sequenceGet(oid, index),
-        "some",
-        try a.failure(c, "render_oid_bounds"),
-    );
-    const digit = try inRange(more, byte, '0', '9');
-    const lower = try inRange(more, byte, 'a', 'f');
-    const upper = try inRange(more, byte, 'A', 'F');
-    try a.require(
-        c,
-        more,
-        try more.select(
-            digit,
-            try more.constant(bool, true),
-            try more.select(lower, try more.constant(bool, true), upper),
-        ),
-        "render_invalid_oid",
-    );
-    const scalar = try more.convertInteger(try c.schema(u32), byte, .{});
-    const character = try more.textScalar(scalar, try a.failure(c, "render_invalid_oid"));
-    const next = try more.call(function, .{
-        .oid = oid,
-        .index = try add(c, more, index, try more.constant(u64, 1)),
-        .text = try join(c, more, .{ text, character }),
-    });
-    try c.author.define(function, try b.ret(try b.conditional(
-        try b.less(index, try b.constant(u64, 40)),
-        try more.ret(next),
-        try done.ret(text),
-    )));
-    return function;
-}
-
-fn inRange(b: anytype, value: a.Value(u8), minimum: u8, maximum: u8) !a.Value(bool) {
-    return andAll(
-        b,
-        &.{
-            try b.booleanNot(try b.less(value, try b.constant(u8, minimum))),
-            try b.booleanNot(try b.less(try b.constant(u8, maximum), value)),
-        },
-    );
-}
-
-fn oidString(
-    c: protean.Context,
-    b: anytype,
-    function: OidText,
-    oid: a.Value(t.Oid),
-) !a.Value(Context) {
-    return b.call(
-        function,
-        .{ .oid = oid, .index = try b.constant(u64, 0), .text = try literal(c, "") },
-    );
-}
-
 fn identityText(
     c: protean.Context,
     b: anytype,
@@ -532,7 +466,7 @@ fn identityText(
     return text;
 }
 
-fn contextCommits(c: protean.Context, oid: OidText) !ContextCommits {
+fn contextCommits(c: protean.Context, oid: oid_text.Function) !ContextCommits {
     const function = try c.author.function("materialize complete commit context", .{
         .commits = try c.schema(frame.Commits),
         .index = try c.schema(u64),
@@ -557,7 +491,7 @@ fn contextCommits(c: protean.Context, oid: OidText) !ContextCommits {
         more,
         .{
             try literal(c, "\nEvidence untrusted: commit "),
-            try oidString(c, more, oid, try more.field(commit, "oid")),
+            try oid_text.format(c, more, oid, try more.field(commit, "oid")),
             try literal(c, " message bytes="),
             try more.textInteger(try more.blobLength(message)),
             try literal(c, "\n"),

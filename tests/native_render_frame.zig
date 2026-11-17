@@ -227,7 +227,10 @@ test "native render frame empty evidence and invalid coverage remain explicit" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
-    const result = try run(&fixture, "empty", input(&.{}));
+    var empty = input(&.{});
+    empty.base = "0123456789ABCDEFabcdef0123456789ABCDEFab".*;
+    const result = try run(&fixture, "empty", empty);
+    try expectText(result, &empty.base);
     try std.testing.expectEqual(0, result.total_commits);
     try std.testing.expectEqual(0, result.listed_commits);
     try std.testing.expect(!result.abbreviated);
@@ -239,6 +242,9 @@ test "native render frame empty evidence and invalid coverage remain explicit" {
     invalid = input(&.{});
     invalid.base[0] = 'z';
     try fixture.rejected("invalid-oid", invalid, "render_invalid_oid");
+    invalid = input(&.{});
+    invalid.tip[39] = 0xff;
+    try fixture.rejected("invalid-final-oid-byte", invalid, "render_invalid_oid");
     const commits = [_]t.Commit{.{ .oid = oid(1), .message = .{ .bytes = "commit" } }};
     invalid = input(&commits);
     invalid.prior_sequence = invalid.through_sequence;

@@ -4,6 +4,7 @@ const protean = @import("protean");
 const cts = @import("protean_contracts");
 const t = @import("application_types");
 const a = @import("author.zig");
+const oid_text = @import("oid_text.zig");
 const bytes = @import("bytes.zig");
 
 pub const Highlight = struct { oid: t.Oid, text: cts.Text(256) };
@@ -38,7 +39,6 @@ const Frame = struct { text: Text, listed_oids: Oids, invalid_highlights: u64, a
 const ClipResult = struct { text: cts.Utf8, abbreviated: bool };
 const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, output: cts.Utf8 };
 const Clip = a.Function(struct { state: ClipInput }, ClipResult);
-const OidText = a.Function(struct { oid: t.Oid, index: u64, text: cts.Utf8 }, cts.Utf8);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
 const Notes = a.Function(struct {
@@ -193,63 +193,6 @@ fn clipScalar(
     );
 }
 
-fn oidFunction(c: protean.Context) !OidText {
-    const function = try c.author.function("verified hexadecimal commit identity", .{
-        .oid = try c.schema(t.Oid),
-        .index = try c.schema(u64),
-        .text = try c.schema(cts.Utf8),
-    }, try c.schema(cts.Utf8), &.{});
-    const b = try c.author.body(function);
-    const oid = try b.parameter("oid");
-    const index = try b.parameter("index");
-    const text = try b.parameter("text");
-    const active = try b.branch();
-    const ended = try b.branch();
-    const byte = try active.variantPayload(
-        try active.sequenceGet(oid, index),
-        "some",
-        try failure(c),
-    );
-    const table = comptime blk: {
-        var values: [256]u8 = @splat(0);
-        for ("0123456789abcdefABCDEF") |digit| values[digit] = digit;
-        break :blk values;
-    };
-    const position = try active.convertInteger(try c.schema(u64), byte, .{});
-    const digit = try active.variantPayload(
-        try active.blobByte(try literal(c, &table), position),
-        "some",
-        try failure(c),
-    );
-    try a.require(c, active, try active.less(try active.constant(u8, 0), digit), "render_invalid_oid");
-    const scalar = try active.convertInteger(try c.schema(u32), digit, .{});
-    const next = try active.call(function, .{
-        .oid = oid,
-        .index = try add(c, active, index, try active.constant(u64, 1)),
-        .text = try widen(c, active, try join(c, active, .{
-            text, try active.textScalar(scalar, try failure(c)),
-        })),
-    });
-    try c.author.define(function, try b.ret(try b.conditional(
-        try b.less(index, try b.constant(u64, 40)),
-        try active.ret(next),
-        try ended.ret(text),
-    )));
-    return function;
-}
-
-fn oidValue(
-    c: protean.Context,
-    b: anytype,
-    function: OidText,
-    oid: a.Value(t.Oid),
-) !a.Value(cts.Utf8) {
-    return b.call(
-        function,
-        .{ .oid = oid, .index = try b.constant(u64, 0), .text = try literal(c, "") },
-    );
-}
-
 fn containsFunction(c: protean.Context) !Contains {
     const equal = try bytes.emit(c, 40);
     const function = try c.author.function("highlight belongs to acquired commits", .{
@@ -299,7 +242,7 @@ fn containsFunction(c: protean.Context) !Contains {
     return function;
 }
 
-fn listFunction(c: protean.Context, clip: Clip, oid: OidText) !List {
+fn listFunction(c: protean.Context, clip: Clip, oid: oid_text.Function) !List {
     const function = try c.author.function("oldest bounded commit presentation", .{
         .commits = try c.schema(Commits),
         .index = try c.schema(u64),
@@ -322,7 +265,7 @@ fn listFunction(c: protean.Context, clip: Clip, oid: OidText) !List {
         .text = try join(c, active, .{
             try b.field(frame, "text"),
             try literal(c, "\n- "),
-            try oidValue(c, active, oid, selected_oid),
+            try oid_text.format(c, active, oid, selected_oid),
             try literal(c, " "),
             try active.field(message, "text"),
         }),
@@ -367,7 +310,7 @@ fn listFunction(c: protean.Context, clip: Clip, oid: OidText) !List {
     return function;
 }
 
-fn notesFunction(c: protean.Context, clip: Clip, oid: OidText, contains: Contains) !Notes {
+fn notesFunction(c: protean.Context, clip: Clip, oid: oid_text.Function, contains: Contains) !Notes {
     const function = try c.author.function("retain only acquired commit method highlights", .{
         .commits = try c.schema(Commits),
         .highlights = try c.schema(Highlights),
@@ -432,7 +375,7 @@ fn appendNote(
     c: protean.Context,
     b: anytype,
     clip: Clip,
-    oid: OidText,
+    oid: oid_text.Function,
     frame: a.Value(Frame),
     note: a.Value(Highlight),
 ) !a.Value(Frame) {
@@ -444,7 +387,7 @@ fn appendNote(
             .{
                 try b.field(frame, "text"),
                 try literal(c, "\nUnverified note for "),
-                try oidValue(c, b, oid, try b.field(note, "oid")),
+                try oid_text.format(c, b, oid, try b.field(note, "oid")),
                 try literal(c, ": "),
                 try b.field(text, "text"),
             },
@@ -461,7 +404,7 @@ fn header(
     c: protean.Context,
     b: anytype,
     clip: Clip,
-    oid: OidText,
+    oid: oid_text.Function,
     input: a.Value(Input),
 ) !a.Value(Frame) {
     const repo = try b.field(input, "repository");
@@ -476,9 +419,9 @@ fn header(
         try literal(c, "\nRef: "),
         try b.field(ref, "text"),
         try literal(c, "\nComparison: "),
-        try oidValue(c, b, oid, try b.field(input, "base")),
+        try oid_text.format(c, b, oid, try b.field(input, "base")),
         try literal(c, "..."),
-        try oidValue(c, b, oid, try b.field(input, "tip")),
+        try oid_text.format(c, b, oid, try b.field(input, "tip")),
         try literal(c, "\nObserved at (Unix ms): "),
         try b.textInteger(try b.field(input, "observed_ms")),
         try literal(c, "\nCoverage: observations after "),
@@ -582,9 +525,8 @@ fn finalize(
     });
 }
 
-pub fn emit(c: protean.Context) !Function {
+pub fn emit(c: protean.Context, oid: oid_text.Function) !Function {
     const clip = try clipFunction(c);
-    const oid = try oidFunction(c);
     const contains = try containsFunction(c);
     const list = try listFunction(c, clip, oid);
     const notes = try notesFunction(c, clip, oid, contains);

@@ -1,4 +1,4 @@
-name: Sample native experiment and settlement execution
+name: Verify shared object ID formatting in rendering
 on:
   push:
     branches: [diagnostic/render-cost-f493826]
@@ -12,11 +12,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - root: native_methods_test.zig
-            witness: native experiment compares all cases and retains unknown cost through interruption
-          - root: native_transitions_test.zig
-            witness: native settlements retain unrelated superseded malformed or unproven delivery evidence
+        witness:
+          - native render frame retains truthful full count and oldest ordered bounded entries
+          - native render frame empty evidence and invalid coverage remain explicit
+          - native ordinary render calls one model with complete provenance and validates highlights
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -36,30 +35,11 @@ jobs:
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xf -
       - name: Compile the focused test with the self-hosted backend
         env:
-          ROOT: ${{ matrix.root }}
           WITNESS: ${{ matrix.witness }}
         run: |
-          zig test -fno-llvm -fno-strip -Osafe -target x86_64-linux-musl -mcpu baseline --dep application_types --dep protean_native --dep protean_contracts --dep protean --dep horos -Mroot="$ROOT" -Osafe -target x86_64-linux-musl -mcpu baseline --dep protean --dep protean_contracts -Mapplication_types=app/types.zig .zig-cache/o/15fcb669fcdc96cd2e2be147fe060c77/libprotean-native-c.a -fno-strip -Osafe -target x86_64-linux-musl -mcpu baseline -I .zig-cache/o/31862b6f660dd84890962575457bffc9 --dep kosmos --dep horos_data --dep protean_contracts --dep horos --dep protean --dep _native_dependency_admission --dep native_c --dep native_options -Mprotean_native=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/runtime/native/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mprotean_contracts=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/contracts.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos --dep horos_data --dep protean_contracts -Mprotean=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/protean.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mhoros=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data --dep horos --dep packaged_runtime -Mkosmos=.protean-native/inputs/kosmos/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mhoros_data=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/data/root.zig -M_native_dependency_admission=.zig-cache/o/a05536e176de12acf3398b34b179c597/native_dependency_admission.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mnative_c=.zig-cache/o/c1774b413f703d637f992daf9e513a37/native_c.zig -Mnative_options=.zig-cache/o/358b8ae923fbc2f6fdc6b74bcb23b219/options.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mpackaged_runtime=.zig-cache/o/7f17a83969290ee174dc1066eb4111eb/runtime.zig -lc --cache-dir .zig-cache --global-cache-dir .zig-cache --build-root . --name test --zig-lib-dir /opt/hostedtoolcache/zig/0.17.1/x64/lib/ --test-no-exec -femit-bin=witness --test-filter "$WITNESS"
-      - name: Sample the focused test
+          zig test -fno-llvm -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline --dep application_types --dep protean_native --dep protean_contracts --dep protean --dep horos -Mroot=native_rendering_test.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep protean --dep protean_contracts -Mapplication_types=app/types.zig .zig-cache/o/15fcb669fcdc96cd2e2be147fe060c77/libprotean-native-c.a -fstrip -Osafe -target x86_64-linux-musl -mcpu baseline -I .zig-cache/o/31862b6f660dd84890962575457bffc9 --dep kosmos --dep horos_data --dep protean_contracts --dep horos --dep protean --dep _native_dependency_admission --dep native_c --dep native_options -Mprotean_native=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/runtime/native/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mprotean_contracts=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/contracts.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos --dep horos_data --dep protean_contracts -Mprotean=zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP/src/protean.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data -Mhoros=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline --dep horos_data --dep horos --dep packaged_runtime -Mkosmos=.protean-native/inputs/kosmos/src/root.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mhoros_data=zig-pkg/horos-8.0.1-flclaJaVVgC6MoQyrPCu39bQWT4ffTRnDxam33dMB2hI/src/data/root.zig -M_native_dependency_admission=.zig-cache/o/a05536e176de12acf3398b34b179c597/native_dependency_admission.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mnative_c=.zig-cache/o/c1774b413f703d637f992daf9e513a37/native_c.zig -Mnative_options=.zig-cache/o/358b8ae923fbc2f6fdc6b74bcb23b219/options.zig -Osafe -target x86_64-linux-musl -mcpu baseline -Mpackaged_runtime=.zig-cache/o/7f17a83969290ee174dc1066eb4111eb/runtime.zig -lc --cache-dir .zig-cache --global-cache-dir .zig-cache --build-root . --name test --zig-lib-dir /opt/hostedtoolcache/zig/0.17.1/x64/lib/ --test-no-exec -femit-bin=rendering-case --test-filter "$WITNESS"
+      - name: Measure rendering and check the outcome
         run: |
-          set -eu
-          if ! command -v gdb; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends gdb
-          fi
-          ./witness > test.log 2>&1 &
-          witness_pid=$!
-          trap 'kill "$witness_pid" 2>/dev/null || true' EXIT
-          for sample in {1..16}; do
-            sleep 5
-            if ! kill -0 "$witness_pid" 2>/dev/null; then
-              wait "$witness_pid"
-              cat test.log
-              exit 0
-            fi
-            echo "Sample $sample at $(date -u +%T)"
-            sudo gdb -nx -quiet -batch -p "$witness_pid" -ex 'set pagination off' \
-              -ex 'thread apply all bt 22' -ex detach
-          done
-          cat test.log
-          echo "Sampling interval finished; full qualification is separate."
+          set -o pipefail
+          /usr/bin/time -v ./rendering-case 2>&1 | tee measured.log
+          grep -Fxq 'All 2 tests passed.' measured.log
