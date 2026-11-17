@@ -5,44 +5,110 @@ on:
 permissions:
   contents: read
   actions: read
+env:
+  ZIG_DEBUG_CMD: '1'
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+  ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
-  product:
+  prepare:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    env:
-      ZIG_DEBUG_CMD: '1'
-      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
-      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+    outputs:
+      sha256: ${{ steps.seal.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+      - &zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.17.1'
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
-      - name: Restore authenticated Linux build inputs
+      - &restore
+        name: Restore authenticated Linux build inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api repos/tkersey/paredros/actions/artifacts/14284596529/zip > preparation.zip
           echo '95883329f2fd4be097725e0c5b2c7501ed21b0025bd331c1da9071ff45c5f400  preparation.zip' | sha256sum --check --strict
           unzip -p preparation.zip preparation.tar.zst | zstd -dc | tar -xpf -
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - name: Build the product from authored source and verify its manifest
+      - &compiler
+        name: Select the candidate compiler and dependency
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
           cp -a zig-pkg/protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP diagnostic-protean
           git apply --unidiff-zero --directory=diagnostic-protean .github/protean-build.patch
-          zig build -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
+      - name: Emit the authored application
+        run: zig build prepare-native -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
+      - name: Seal the prepared application
+        id: seal
+        run: |
+          cmp app/types.zig zig-out/prepared/types.zig
+          tar -cf selected.tar -C zig-out/prepared program.bpi3 application.json types.zig
+          echo "sha256=$(sha256sum selected.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: selected-application
+          path: selected.tar
+          retention-days: 1
+  build:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - *checkout
+      - *zig
+      - *restore
+      - *compiler
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: selected-application
+      - name: Compile against the verified emitted image
+        env:
+          SHA256: ${{ needs.prepare.outputs.sha256 }}
+        run: |
+          echo "$SHA256  selected.tar" | sha256sum --check --strict
+          mkdir selected
+          tar -xf selected.tar -C selected
+          cmp app/types.zig selected/types.zig
+          zig build -Dnative=true -Dtarget=x86_64-linux-musl -Demitted-application=selected -Doptimize=safe -j2 --verbose --summary all
           zig-out/bin/paredros describe-build > manifest.json
           jq -e '.compiler.backend == "self-hosted" and
             .dependencies.sqlite.compiler.family == "gcc" and
             (.dependencies.sqlite.compiler.toolchain_sha256 | test("^[0-9a-f]{64}$")) and
             (.dependencies.sqlite.compile_flags | index("-O1") != null) and
             (.dependencies.sqlite.posix_shim_compile_flags | index("-O2") != null)' manifest.json
-          uv run --no-project python tests/product_smoke.py zig-out/bin/paredros --report "$RUNNER_TEMP/report.json"
+      - name: Seal the built executable
+        id: seal
+        run: |
+          tar -cf product.tar -C zig-out/bin paredros
+          echo "sha256=$(sha256sum product.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: selected-product
+          path: product.tar
+          retention-days: 1
+  smoke:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: selected-product
+      - name: Run the five product smoke cases
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          echo "$SHA256  product.tar" | sha256sum --check --strict
+          tar -xpf product.tar
+          uv run --no-project python tests/product_smoke.py ./paredros --report "$RUNNER_TEMP/report.json"
           jq -e '.count == 5 and .live_services == false' "$RUNNER_TEMP/report.json"
