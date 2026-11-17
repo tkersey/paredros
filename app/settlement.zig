@@ -219,7 +219,6 @@ fn uniqueFunction(c: protean.Context, ids: anytype) !Unique {
     const same_task = try more.call(ids, .{
         .left = try more.field(reference, "task"),
         .right = try more.field(prior, "task"),
-        .index = try more.constant(u64, 0),
     });
     const same_revision = try more.equal(
         try more.field(reference, "revision"),
@@ -520,7 +519,6 @@ inline fn same(
         .array => |array| return b.call(try bytes.emit(c, array.len), .{
             .left = left,
             .right = right,
-            .index = try b.constant(u64, 0),
         }),
         .@"struct" => {
             var result = try b.constant(bool, true);

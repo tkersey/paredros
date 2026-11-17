@@ -189,7 +189,6 @@ fn compareTip(c: protean.Context, b: anytype, repository: a.Value(t.Repository),
     return b.conditional(try b.call(equal, .{
         .left = base,
         .right = tip,
-        .index = try b.constant(u64, 0),
     }), try unchanged.ret(try emptyResult(c, unchanged, finish, repository, baseline, tip, evidence, .unchanged)), try changed.ret(try changed.call(pages, .{ .state = first })));
 }
 

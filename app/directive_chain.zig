@@ -113,7 +113,6 @@ fn foldOne(
     try a.require(c, b, try b.call(ids, .{
         .left = try b.field(input, "obligation"),
         .right = try b.field(directive, "obligation"),
-        .index = try b.constant(u64, 0),
     }), "directive_obligation_mismatch");
     try a.require(c, b, try b.call(refs, .{ .input = try b.product(
         try c.schema(ReferenceInput),
@@ -179,7 +178,6 @@ fn referenceEquality(c: protean.Context, ids: anytype, digests: anytype) !Refere
         .{
             .left = try fb.field(x, "task"),
             .right = try fb.field(y, "task"),
-            .index = try fb.constant(u64, 0),
         },
     );
     const same_digest = try fb.call(
@@ -187,7 +185,6 @@ fn referenceEquality(c: protean.Context, ids: anytype, digests: anytype) !Refere
         .{
             .left = try fb.field(x, "digest"),
             .right = try fb.field(y, "digest"),
-            .index = try fb.constant(u64, 0),
         },
     );
     const compared = try present.body().match(right, .{
