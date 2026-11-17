@@ -6,7 +6,8 @@ const t = @import("application_types");
 
 pub const Application = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
-        return c.author.module(try frame.emit(c), try c.schema(t.Failure));
+        const oid = try @import("../app/oid_text.zig").emit(c);
+        return c.author.module(try frame.emit(c, oid), try c.schema(t.Failure));
     }
 };
 
