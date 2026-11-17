@@ -87,6 +87,11 @@ fn nativeTests(
     }
     const execute = b.step("test-native", "Run every selected native owner group");
     const compile = b.step("build-native-tests", "Build every selected native owner group");
+    const runner = b.addInstallFile(
+        dependency.path("tools/native/qualification_tests.mjs"),
+        "test-tools/native/qualification_tests.mjs",
+    );
+    compile.dependOn(&runner.step);
     for (std.enums.values(NativeGroup)) |group| {
         if (selected != null and selected.? != group) continue;
         const name = @tagName(group);
