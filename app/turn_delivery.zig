@@ -2,41 +2,41 @@ const protean = @import("protean");
 const cts = @import("protean_contracts");
 const t = @import("application_types");
 const a = @import("author.zig");
+const m = @import("model_contract.zig");
 const description = @import("proposal_text.zig");
 
 pub const action_id = "paredros.proposal.confirm.v1";
-pub const Input = struct { turn: t.Turn, result: t.TurnResult };
+pub const Conversation = @FieldType(m.Candidate, "conversation");
+pub const Input = struct { turn: t.Turn, conversation: Conversation };
 pub const Function = a.Function(struct { input: Input }, t.TurnResult);
+const Proposals = @FieldType(t.TurnResult, "proposals");
 const Buttons = @FieldType(t.LogicalPayload, "buttons");
 const CountArgs = struct { text: cts.Utf8, index: u64, total: u64 };
 const Count = a.Function(CountArgs, u64);
 const State = struct {
     input: Input,
     index: u64,
-    text: t.Text,
+    message: description.Complete,
     buttons: Buttons,
+    proposals: Proposals,
 };
-const Rendered = struct { text: t.Text, buttons: Buttons };
-const Loop = a.Function(struct { state: State }, Rendered);
+const Loop = a.Function(struct { state: State }, t.TurnResult);
 
 pub fn emit(c: protean.Context) !Function {
     const count = try counter(c);
-    const loop = try proposals(c, count);
+    const loop = try proposals(c, try description.emit(c));
     const function = try c.author.function("seal turn delivery and exact confirmation buttons", .{
         .input = try c.schema(Input),
     }, try c.schema(t.TurnResult), &.{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
-    const rendered = try b.call(loop, .{ .state = try b.product(try c.schema(State), .{
+    const result = try b.call(loop, .{ .state = try b.product(try c.schema(State), .{
         .input = input,
         .index = try b.constant(u64, 0),
-        .text = try initial(c, b, count, input),
+        .message = try initial(c, b, count, input),
+        .proposals = try c.literal(Proposals, .{ .items = &.{} }),
         .buttons = try c.literal(Buttons, .{ .items = &.{} }),
     }) });
-    const delivery = try intent(c, b, try b.field(input, "turn"), rendered);
-    const result = try b.update(try b.field(input, "result"), .{
-        .delivery = try b.variant(try c.schema(?t.DeliveryIntent), "some", delivery),
-    });
     try c.author.define(function, try b.ret(result));
     return function;
 }
@@ -104,8 +104,8 @@ fn counter(c: protean.Context) !Count {
     );
     const next = try more.call(function, .{
         .text = text,
-        .index = try add(c, more, index, try scalarWidth(more, byte)),
-        .total = try add(c, more, total, try scalarCost(more, byte)),
+        .index = try add(c, more, index, try description.scalarWidth(more, byte)),
+        .total = try add(c, more, total, try description.scalarCost(more, byte)),
     });
     const within = try b.booleanNot(try b.less(try b.constant(u64, 4000), total));
     const active = try b.select(
@@ -121,41 +121,6 @@ fn counter(c: protean.Context) !Count {
     return function;
 }
 
-fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    return b.select(
-        try b.less(byte, try b.constant(u8, 128)),
-        try b.constant(u64, 1),
-        try b.select(
-            try b.less(byte, try b.constant(u8, 224)),
-            try b.constant(u64, 2),
-            try b.select(
-                try b.less(byte, try b.constant(u8, 240)),
-                try b.constant(u64, 3),
-                try b.constant(u64, 4),
-            ),
-        ),
-    );
-}
-
-fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    const normal = try b.select(
-        try b.less(byte, try b.constant(u8, 128)),
-        try b.constant(u64, 1),
-        try b.select(
-            try b.less(byte, try b.constant(u8, 192)),
-            try b.constant(u64, 0),
-            try b.constant(u64, 1),
-        ),
-    );
-    var result = normal;
-    inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 } }) |escaped| result = try b.select(
-        try b.equal(byte, try b.constant(u8, escaped[0])),
-        try b.constant(u64, escaped[1]),
-        result,
-    );
-    return result;
-}
-
 fn allowance(c: protean.Context, b: anytype, remaining: a.Value(u64)) !a.Value(u64) {
     const failure = try a.failure(c, "turn_proposal_budget");
     const reserved = try b.checked(.multiply, remaining, try b.constant(u64, 256), .{
@@ -164,45 +129,50 @@ fn allowance(c: protean.Context, b: anytype, remaining: a.Value(u64)) !a.Value(u
     return b.checked(.subtract, try b.constant(u64, 4000), reserved, .{ .overflow = failure });
 }
 
-fn initial(c: protean.Context, b: anytype, count: Count, input: a.Value(Input)) !a.Value(t.Text) {
-    const result = try b.field(input, "result");
-    const reply = try b.field(result, "reply");
-    const prefix = try literal(c, "Assistant reply; no action has been admitted:\n");
-    const size = try add(c, b, try cost(c, b, count, prefix), try cost(c, b, count, reply));
-    const limit = try allowance(c, b, try b.sequenceLength(try b.field(result, "proposals")));
+fn initial(c: protean.Context, b: anytype, count: Count, input: a.Value(Input)) !a.Value(description.Complete) {
+    const conversation = try b.field(input, "conversation");
+    const reply = try b.field(conversation, "reply");
+    const prefix = "Assistant reply; no action has been admitted:\n";
+    const fallback = "The full assistant reply is retained locally. " ++
+        "Inspect it through the CLI. No action has been admitted.";
+    const size = try add(c, b, try b.constant(u64, try description.literalCost(prefix)), try cost(c, b, count, reply));
+    const limit = try allowance(c, b, try b.sequenceLength(try b.field(conversation, "proposals")));
     const fits = try b.branch();
     const large = try b.branch();
     return b.conditional(
         try b.less(limit, size),
-        try large.ret(try literal(c, "The full assistant reply is retained locally. " ++
-            "Inspect it through the CLI. No action has been admitted.")),
-        try fits.ret(try join(c, fits, .{ prefix, reply })),
+        try large.ret(try c.literal(description.Complete, .{ .text = .{ .bytes = fallback }, .cost = try description.literalCost(fallback) })),
+        try fits.ret(try fits.product(try c.schema(description.Complete), .{
+            .text = try join(c, fits, .{ try literal(c, prefix), reply }),
+            .cost = size,
+        })),
     );
 }
 
-fn proposals(c: protean.Context, count: Count) !Loop {
+fn proposals(c: protean.Context, describe: description.Function) !Loop {
     const function = try c.author.function("render full proposals or CLI references", .{
         .state = try c.schema(State),
-    }, try c.schema(Rendered), &.{});
+    }, try c.schema(t.TurnResult), &.{});
     const b = try c.author.body(function);
     const state = try b.parameter("state");
     const input = try b.field(state, "input");
-    const list = try b.field(try b.field(input, "result"), "proposals");
+    const list = try b.field(try b.field(input, "conversation"), "proposals");
     const index = try b.field(state, "index");
     const more = try b.branch();
     const done = try b.branch();
-    const proposal = try more.variantPayload(
+    const candidate = try more.variantPayload(
         try more.sequenceGet(list, index),
         "some",
         try a.failure(c, "turn_proposal_bounds"),
     );
-    const next = try renderProposal(c, more, count, state, proposal);
+    const next = try renderProposal(c, more, describe, state, candidate);
     const continued = try more.call(function, .{ .state = try more.update(next, .{
         .index = try add(c, more, index, try more.constant(u64, 1)),
     }) });
-    const final = try done.product(try c.schema(Rendered), .{
-        .text = try done.field(state, "text"),
-        .buttons = try done.field(state, "buttons"),
+    const final = try done.product(try c.schema(t.TurnResult), .{
+        .reply = try done.field(try done.field(input, "conversation"), "reply"),
+        .proposals = try done.field(state, "proposals"),
+        .delivery = try done.variant(try c.schema(?t.DeliveryIntent), "some", try intent(c, done, try done.field(input, "turn"), state)),
     });
     try c.author.define(function, try b.ret(try b.conditional(
         try b.less(index, try b.sequenceLength(list)),
@@ -235,36 +205,57 @@ fn proposalId(
 fn renderProposal(
     c: protean.Context,
     b: anytype,
-    count: Count,
+    describe: description.Function,
     state: a.Value(State),
-    proposal: a.Value(t.Proposal),
+    candidate: a.Value(m.BoundProposal),
 ) !a.Value(State) {
-    const input = try b.field(state, "input");
-    const id = try proposalId(c, b, try b.field(input, "turn"), proposal);
-    const text = try b.field(proposal, "description");
-    const cli = try b.caseOf(text, "none");
-    const complete = try b.caseOf(text, "some");
-    return b.match(text, .{
-        .none = try cli.ret(try omitted(c, cli.body(), state, id)),
-        .some = try complete.ret(try renderComplete(
-            c,
-            complete.body(),
-            count,
-            state,
-            proposal,
-            complete.payload(),
-            id,
-        )),
+    const turn = try b.field(try b.field(state, "input"), "turn");
+    const identity = try b.product(try c.schema(@FieldType(t.Proposal, "identity")), .{
+        .operation = try b.field(try b.field(turn, "envelope"), "operation"),
+        .attempt = try b.field(turn, "attempt"),
+        .ordinal = try b.convertInteger(try c.schema(u32), try b.field(state, "index"), .{
+            .overflow = try a.failure(c, "proposal_ordinal"),
+        }),
+    });
+    const target = try b.field(turn, "target");
+    const body = try b.field(candidate, "body");
+    const proposal = try b.product(try c.schema(t.Proposal), .{
+        .identity = identity,
+        .target = target,
+        .body = body,
+        .description = try c.literal(?t.Text, null),
+    });
+    const id = try proposalId(c, b, turn, proposal);
+    const rendered = try b.call(describe, .{ .input = try b.product(try c.schema(description.Input), .{
+        .target = target,
+        .body = body,
+    }) });
+    const cli = try b.caseOf(rendered, "cli");
+    const complete = try b.caseOf(rendered, "complete");
+    const cb = complete.body();
+    const full = try cb.update(proposal, .{
+        .description = try cb.variant(try c.schema(?t.Text), "some", try cb.field(complete.payload(), "text")),
+    });
+    const local = try omitted(c, cli.body(), state, id);
+    const delivered = try renderComplete(c, cb, state, full, complete.payload(), id);
+    return b.match(rendered, .{
+        .cli = try cli.ret(try retain(c, cli.body(), local, proposal)),
+        .complete = try complete.ret(try retain(c, cb, delivered, full)),
+    });
+}
+
+fn retain(c: protean.Context, b: anytype, state: a.Value(State), proposal: a.Value(t.Proposal)) !a.Value(State) {
+    return b.update(state, .{
+        .proposals = try b.append(try b.field(state, "proposals"), proposal, .{ .capacity = try a.failure(c, "proposal_limit") }),
     });
 }
 
 fn renderComplete(
     c: protean.Context,
     b: anytype,
-    count: Count,
     state: a.Value(State),
     proposal: a.Value(t.Proposal),
-    description_text: a.Value(t.Text),
+    measured: a.Value(description.Complete),
     id: a.Value(t.Text),
 ) !a.Value(State) {
     const input = try b.field(state, "input");
@@ -272,20 +263,21 @@ fn renderComplete(
     const prefix = try join(c, b, .{
         try literal(c, "\n\nProposal "), id, try literal(c, ":\n"),
     });
-    const size = try add(c, b, try cost(c, b, count, try b.field(state, "text")), try add(
+    // The generated prefix contains only ASCII literals, hexadecimal and decimal digits.
+    const size = try add(c, b, try b.field(try b.field(state, "message"), "cost"), try add(
         c,
         b,
-        try cost(c, b, count, prefix),
-        try cost(c, b, count, description_text),
+        try b.blobLength(prefix),
+        try b.field(measured, "cost"),
     ));
-    const length = try b.sequenceLength(try b.field(try b.field(input, "result"), "proposals"));
+    const length = try b.sequenceLength(try b.field(try b.field(input, "conversation"), "proposals"));
     const next_index = try add(c, b, index, try b.constant(u64, 1));
     const remaining = try b.checked(.subtract, length, next_index, .{
         .overflow = try a.failure(c, "turn_proposal_bounds"),
     });
     const fits = try b.branch();
     const large = try b.branch();
-    const included = try include(c, fits, state, proposal, description_text, prefix, id);
+    const included = try include(c, fits, state, proposal, try fits.field(measured, "text"), prefix, id, size);
     return b.conditional(
         try b.less(try allowance(c, b, remaining), size),
         try large.ret(try omitted(c, large, state, id)),
@@ -299,12 +291,16 @@ fn omitted(
     state: a.Value(State),
     id: a.Value(t.Text),
 ) !a.Value(State) {
-    return b.update(state, .{ .text = try join(c, b, .{
-        try b.field(state, "text"),
+    const message = try b.field(state, "message");
+    const reference = try join(c, b, .{
         try literal(c, "\n\nComplete proposal is retained locally. " ++
             "Inspect before confirming via CLI:\n"),
         try literal(c, "paredros proposal confirm "),
         id,
+    });
+    return b.update(state, .{ .message = try b.product(try c.schema(description.Complete), .{
+        .text = try join(c, b, .{ try b.field(message, "text"), reference }),
+        .cost = try add(c, b, try b.field(message, "cost"), try b.blobLength(reference)),
     }) });
 }
 
@@ -323,6 +319,7 @@ fn include(
     description_text: a.Value(t.Text),
     prefix: a.Value(t.Text),
     id: a.Value(t.Text),
+    size: a.Value(u64),
 ) !a.Value(State) {
     const ordinal = try b.field(try b.field(proposal, "identity"), "ordinal");
     const number = try b.textInteger(ordinal);
@@ -337,8 +334,9 @@ fn include(
         })),
     });
     return b.update(state, .{
-        .text = try join(c, b, .{
-            try b.field(state, "text"), prefix, description_text,
+        .message = try b.product(try c.schema(description.Complete), .{
+            .text = try join(c, b, .{ try b.field(try b.field(state, "message"), "text"), prefix, description_text }),
+            .cost = size,
         }),
         .buttons = try b.append(try b.field(state, "buttons"), button, .{
             .capacity = try a.failure(c, "turn_button_count"),
@@ -350,7 +348,7 @@ fn intent(
     c: protean.Context,
     b: anytype,
     turn: a.Value(t.Turn),
-    rendered: a.Value(Rendered),
+    state: a.Value(State),
 ) !a.Value(t.DeliveryIntent) {
     const identity = try b.field(try b.field(turn, "envelope"), "stable_request");
     const revision = try b.field(turn, "expected_revision");
@@ -379,8 +377,8 @@ fn intent(
         }), .{
             .obligation = try b.field(turn, "target"),
             .specification_revision = expected,
-            .frozen_text = try b.field(rendered, "text"),
-            .buttons = try b.field(rendered, "buttons"),
+            .frozen_text = try b.field(try b.field(state, "message"), "text"),
+            .buttons = try b.field(state, "buttons"),
         }),
     });
 }

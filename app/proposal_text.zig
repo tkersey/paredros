@@ -6,11 +6,10 @@ const a = @import("author.zig");
 
 pub const Text = t.Text;
 pub const Input = struct { target: ?t.Id, body: @FieldType(t.Proposal, "body") };
-pub const Description = @FieldType(t.Proposal, "description");
-pub const Function = a.Function(struct { input: Input }, Description);
+pub const Function = a.Function(struct { input: Input }, Rendering);
 const budget: u64 = 4000;
-const Complete = struct { text: Text, cost: u64 };
-const Rendering = union(enum) { complete: Complete, cli: void };
+pub const Complete = struct { text: Text, cost: u64 };
+pub const Rendering = union(enum) { complete: Complete, cli: void };
 const Append = a.Function(struct { rendering: Rendering, text: Text, cost: u64 }, Rendering);
 const Piece = struct { text: Text, cost: u64, width: u64 };
 const Span = struct { end: u64, cost: u64 };
@@ -33,7 +32,7 @@ pub fn emit(c: protean.Context) !Function {
     };
     const function = try c.author.function("render complete confirmation proposal", .{
         .input = try c.schema(Input),
-    }, try c.schema(Description), &.{});
+    }, try c.schema(Rendering), &.{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
     const empty = try c.literal(Rendering, .{ .complete = .{
@@ -42,16 +41,7 @@ pub fn emit(c: protean.Context) !Function {
     } });
     const prefix = try writeLiteral(c, b, append, empty, "Proposed action; not yet applied.\n");
     const rendered = try value(c, b, helpers, Input, input, prefix);
-    const cli = try b.caseOf(rendered, "cli");
-    const complete = try b.caseOf(rendered, "complete");
-    try c.author.define(function, try b.ret(try b.match(rendered, .{
-        .cli = try cli.ret(try c.literal(Description, null)),
-        .complete = try complete.ret(try complete.body().variant(
-            try c.schema(Description),
-            "some",
-            try complete.body().field(complete.payload(), "text"),
-        )),
-    })));
+    try c.author.define(function, try b.ret(rendered));
     return function;
 }
 
@@ -99,7 +89,7 @@ fn literal(c: protean.Context, text: []const u8) !a.Value(Text) {
     return c.literal(Text, .{ .bytes = text });
 }
 
-fn literalCost(text: []const u8) !u64 {
+pub fn literalCost(text: []const u8) !u64 {
     var total: u64 = 0;
     for (text) |byte| {
         const cost: u64 = switch (byte) {
@@ -458,14 +448,15 @@ fn needsEscape(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
     );
 }
 
-fn rawWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+pub fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var width = try b.constant(u64, 4);
     inline for (.{ .{ 240, 3 }, .{ 224, 2 }, .{ 128, 1 } }) |entry|
         width = try b.select(try b.less(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), width);
     return width;
 }
 
-fn rawCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+// The caller supplies the leading byte of an admitted UTF-8 scalar.
+pub fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var cost = try b.constant(u64, 1);
     inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 } }) |entry|
         cost = try b.select(try b.equal(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), cost);
@@ -499,8 +490,8 @@ fn spanScanner(c: protean.Context) !Scan {
     const overflow = try a.failure(c, "proposal_description_budget");
     const next = try raw.call(scan, .{
         .input = input,
-        .end = try raw.checked(.add, end, try rawWidth(raw, byte), .{ .overflow = bounds }),
-        .cost = try raw.checked(.add, cost, try rawCost(raw, byte), .{ .overflow = overflow }),
+        .end = try raw.checked(.add, end, try scalarWidth(raw, byte), .{ .overflow = bounds }),
+        .cost = try raw.checked(.add, cost, try scalarCost(raw, byte), .{ .overflow = overflow }),
         .limit = limit,
     });
     const scanned = try more.conditional(try needsEscape(more, byte), try escape.ret(span), try raw.ret(next));
@@ -529,8 +520,8 @@ fn textPiece(
     const overflow = try a.failure(c, "proposal_description_budget");
     const span = try raw.call(scan, .{
         .input = input,
-        .end = try raw.checked(.add, index, try rawWidth(raw, byte), .{ .overflow = bounds }),
-        .cost = try rawCost(raw, byte),
+        .end = try raw.checked(.add, index, try scalarWidth(raw, byte), .{ .overflow = bounds }),
+        .cost = try scalarCost(raw, byte),
         .limit = try raw.checked(.subtract, try raw.constant(u64, budget + 1), used, .{ .overflow = overflow }),
     });
     const end = try raw.field(span, "end");
