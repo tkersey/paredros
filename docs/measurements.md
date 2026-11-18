@@ -47,6 +47,20 @@ Before launch, the measurement tool independently counted 100,000 task rows and
 one obligation, and measured 13.976 s to open the namespace and 16.571 s to
 rebuild the application index.
 
+An index that reads one task at a time rebuilt the same sealed scale history in
+16.462 s, compared with 17.604 s in a paired baseline run. Peak resident memory
+for the measurement process fell from 8.07 GiB to 1.63 GiB. Both runs returned
+one obligation. The namespace identity, seal and database hashes matched before
+and after the measurement.
+
+On the separate product-configured 100,000-task history, a candidate containing
+that index and one fewer offline preflight created its socket at 27.989 s. The
+first ordinary status request still timed out at 57.996 s from launch. The
+daemon exited cleanly at 74.947 s, with a sampled peak of 5.97 GiB. Its
+namespace identity, seal and database hashes also matched after shutdown. This
+macOS ARM64 LLVM executable used the Protean candidate `3118918` and had SHA-256
+`8cf1d14473085a8b774eb836715d9a7168fd35adaaa4a94db7fd2b31b2801fe0`.
+
 The 30 empty checks after the baseline took a median 1.760 s and p95 1.828 s
 of owner time. Database growth had a median of 128 KiB and p95 of 152 KiB.
 Both medians exceeded the initial targets of 250 ms and 64 KiB.
