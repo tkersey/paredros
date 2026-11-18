@@ -1,4 +1,4 @@
-name: Sample native comparison CPU time
+name: Measure native comparison execution and publication time
 on:
   push:
     branches: [diagnostic/campaign-cpu]
@@ -6,67 +6,63 @@ permissions:
   contents: read
   actions: read
 jobs:
-  sample:
+  phases:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {backend: direct, artifact: 14373798093, digest: 7b4aefb2a75179d06ff864e865e603f0ff07df72f3c71f974393dac853cfbe2f, archive: methods.tar.gz, program: test-tools/native/methods}
-          - {backend: gcc, artifact: 14376321918, digest: c9df3e982e2325808e626677861832e0baacea27cb442adcc8e37b87a3eb82ab, archive: methods.tar.gz, program: methods}
     steps:
-      - name: Install CPU profilers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Install coarse function timer
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends linux-tools-generic gdb
-      - name: Verify original executable and sample the interrupted campaign
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT: ${{ matrix.artifact }}
-          SHA256: ${{ matrix.digest }}
-          ARCHIVE: ${{ matrix.archive }}
-          PROGRAM: ${{ matrix.program }}
-        run: |
-          set -euo pipefail
-          gh api "repos/tkersey/paredros/actions/artifacts/$ARTIFACT/zip" > input.zip
-          echo "$SHA256  input.zip" | sha256sum --check --strict
-          unzip -p input.zip "$ARCHIVE" | tar -xzf -
-          file "$PROGRAM"
-          sha256sum "$PROGRAM"
-          "./$PROGRAM" > suite.log 2>&1 &
-          target=$!
-          trap 'kill "$target" 2>/dev/null || true' EXIT
-          sleep 22
-          cat suite.log
-          perfbin=$(find /usr/lib/linux-tools* -type f -name perf -print -quit 2>/dev/null || true)
-          if [ -n "$perfbin" ] && sudo "$perfbin" record -q -F 79 -e cpu-clock:u --call-graph dwarf,4096 -p "$target" -o samples.data -- sleep 150; then
-            sudo "$perfbin" report -i samples.data --stdio --no-children -g none --percent-limit 0.4 --sort comm,symbol | tee leaves.txt > /dev/null
-            sudo "$perfbin" report -i samples.data --stdio --children -g none --percent-limit 1 --sort comm,symbol | tee inclusive.txt > /dev/null
-            head -100 leaves.txt
-            head -100 inclusive.txt
-          else
-            for _ in $(seq 1 24); do
-              sudo gdb -nx -batch -p "$target" -ex 'set print frame-arguments none' -ex 'bt 24' -ex detach | tee -a stacks.txt > /dev/null
-              sleep 2
-            done
-            cat stacks.txt
-          fi
-          cat suite.log
-  session:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - name: Verify the two import tests and the original held-worker witness
+          sudo apt-get install -y --no-install-recommends bpftrace
+      - name: Time the original direct x86-64 comparison
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/tkersey/paredros/actions/artifacts/14378649446/zip > session.zip
-          echo 'ab2042a0f7f58720aac4fdf9e2e8f1fb202a579cc1dd17dc5a03befd5753e7d7  session.zip' | sha256sum --strict --check
-          unzip -p session.zip check.tar.gz | tar -xzf -
-          ./check 2>&1 | tee results
-          grep -Fxq '1/3 native_authority_test.test_0...OK' results
-          grep -Fxq '2/3 tests.native_driver.test_0...OK' results
-          grep -Fxq '3/3 tests.native_session.test.native public session serves two control clients while a worker is held...OK' results
-          grep -Fxq 'All 3 tests passed.' results
+          work=$(mktemp -d /tmp/phases.XXXX)
+          cd "$work"
+          gh api repos/tkersey/paredros/actions/artifacts/14373798093/zip > input.zip
+          echo '7b4aefb2a75179d06ff864e865e603f0ff07df72f3c71f974393dac853cfbe2f  input.zip' | sha256sum --check --strict
+          unzip -p input.zip methods.tar.gz | tar -xzf -
+          program="$work/test-tools/native/methods"
+          sha256sum "$program"
+          nm --defined-only --format=posix "$program" | cut -d' ' -f1 > symbols
+          for label in advance begin pump drive root publish; do
+            case "$label" in
+              advance) pattern='^session\.Session\(tests\.experiment\.Types\)\.advance$' ;;
+              begin) pattern='^driver\.Driver\.beginAdvance$' ;;
+              pump) pattern='^driver\.Driver\.pump$' ;;
+              drive) pattern='^driver\.Driver\.drive$' ;;
+              root) pattern='^tasks\.root_execution\..*tests\.experiment\.Types.*\.pumpRoot$' ;;
+              publish) pattern='^tasks\.root_execution\..*tests\.experiment\.Types.*\.publishRootCut$' ;;
+            esac
+            symbol=$(grep -Ex "$pattern" symbols)
+            test "$(wc -l <<< "$symbol")" -eq 1
+            cat >> phases.bt <<PROBE
+          uprobe:$program:"$symbol" { @start_${label}[tid] = nsecs; }
+          uretprobe:$program:"$symbol" /@start_${label}[tid]/ {
+            @micros["$label"] = sum((nsecs - @start_${label}[tid]) / 1000);
+            @calls["$label"] = count();
+            delete(@start_${label}[tid]);
+          }
+          PROBE
+          done
+          echo 'BEGIN { printf("ready\n"); } interval:s:30 { time("%H:%M:%S\n"); print(@micros); print(@calls); }' >> phases.bt
+          sudo bpftrace -B line phases.bt > timings 2>&1 &
+          observer=$!
+          trap 'sudo kill -INT "$observer" 2>/dev/null || true; cat timings' EXIT
+          for _ in {1..40}; do
+            if grep -Fxq ready timings; then break; fi
+            kill -0 "$observer"
+            sleep 1
+          done
+          grep -Fxq ready timings
+          rc=0
+          timeout -k 3 240 uv run --no-project --isolated python "$GITHUB_WORKSPACE/.github/measure-native-case.py" "$program" 21 'native experiment compares all cases and retains unknown cost through interruption' || rc=$?
+          echo "Sample ended with runner status $rc"
+          test "$rc" -eq 0 || test "$rc" -eq 124
+          grep -Eq '@micros\[pump\]: [1-9]' timings
