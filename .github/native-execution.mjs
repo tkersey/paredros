@@ -16,9 +16,10 @@ const suites = {
       'tests.settlement.', 'tests.native_genesis.', 'tests.contracts.', 'native settlements consume revisions',
       'native settlements reject repeated', 'native settlements check overflow', 'native settlements resolve exact',
       'native settlements require coherent'),
-    delivery: group(8, 'native settlements advance only exact', 'native settlements hold unknown',
-      'native settlements distinguish identical', 'native settlements use exclusive', 'native settlements retry only',
-      'native settlements preserve pacing', 'native settlements retain paused', 'native settlements clear activation'),
+    delivery: group(4, 'native settlements advance only exact', 'native settlements hold unknown',
+      'native settlements distinguish identical', 'native settlements use exclusive'),
+    retry: group(4, 'native settlements retry only', 'native settlements preserve pacing',
+      'native settlements retain paused', 'native settlements clear activation'),
   },
   'transitions-third': 11,
   rendering: {

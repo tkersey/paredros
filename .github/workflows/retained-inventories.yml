@@ -18,7 +18,7 @@ jobs:
           persist-credentials: false
       - id: groups
         run: |
-          matrix=$(node .github/native-execution.mjs | jq -c '{include:[.include[] | select(.inventory != null) | select(.name != "methods-campaign" and .name != "transitions-second-composite" and .name != "rendering-escaping" and .name != "authority-proposal")]}')
+          matrix=$(node .github/native-execution.mjs | jq -c '{include:[.include[] | select(.name == "transitions-second-delivery" or .name == "transitions-second-retry")]}')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   measure:
     needs: inventories
@@ -35,18 +35,13 @@ jobs:
           PART: ${{ matrix.part }}
         run: |
           set -euo pipefail
-          case "$PART" in
-            authority) id=14374167715; digest=a733e51516326e37e871404c8b0f09f36c31dd14be0869ed75d1912afeaf7ad1 ;;
-            methods) id=14373798093; digest=7b4aefb2a75179d06ff864e865e603f0ff07df72f3c71f974393dac853cfbe2f ;;
-            rendering) id=14374282865; digest=e6ec6d53fa5c08f16c7ed91b2283fae5169a6ab2c8a98a8aafea99687dc23ba0 ;;
-            transitions-second) id=14373294716; digest=2e436cc682d6391402f724bdc6b7c3397cb70599317361ea38e429249aa91658 ;;
-            *) exit 2 ;;
-          esac
+          test "$PART" = transitions-second
+          id=14389476326
+          digest=4e2ad183eb52e6e63c9405431555967a427bcd612fc3739acac7a47b099ea6eb
           gh api "repos/tkersey/paredros/actions/artifacts/$id/zip" > input.zip
           echo "$digest  input.zip" | sha256sum --check --strict
           unzip -p input.zip "$PART.tar.gz" | tar -xzf -
-          curl -fsSL https://raw.githubusercontent.com/tkersey/protean/787e3ae6e6a6f59bb1b51830ba40b5f89f4119bc/tools/native/qualification_tests.mjs -o qualification_tests.mjs
-          echo '4da9c954c6879fc6d46a94a627dd23dc7d0b7f6a251199118db8e1e2172d3c38  qualification_tests.mjs' | sha256sum --check --strict
+          echo '4da9c954c6879fc6d46a94a627dd23dc7d0b7f6a251199118db8e1e2172d3c38  test-tools/native/qualification_tests.mjs' | sha256sum --check --strict
       - name: Run the selected group and check its complete inventory
         env:
           PART: ${{ matrix.part }}
@@ -56,5 +51,5 @@ jobs:
           INVENTORY: ${{ matrix.inventory }}
         run: |
           set -euo pipefail
-          /usr/bin/time -f 'seconds=%e rss_KiB=%M' node qualification_tests.mjs "./test-tools/native/$PART" "$FILTERS" "[$INDEX]" | tee result.log
+          /usr/bin/time -f 'seconds=%e rss_KiB=%M' node test-tools/native/qualification_tests.mjs "./test-tools/native/$PART" "$FILTERS" "[$INDEX]" | tee result.log
           grep -Fxq "$COUNT/$COUNT tests passed across 1 independent groups ($INVENTORY tests in complete inventory)." result.log
