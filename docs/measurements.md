@@ -61,6 +61,16 @@ namespace identity, seal and database hashes also matched after shutdown. This
 macOS ARM64 LLVM executable used the Protean candidate `3118918` and had SHA-256
 `8cf1d14473085a8b774eb836715d9a7168fd35adaaa4a94db7fd2b31b2801fe0`.
 
+A later build served the queued startup request using the index it had just
+validated. The 11,881-byte response previously stalled after the first 8,192
+bytes. Giving the accepted socket room for the existing per-poll write budget
+allowed the whole response through. Socket creation took 29.751 s. The first
+ordinary status arrived at 45.855 s after launch, 16.104 s after socket creation.
+It reported 99,999 pending directives and returned 16 with continuation cursor
+16. A second ordinary status timed out after 30.007 s. The daemon shut down
+cleanly and the three store fingerprints matched. The executable SHA-256 was
+`ed0ce49b90047b6f55cef39e651480c466cbfd046a90d5f8c4b7b38591ce2a8e`.
+
 The 30 empty checks after the baseline took a median 1.760 s and p95 1.828 s
 of owner time. Database growth had a median of 128 KiB and p95 of 152 KiB.
 Both medians exceeded the initial targets of 250 ms and 64 KiB.

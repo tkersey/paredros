@@ -400,14 +400,23 @@ fn dispatch(
     uid: u32,
     bytes: []const u8,
 ) ![]const u8 {
+    return dispatchObserved(context, a, driver, uid, bytes, null);
+}
+
+fn dispatchAttached(context: *anyopaque, a: std.mem.Allocator, driver: *Driver, uid: u32, bytes: []const u8, index: *const @import("index.zig").Index) ![]const u8 {
+    return dispatchObserved(context, a, driver, uid, bytes, index);
+}
+
+fn dispatchObserved(context: *anyopaque, a: std.mem.Allocator, driver: *Driver, uid: u32, bytes: []const u8, index: ?*const @import("index.zig").Index) ![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
-    const response = try control.dispatchWithEnvironment(
+    const response = try control.dispatchWithIndex(
         a,
         driver,
         runtime.config.*,
         uid,
         bytes,
         runtime.continuity,
+        index,
     );
     const channel = runtime.slack orelse return response;
     var parsed = try native.json.parse(a, response, .{ .bytes = control.frame_bytes_max });
@@ -486,6 +495,7 @@ fn serve(
     var daemon = try Daemon.init(a, &driver, &server, .{
         .context = &runtime_context,
         .call = dispatch,
+        .on_attach = if (!recover and config.mode == .offline) .{ .enabled = acceptingControls, .call = dispatchAttached } else null,
     }, .{ .stop_grace_ms = 45_000 });
     defer releaseDaemon(a, io, &daemon);
     if (recover) try beginRecovery(a, io, &driver, config.current_uid);
@@ -496,6 +506,10 @@ fn serve(
     }
     defer if (runtime_context.slack) |channel| channel.deinit();
     return loop(a, io, &daemon, &runtime_context);
+}
+
+fn acceptingControls() bool {
+    return stop_requests.load(.acquire) == 0;
 }
 
 fn beginRecovery(a: std.mem.Allocator, io: std.Io, driver: *Driver, uid: u32) !void {

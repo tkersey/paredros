@@ -348,3 +348,49 @@ test "native daemon startup installs pending pause fence before worker dispatch"
     defer index.deinit();
     try std.testing.expect(!index.obligation(setup.control.target).?.ordinaryDispatch());
 }
+
+test "native daemon attachment handles one queued mutation before an ordinary partial read" {
+    const Observing = struct {
+        fn enabled() bool {
+            return true;
+        }
+
+        fn call(
+            context: *anyopaque,
+            frame: std.mem.Allocator,
+            driver: *Driver,
+            uid: u32,
+            bytes: []const u8,
+            attached: *const @import("../native/index.zig").Index,
+        ) ![]const u8 {
+            const target: *Control = @ptrCast(@alignCast(context));
+            try std.testing.expect(attached.obligation(target.target).?.ordinaryDispatch());
+            try std.testing.expectEqualStrings("pause", bytes);
+            return Control.call(context, frame, driver, uid, bytes);
+        }
+    };
+    var setup: Setup = .{};
+    defer setup.deinit();
+    try setup.init();
+    try setup.daemon.?.deinit();
+    setup.daemon = null;
+
+    var mutating = try socket.Client.init(a, setup.server.?.path, .{});
+    defer mutating.deinit();
+    try send(&mutating, "pause\n");
+    var reading = try socket.Client.init(a, setup.server.?.path, .{});
+    defer reading.deinit();
+    try send(&reading, "sta");
+
+    setup.daemon = try Daemon.init(setup.fixture.arena.allocator(), &setup.driver, &setup.server.?, .{
+        .context = &setup.control,
+        .call = Control.call,
+        .on_attach = .{ .enabled = Observing.enabled, .call = Observing.call },
+    }, .{});
+    try std.testing.expectEqual(1, setup.control.count);
+    try std.testing.expect(setup.control.durable_before_ack);
+    try send(&reading, "tus\n");
+    try response(&setup, &mutating, "paused");
+    try response(&setup, &reading, "fenced");
+    try std.testing.expectEqual(2, setup.control.count);
+}

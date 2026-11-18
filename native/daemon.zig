@@ -3,6 +3,7 @@ const native = @import("protean_native");
 const driver_module = @import("driver.zig");
 const socket = @import("control_socket.zig");
 const t = @import("application_types");
+const Index = @import("index.zig").Index;
 
 pub const Config = struct {
     controls_per_poll: u32 = 8,
@@ -28,6 +29,10 @@ pub fn Daemon(comptime Types: type) type {
         };
         pub const Handler = struct {
             context: *anyopaque,
+            on_attach: ?struct {
+                enabled: *const fn () bool,
+                call: *const fn (*anyopaque, std.mem.Allocator, *Driver, u32, []const u8, *const Index) anyerror![]const u8,
+            } = null,
             call: *const fn (
                 *anyopaque,
                 std.mem.Allocator,
@@ -58,17 +63,29 @@ pub fn Daemon(comptime Types: type) type {
             if (config.controls_per_poll == 0 or config.obligations_per_poll == 0)
                 return error.InvalidConfig;
             var session = try native.Session(Types).init(driver.service);
-            driver.attach(a) catch |err| {
+            var index = driver.attachIndexed(a) catch |err| {
                 try session.deinit();
                 return err;
             };
-            return .{
+            defer index.deinit();
+            var result: Self = .{
                 .driver = driver,
                 .server = server,
                 .control = control,
                 .config = config,
                 .session = session,
             };
+            if (control.on_attach) |observer| {
+                if (observer.enabled()) {
+                    var frame = std.heap.ArenaAllocator.init(a);
+                    defer frame.deinit();
+                    _ = result.controlOne(frame.allocator(), &index) catch |err| {
+                        try result.deinit();
+                        return err;
+                    };
+                }
+            }
+            return result;
         }
 
         pub fn deinit(self: *Self) !void {
@@ -99,22 +116,25 @@ pub fn Daemon(comptime Types: type) type {
         fn controls(self: *Self, a: std.mem.Allocator) !bool {
             var changed = false;
             for (0..self.config.controls_per_poll) |_| {
-                var request = (try self.server.pollNext()) orelse break;
-                defer request.deinit();
-                const response = try self.control.call(
-                    self.control.context,
-                    a,
-                    self.driver,
-                    request.uid,
-                    request.bytes,
-                );
-                self.server.respond(request.token, response) catch |err| switch (err) {
-                    error.StaleConnection => {},
-                    else => return err,
-                };
+                if (!try self.controlOne(a, null)) break;
                 changed = true;
             }
             return changed;
+        }
+
+        fn controlOne(self: *Self, a: std.mem.Allocator, attachment: ?*const Index) !bool {
+            var request = (try self.server.pollNext()) orelse return false;
+            defer request.deinit();
+            const handler = self.control;
+            const response = if (attachment) |index|
+                try handler.on_attach.?.call(handler.context, a, self.driver, request.uid, request.bytes, index)
+            else
+                try handler.call(handler.context, a, self.driver, request.uid, request.bytes);
+            self.server.respond(request.token, response) catch |err| switch (err) {
+                error.StaleConnection => {},
+                else => return err,
+            };
+            return true;
         }
 
         fn schedule(self: *Self, a: std.mem.Allocator) !bool {

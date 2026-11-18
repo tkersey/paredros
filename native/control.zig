@@ -65,10 +65,22 @@ pub fn dispatchWithEnvironment(
     bytes: []const u8,
     environment: ?continuity_control.Environment,
 ) ![]const u8 {
+    return dispatchWithIndex(a, driver, config, uid, bytes, environment, null);
+}
+
+pub fn dispatchWithIndex(
+    a: std.mem.Allocator,
+    driver: anytype,
+    config: configuration.Config,
+    uid: u32,
+    bytes: []const u8,
+    environment: ?continuity_control.Environment,
+    index: ?*const idx.Index,
+) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const response = execute(scratch, driver, config, uid, bytes, environment) catch |err|
+    const response = execute(scratch, driver, config, uid, bytes, environment, index) catch |err|
         try rejected(scratch, err);
     return frame(a, response) catch |err|
         frame(a, try rejected(scratch, err));
@@ -118,6 +130,7 @@ fn execute(
     uid: u32,
     bytes: []const u8,
     environment: ?continuity_control.Environment,
+    validated: ?*const idx.Index,
 ) !native.json.Value {
     if (uid != config.current_uid) return error.PermissionDenied;
     var parsed = try native.json.parse(a, bytes, .{ .bytes = frame_bytes_max });
@@ -126,6 +139,7 @@ fn execute(
     if (request.version != 1) return error.UnsupportedProtocol;
     const origin: t.Origin = .{ .local = .{ .uid = uid } };
     if (readOnly(request)) {
+        if (validated) |index| return inspect(a, index, request, try driver.clock.now(driver.clock.context));
         var index = try driver.rebuild(a);
         defer index.deinit();
         return inspect(a, &index, request, try driver.clock.now(driver.clock.context));
