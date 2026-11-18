@@ -51,7 +51,7 @@ jobs:
           }
           PROBE
           done
-          echo 'BEGIN { printf("ready\n"); } interval:s:30 { time("%H:%M:%S\n"); print(@micros); print(@calls); }' >> phases.bt
+          echo 'interval:s:1 /!@armed/ { @armed = 1; printf("ready\n"); } interval:s:30 { time("%H:%M:%S\n"); print(@micros); print(@calls); }' >> phases.bt
           sudo bpftrace -B line phases.bt > timings 2>&1 &
           observer=$!
           trap 'sudo kill -INT "$observer" 2>/dev/null || true; cat timings' EXIT
