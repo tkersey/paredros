@@ -58,11 +58,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [prior, candidate]
+        part: [candidate]
         case:
           - native conversation retains full multibyte descriptions within the scalar budget
           - native conversation describes exact hostile Unicode fields and binds attempt aware buttons
           - native conversation retains maximal exact proposal body for CLI without a Slack button
+          - native conversation turn binds distinct proposals and freezes model context
+          - native conversation final failure and absent configuration cannot invoke the model
+          - native conversation refuses an invalid confirmation without invoking a configured model
+        include:
+          - part: prior
+            case: native conversation turn binds distinct proposals and freezes model context
     steps:
       - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
