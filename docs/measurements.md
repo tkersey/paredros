@@ -37,6 +37,16 @@ created its control socket at 3.925 s and returned its first successful status a
 the first 16 with a continuation cursor, and the daemon then shut down cleanly.
 This run met the initial 10-second startup target.
 
+The same executable also started against a separate product-configured history
+of 100,000 terminal tasks. The control socket appeared at 44.862 s. An ordinary
+`status` sent as soon as the socket appeared exhausted its 30-second client
+deadline and exited with code 74 at 74.867 s after launch. The daemon exited
+cleanly at 94.383 s following SIGTERM. Sampled daemon RSS peaked at 16.22 GiB.
+This run therefore provides no successful first-status latency at 100,000 tasks.
+Before launch, the measurement tool independently counted 100,000 task rows and
+one obligation, and measured 13.976 s to open the namespace and 16.571 s to
+rebuild the application index.
+
 The 30 empty checks after the baseline took a median 1.760 s and p95 1.828 s
 of owner time. Database growth had a median of 128 KiB and p95 of 152 KiB.
 Both medians exceeded the initial targets of 250 ms and 64 KiB.
