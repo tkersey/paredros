@@ -287,6 +287,7 @@ fn nativeTestRoot(
     const root = b.createModule(.{
         .root_source_file = b.path(path),
         .target = target,
+        .single_threaded = false,
         .optimize = optimize,
         .strip = optimize != .debug and !(if (assets) |value| value.symbols else false),
         .imports = &.{
@@ -336,6 +337,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
         } },
     });
     result.executable.use_llvm = false;
+    result.executable.root_module.single_threaded = false;
     const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     if (symbols) {
         result.executable.root_module.strip = false;
