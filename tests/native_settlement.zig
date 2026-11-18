@@ -407,11 +407,22 @@ fn mismatched(case: Mismatch, previous: *t.Head, current: *t.Settlement) void {
     }
 }
 
-test "native settlements retain unrelated superseded malformed or unproven delivery evidence" {
+const mismatches = std.enums.values(Mismatch);
+const first_frontier_mismatch = @backingInt(Mismatch.missing_coverage);
+
+test "native settlements retain deliveries with mismatched admissions or receipts" {
+    try checkMismatches(mismatches[0..first_frontier_mismatch]);
+}
+
+test "native settlements retain deliveries with unproven coverage or inactive intent" {
+    try checkMismatches(mismatches[first_frontier_mismatch..]);
+}
+
+fn checkMismatches(cases: []const Mismatch) !void {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
-    for (std.enums.values(Mismatch)) |case| {
+    for (cases) |case| {
         var previous = pendingHead();
         var current = deliveryFact();
         mismatched(case, &previous, &current);

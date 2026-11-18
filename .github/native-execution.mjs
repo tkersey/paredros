@@ -11,7 +11,8 @@ const suites = {
   providers: 40,
   'transitions-first': 15,
   'transitions-second': {
-    composite: group(1, 'native settlements retain unrelated superseded malformed or unproven delivery evidence'),
+    receipts: group(1, 'native settlements retain deliveries with mismatched admissions or receipts'),
+    coverage: group(1, 'native settlements retain deliveries with unproven coverage or inactive intent'),
     accounting: group(16, 'native_transitions_test.', 'tests.native_revision.', 'tests.revision.',
       'tests.settlement.', 'tests.native_genesis.', 'tests.contracts.', 'native settlements consume revisions',
       'native settlements reject repeated', 'native settlements check overflow', 'native settlements resolve exact',
