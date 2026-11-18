@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      mac_backup:
+        description: Run on the Mac's self-hosted Linux runner
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
@@ -18,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   source:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,7 +38,7 @@ jobs:
       - run: zig build test -Dnative=false -Doptimize=safe --summary all
   acquire:
     name: Acquire native inputs
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     outputs:
       key: ${{ steps.inputs.outputs.key }}
@@ -98,7 +103,7 @@ jobs:
   prepare:
     name: Prepare native artifacts
     needs: acquire
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     outputs:
       key: ${{ steps.inputs.outputs.key }}
@@ -164,7 +169,7 @@ jobs:
   build:
     name: Build / ${{ matrix.part }}
     needs: prepare
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -235,7 +240,7 @@ jobs:
   execute:
     name: Execute / ${{ matrix.name }}
     needs: [acquire, build]
-    runs-on: ubuntu-22.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
