@@ -1,7 +1,7 @@
-name: Measure proposal text span processing on native Linux
+name: Measure checked campaign rendering on native Linux
 on:
   push:
-    branches: [diagnostic/proposal-spans]
+    branches: [diagnostic/campaign-rendering]
 permissions:
   contents: read
   actions: read
@@ -11,6 +11,13 @@ env:
   ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 jobs:
   compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {variant: control, suite: methods}
+          - {variant: candidate, suite: methods}
+          - {variant: candidate, suite: rendering}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -39,15 +46,20 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Select the control formatter
+        if: matrix.variant == 'control'
+        run: git restore --source=HEAD^ -- app/oid_text.zig app/render_frame.zig
       - name: Compile the selected existing suite
+        env:
+          SUITE: ${{ matrix.suite }}
         run: |
-          zig build build-native-tests -Dnative-tests=true -Dnative-group=rendering -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
-          cp zig-out/test-tools/native/rendering check
+          zig build build-native-tests -Dnative-tests=true -Dnative-group="$SUITE" -Dtest-product-assets=false -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --summary all
+          cp zig-out/test-tools/native/"$SUITE" check
           sha256sum check
           tar -czf check.tar.gz check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: candidate
+          name: ${{ matrix.variant }}-${{ matrix.suite }}
           path: check.tar.gz
           compression-level: 0
           retention-days: 1
@@ -58,36 +70,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [candidate]
-        case:
-          - native conversation retains full multibyte descriptions within the scalar budget
-          - native conversation describes exact hostile Unicode fields and binds attempt aware buttons
-          - native conversation retains maximal exact proposal body for CLI without a Slack button
-          - native conversation turn binds distinct proposals and freezes model context
-          - native conversation final failure and absent configuration cannot invoke the model
-          - native conversation refuses an invalid confirmation without invoking a configured model
         include:
-          - part: prior
-            case: native conversation turn binds distinct proposals and freezes model context
+          - {variant: control, suite: methods, case: campaign}
+          - {variant: candidate, suite: methods, case: campaign}
+          - {variant: candidate, suite: rendering, case: native render frame empty evidence and invalid coverage remain explicit}
+          - {variant: candidate, suite: rendering, case: native render frame retains truthful full count and oldest ordered bounded entries}
     steps:
       - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
-      - if: matrix.part == 'candidate'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: ${{ matrix.part }}
-      - name: Verify previously built control executable
-        if: matrix.part == 'prior'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/tkersey/paredros/actions/artifacts/14374282865/zip > input.zip
-          echo 'e6ec6d53fa5c08f16c7ed91b2283fae5169a6ab2c8a98a8aafea99687dc23ba0  input.zip' | sha256sum --check --strict
-          unzip -p input.zip rendering.tar.gz | tar -xzf -
-          cp test-tools/native/rendering check
-      - name: Execute the original native case
+          name: ${{ matrix.variant }}-${{ matrix.suite }}
+      - name: Execute the unchanged native test
         env:
           CASE: ${{ matrix.case }}
         run: |
-          if [ -f check.tar.gz ]; then tar -xzf check.tar.gz; fi
-          uv run --no-project --isolated python .github/measure-native-case.py ./check 63 "$CASE"
+          tar -xzf check.tar.gz
+          if [ "$CASE" = campaign ]; then
+            uv run --no-project --isolated python .github/observe-campaign.py ./check
+          else
+            uv run --no-project --isolated python .github/measure-native-case.py ./check 63 "$CASE"
+          fi
