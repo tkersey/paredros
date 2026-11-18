@@ -15,7 +15,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {variant: control, suite: methods}
           - {variant: candidate, suite: methods}
           - {variant: candidate, suite: rendering}
     runs-on: ubuntu-22.04
@@ -46,9 +45,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Select the control formatter
-        if: matrix.variant == 'control'
-        run: git restore --source=HEAD^ -- app/oid_text.zig app/render_frame.zig
       - name: Compile the selected existing suite
         env:
           SUITE: ${{ matrix.suite }}
@@ -71,10 +67,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {variant: control, suite: methods, case: campaign}
           - {variant: candidate, suite: methods, case: campaign}
           - {variant: candidate, suite: rendering, case: native render frame empty evidence and invalid coverage remain explicit}
-          - {variant: candidate, suite: rendering, case: native render frame retains truthful full count and oldest ordered bounded entries}
+          - {variant: candidate, suite: rendering, case: native render frame safely abbreviates one huge Unicode commit and keeps coverage}
+          - {variant: candidate, suite: rendering, case: native render frame budgets hostile escaping and all sections at their upper bounds}
+          - {variant: candidate, suite: rendering, case: native render frame keeps Unicode mentions and URLs inert and flattens text controls}
     steps:
       - *checkout
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9

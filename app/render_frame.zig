@@ -37,8 +37,13 @@ pub const Result = struct {
 pub const Function = a.Function(struct { input: Input }, Result);
 const Frame = struct { text: Text, listed_oids: Oids, invalid_highlights: u64, abbreviated: bool };
 const ClipResult = struct { text: cts.Utf8, abbreviated: bool };
-const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, start: u64, output: cts.Utf8 };
-const Clip = a.Function(struct { state: ClipInput }, ClipResult);
+const Clip = a.Function(struct {
+    text: cts.Utf8,
+    index: u64,
+    remaining: u64,
+    start: u64,
+    output: cts.Utf8,
+}, ClipResult);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
 const Notes = a.Function(struct {
@@ -86,128 +91,121 @@ fn clipped(
     value: anytype,
     budget: u64,
 ) !a.Value(ClipResult) {
-    return b.call(clip, .{ .state = try b.product(try c.schema(ClipInput), .{
+    return b.call(clip, .{
         .text = try widen(c, b, value),
         .index = try b.constant(u64, 0),
-        .budget = try b.constant(u64, budget - 3),
+        .remaining = try b.constant(u64, budget - 3),
         .start = try b.constant(u64, 0),
-        .used = try b.constant(u64, 0),
         .output = try literal(c, ""),
-    }) });
+    });
 }
+
+// The cost of an unchanged scalar is its UTF-8 width, except for Slack markup.
+// A zero entry marks an ASCII control, which becomes a one-byte space.
+const escaped_costs = blk: {
+    var costs: [256]u8 = @splat(1);
+    @memset(costs[0..32], 0);
+    costs[127] = 0;
+    costs['&'] = 5;
+    costs['<'] = 4;
+    costs['>'] = 4;
+    @memset(costs[128..224], 2);
+    @memset(costs[224..240], 3);
+    @memset(costs[240..], 4);
+    break :blk costs;
+};
 
 fn clipFunction(c: protean.Context) !Clip {
     const function = try c.author.function("bounded scalar-safe inert text", .{
-        .state = try c.schema(ClipInput),
+        .text = try c.schema(cts.Utf8),
+        .index = try c.schema(u64),
+        .remaining = try c.schema(u64),
+        .start = try c.schema(u64),
+        .output = try c.schema(cts.Utf8),
     }, try c.schema(ClipResult), &.{});
     const b = try c.author.body(function);
-    const state = try b.parameter("state");
-    const active = try b.branch();
-    const ended = try b.branch();
-    const done = try ended.product(try c.schema(ClipResult), .{
-        .text = try clipPrefix(c, ended, state),
-        .abbreviated = try b.constant(bool, false),
-    });
-    const result = try b.conditional(
-        try b.less(try b.field(state, "index"), try b.blobLength(try b.field(state, "text"))),
-        try active.ret(try clipScalar(c, active, function, state)),
-        try ended.ret(done),
+    const text = try b.parameter("text");
+    const index = try b.parameter("index");
+    const start = try b.parameter("start");
+    const output = try b.parameter("output");
+    const remaining = try b.parameter("remaining");
+    const byte = try b.blobByte(text, index);
+    const ended = try b.caseOf(byte, "none");
+    const present = try b.caseOf(byte, "some");
+    const active = present.body();
+    const one = try active.constant(u64, 1);
+    const code = try active.variantPayload(try active.blobByte(
+        try c.literal(cts.Bytes(256), .{ .bytes = &escaped_costs }),
+        try active.convertInteger(try c.schema(u64), present.payload(), .{}),
+    ), "some", try failure(c));
+    const value = try active.convertInteger(try c.schema(u64), code, .{});
+    const control = try active.equal(code, try active.constant(u8, 0));
+    const width = try active.select(
+        try active.less(present.payload(), try active.constant(u8, 128)),
+        one,
+        value,
     );
-    try c.author.define(function, try b.ret(result));
-    return function;
-}
-
-fn scalarLength(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    return b.select(
-        try b.less(byte, try b.constant(u8, 128)),
-        try b.constant(u64, 1),
-        try b.select(
-            try b.less(byte, try b.constant(u8, 224)),
-            try b.constant(u64, 2),
-            try b.select(
-                try b.less(byte, try b.constant(u8, 240)),
-                try b.constant(u64, 3),
-                try b.constant(u64, 4),
-            ),
-        ),
-    );
-}
-
-fn escapedCost(b: anytype, byte: a.Value(u8), length: a.Value(u64)) !a.Value(u64) {
-    return b.select(
-        try b.equal(byte, try b.constant(u8, '&')),
-        try b.constant(u64, 5),
-        try b.select(
-            try either(
-                b,
-                try b.equal(byte, try b.constant(u8, '<')),
-                try b.equal(byte, try b.constant(u8, '>')),
-            ),
-            try b.constant(u64, 4),
-            length,
-        ),
-    );
-}
-
-fn clipScalar(
-    c: protean.Context,
-    b: anytype,
-    function: Clip,
-    state: a.Value(ClipInput),
-) !a.Value(ClipResult) {
-    const text = try b.field(state, "text");
-    const index = try b.field(state, "index");
-    const byte = try b.variantPayload(try b.blobByte(text, index), "some", try failure(c));
-    const length = try scalarLength(b, byte);
-    const end = try add(c, b, index, length);
-    const used = try add(c, b, try b.field(state, "used"), try escapedCost(b, byte, length));
-    const fits = try b.branch();
-    const full = try b.branch();
-    const control = try either(
-        fits,
-        try fits.less(byte, try fits.constant(u8, 32)),
-        try fits.equal(byte, try fits.constant(u8, 127)),
-    );
+    const cost = try active.select(control, one, value);
+    const fits = try active.branch();
+    const full = try active.branch();
+    const end = try add(c, fits, index, width);
     const replace = try fits.branch();
     const keep = try fits.branch();
-    const pending = try fits.update(state, .{ .index = end, .used = used });
-    const cleaned = try replace.update(pending, .{
-        .start = end,
-        .output = try replace.blobConcat(
-            try c.schema(cts.Utf8),
-            try clipPrefix(c, replace, state),
-            try literal(c, " "),
-            try failure(c),
-        ),
+    const changed = try replace.blobConcat(
+        try c.schema(cts.Utf8),
+        try clipPrefix(c, replace, text, start, index, output),
+        try literal(c, " "),
+        try failure(c),
+    );
+    const next = try fits.call(function, .{
+        .text = text,
+        .index = end,
+        .remaining = try fits.checked(.subtract, remaining, cost, .{ .overflow = try failure(c) }),
+        .start = try fits.select(control, end, start),
+        .output = try fits.conditional(control, try replace.ret(changed), try keep.ret(output)),
     });
-    const next = try fits.conditional(control, try replace.ret(cleaned), try keep.ret(pending));
     const truncated = try full.product(try c.schema(ClipResult), .{
         .text = try full.blobConcat(
             try c.schema(cts.Utf8),
-            try clipPrefix(c, full, state),
+            try clipPrefix(c, full, text, start, index, output),
             try literal(c, "..."),
             try failure(c),
         ),
         .abbreviated = try full.constant(bool, true),
     });
-    return b.conditional(
-        try b.less(try b.field(state, "budget"), used),
+    const consumed = try active.conditional(
+        try active.less(remaining, cost),
         try full.ret(truncated),
-        try fits.ret(try fits.call(function, .{ .state = next })),
+        try fits.ret(next),
     );
+    const complete = try ended.body().product(try c.schema(ClipResult), .{
+        .text = try clipPrefix(c, ended.body(), text, start, index, output),
+        .abbreviated = try ended.body().constant(bool, false),
+    });
+    try c.author.define(function, try b.ret(try b.match(byte, .{
+        .none = try ended.ret(complete),
+        .some = try present.ret(consumed),
+    })));
+    return function;
 }
 
 // Bytes between start and index are complete, unchanged UTF-8 scalars.
-// Copy the span only when it ends or a control byte needs replacement.
-fn clipPrefix(c: protean.Context, b: anytype, state: a.Value(ClipInput)) !a.Value(cts.Utf8) {
+fn clipPrefix(
+    c: protean.Context,
+    b: anytype,
+    text: a.Value(cts.Utf8),
+    start: a.Value(u64),
+    index: a.Value(u64),
+    output: a.Value(cts.Utf8),
+) !a.Value(cts.Utf8) {
     const span = try b.blobSlice(
         try c.schema(cts.Utf8),
-        try b.field(state, "text"),
-        try b.field(state, "start"),
-        try b.field(state, "index"),
+        text,
+        start,
+        index,
         .{ .capacity = try failure(c), .invalid_utf8 = try failure(c) },
     );
-    return b.blobConcat(try c.schema(cts.Utf8), try b.field(state, "output"), span, try failure(c));
+    return b.blobConcat(try c.schema(cts.Utf8), output, span, try failure(c));
 }
 
 fn containsFunction(c: protean.Context) !Contains {
