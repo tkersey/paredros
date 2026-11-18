@@ -73,8 +73,13 @@ jobs:
           const {createHash} = require('node:crypto');
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
           const files = execFileSync('git', ['ls-files', '-z'], {encoding: 'utf8'}).split('\0').filter(Boolean).sort();
-          const inputs = {compiler: process.env.COMPILER_SHA256, host: process.platform + '-' + process.arch,
-            target: 'x86_64-linux-musl', optimize: 'safe', finalBackend: 'self-hosted',
+          const target = 'x86_64-linux-musl';
+          const clang = execFileSync('zig', ['cc', '-target', target, '--version'], {encoding: 'utf8'}).split('\n')[0];
+          if (!/\bclang version\b/i.test(clang)) throw new Error('Zig must use Clang for Linux C sources');
+          const compiler = {distribution_sha256: process.env.COMPILER_SHA256,
+            zig: execFileSync('zig', ['version'], {encoding: 'utf8'}).trim(), clang};
+          const inputs = {compiler, host: process.platform + '-' + process.arch,
+            target, optimize: 'safe', finalBackend: 'stage2_x86_64',
             jitHelpers: process.env.ZIG_DEBUG_CMD, jobs: 2,
             files: files.map(file => [file, fs.statSync(file).mode & 0o777, hash(fs.readFileSync(file))])};
           const key = 'paredros-native-v2-' + hash(JSON.stringify(inputs));

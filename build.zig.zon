@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .protean = .{
-            .url = "git+https://github.com/tkersey/protean#787e3ae6e6a6f59bb1b51830ba40b5f89f4119bc",
-            .hash = "protean-9.1.0-dBg3hJ0qeAB3WK_48LtG5H-BtfXoTVNR3UGDbG7yINLP",
+            .url = "git+https://github.com/tkersey/protean#055d1a5597a67915bbeebd05f2a01909a5ba8761",
+            .hash = "protean-9.1.0-dBg3hAJaeABO4BrvhJNxsd65eiL39dpWh0RwfSoPDQkL",
         },
     },
     .paths = .{

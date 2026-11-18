@@ -1,4 +1,4 @@
-import argparse, hashlib, json, os, pathlib, signal, subprocess, tempfile, time
+import argparse, hashlib, json, os, pathlib, platform, re, signal, subprocess, tempfile, time
 parser=argparse.ArgumentParser()
 parser.add_argument('binary',type=pathlib.Path)
 parser.add_argument('--report',type=pathlib.Path)
@@ -19,6 +19,16 @@ def run(args, *, config=None, input=None, allowed=(0,), seconds=45):
     return proc
 manifest=json.loads(run(['describe-build']).stdout)
 assert manifest['artifact_sha256']==hashlib.sha256(binary.read_bytes()).hexdigest()
+expected_backend = {
+    ('Linux', 'x86_64'): 'stage2_x86_64',
+    ('Darwin', 'arm64'): 'stage2_llvm',
+}[(platform.system(), platform.machine())]
+assert manifest['artifact_zig_backend'] == expected_backend, manifest['artifact_zig_backend']
+c_compiler = manifest['dependencies']['sqlite']['compiler']
+assert c_compiler['family'] == 'clang' and c_compiler['driver'] == 'zig build-obj', c_compiler
+assert c_compiler['zig_executable_sha256'] == manifest['compiler']['executable_sha256']
+for field in ('sqlite_object_sha256', 'posix_shim_object_sha256'):
+    assert re.fullmatch(r'[0-9a-f]{64}', c_compiler[field]), field
 assert json.loads(run(['licenses']).stdout)['artifact_sha256']==manifest['artifact_sha256']
 assert 'paredros' in run(['--version']).stdout
 results.append('embedded manifest and executing artifact hash agree')
@@ -131,7 +141,8 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
         results.append('reopened namespace retains monitor identity and operation retry')
     finally:
         stop(process)
-report={'passed':results,'count':len(results),'artifact_sha256':manifest['artifact_sha256'],'measurements':measurements,'live_services':False}
+report={'passed':results,'count':len(results),'artifact_sha256':manifest['artifact_sha256'],
+        'artifact_zig_backend':manifest['artifact_zig_backend'],'measurements':measurements,'live_services':False}
 encoded=json.dumps(report,indent=2)+'\n'
 if args.report: args.report.write_text(encoded)
 print(encoded,end='')

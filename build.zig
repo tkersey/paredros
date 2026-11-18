@@ -172,14 +172,18 @@ fn dependencyGraph(
     optimize: std.lang.Optimize,
     enabled: bool,
 ) *std.Build.Dependency {
+    const native_direct = target.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and
+        (target.query.isNative() or target.result.abi == .musl);
     if (!enabled) return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
+        .@"native-direct" = native_direct,
         .native = false,
     });
     return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
+        .@"native-direct" = native_direct,
         .@"kosmos-source" = b.option(
             std.Build.LazyPath,
             "kosmos-source",

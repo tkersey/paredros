@@ -10,10 +10,10 @@ qualification have not been performed.
 
 ## Build
 
-Use exact Zig 0.17.1. Linux builds target `x86_64-linux-musl` with Zig’s direct
-x86-64 backend. Apple Silicon builds target `aarch64-macos` with LLVM because
-Zig 0.17.1’s direct ARM64 backend cannot compile the concurrent workers used by
-the daemon.
+Use Zig 0.17.1. For `x86_64-linux-musl`, Zig emits x86-64 machine code directly
+for Zig sources. Its bundled Clang compiles the two C sources, SQLite and the
+POSIX shim. On Apple Silicon, Zig uses LLVM for `aarch64-macos` because its
+direct ARM64 backend in 0.17.1 does not support the daemon's concurrent workers.
 
 ```sh
 zig build setup
@@ -29,9 +29,9 @@ inputs without acquisition. The native build independently checks those inputs.
 Explicit `-Dkosmos-source=PATH` and `-Dsqlite-source=PATH` select other copies of
 the same authenticated inputs.
 
-`describe-build` reports the embedded application/runtime/dependency identities
-and the hash of the executable actually running. Keep that executable with its
-namespace when retaining the original execution history.
+`describe-build` reports the embedded application/runtime/dependency identities,
+the Zig backend and the hash of the running executable. Keep that executable
+with its namespace when retaining the original execution history.
 
 ## Offline checks
 
@@ -58,11 +58,11 @@ separately, and every artifact executes in a fresh job. Each job retains its
 ten-minute limit. Prepared compiler work is reused through the authenticated
 current-run archive; build jobs do not save a redundant cache after uploading
 their completed artifact. Source checks, five product smoke assertions, and twelve
-process-death cases are additional. GitHub Actions executes these checks on
-native Linux x86-64.
+process-death cases are additional. The workflow defaults to Ubuntu x86-64.
+Manual dispatch can select the Mac's self-hosted Linux runner with `mac_backup`.
 
-PAREDROS pins landed Protean `787e3ae6e6a6f59bb1b51830ba40b5f89f4119bc`,
-including [the native embedding and recovery changes](https://github.com/tkersey/protean/pull/74)
+PAREDROS pins Protean by commit and package hash in `build.zig.zon`. It uses
+[the native embedding and recovery changes](https://github.com/tkersey/protean/pull/74)
 and [the authenticated Kosmos borrowing update](https://github.com/tkersey/protean/pull/75).
 Both upstream changes completed their required qualification, serial reviews,
 and landing. Application qualification and reviews must cover this selected pin;

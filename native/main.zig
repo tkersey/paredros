@@ -88,21 +88,7 @@ fn describeBuild(init: std.process.Init, assets: native.discovery.Assets) !u8 {
     defer handlers.deinit();
     var admitted = try native.discovery.Application.init(t, a, assets, handlers);
     defer admitted.deinit();
-    const artifact = try executableIdentity(init.io);
-    var manifest = (try native.json.parseAsset(a, assets.manifest, assets.manifest.len)).value;
-    try native.json.put(a, &manifest, "artifact_sha256", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(artifact.sha256, .lower)),
-    ));
-    try native.json.put(a, &manifest, "artifact_bytes", native.json.string(
-        try std.fmt.allocPrint(a, "{d}", .{artifact.bytes}),
-    ));
-    try native.json.put(a, &manifest, "embedded_manifest_sha256", native.json.string(
-        try native.discovery.digest(a, assets.manifest),
-    ));
-    try native.json.put(a, &manifest, "protocol_schema_sha256", native.json.string(
-        admitted.protocol_schema_sha256,
-    ));
-    try output(init.io, try native.json.canonical(a, manifest));
+    try output(init.io, try admitted.describeBuild(a, init.io));
     return 0;
 }
 
