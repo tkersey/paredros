@@ -440,7 +440,8 @@ fn serve(
     defer admitted.deinit();
     const existing = try nonempty(io, config.namespace_path);
     const runtime = (try executableIdentity(io)).sha256;
-    if (existing) try preflight(init, config, handlers, &admitted, runtime, null);
+    if (existing and config.mode == .live)
+        try preflight(init, config, handlers, &admitted, runtime, null);
     const launch = try configuration.prepare(a, io, config, .{
         .runtime_identity = runtime,
         .image_identity = admitted.image_identity,
