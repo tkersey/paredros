@@ -56,6 +56,7 @@ pub const Obligation = struct {
 pub const Index = struct {
     arena: std.heap.ArenaAllocator,
     records: []Record,
+    storage: std.ArrayList(Record) = .empty,
     obligations: []Obligation,
     tasks: std.AutoHashMapUnmanaged(t.Id, usize),
     imports: []const continuity.Imported = &.{},
@@ -66,6 +67,7 @@ pub const Index = struct {
     restore_cut: []const t.InputReference = &.{},
 
     pub fn deinit(self: *Index) void {
+        self.storage.deinit(self.arena.child_allocator);
         self.arena.deinit();
         self.* = undefined;
     }
@@ -94,35 +96,62 @@ pub const Index = struct {
         rows: []const Row,
         cancellations: []const Cancellation,
     ) !Index {
-        var self: Index = .{
+        var self = empty(a);
+        errdefer self.deinit();
+        try self.storage.ensureTotalCapacityPrecise(a, rows.len);
+        var temporary = std.heap.ArenaAllocator.init(a);
+        defer temporary.deinit();
+        for (rows) |row| {
+            _ = try self.add(Native, temporary.allocator(), row, null);
+            if (!temporary.reset(.retain_capacity)) return error.OutOfMemory;
+        }
+        try self.finish(cancellations);
+        return self;
+    }
+
+    fn empty(a: std.mem.Allocator) Index {
+        return .{
             .arena = std.heap.ArenaAllocator.init(a),
-            .records = undefined,
-            .obligations = undefined,
+            .records = &.{},
+            .obligations = &.{},
             .tasks = .empty,
         };
-        errdefer self.deinit();
+    }
+
+    fn add(
+        self: *Index,
+        comptime Native: type,
+        scratch: std.mem.Allocator,
+        row: Row,
+        snapshot_bytes: ?[]const u8,
+    ) !*const Record {
+        const a = self.arena.allocator();
+        const decoded = try decodeRow(Native, a, scratch, row, snapshot_bytes);
+        const existing = try self.tasks.getOrPut(a, row.input.task);
+        if (existing.found_existing) return error.DuplicateTask;
+        errdefer _ = self.tasks.remove(row.input.task);
+        existing.value_ptr.* = self.records.len;
+        try self.storage.append(self.arena.child_allocator, decoded);
+        self.records = self.storage.items;
+        return &self.records[self.records.len - 1];
+    }
+
+    fn finish(self: *Index, cancellations: []const Cancellation) !void {
         const scratch = self.arena.allocator();
-        self.records = try scratch.alloc(Record, rows.len);
         var obligations: std.ArrayList(Obligation) = .empty;
-        for (rows, 0..) |row, position| {
-            self.records[position] = try decodeRow(Native, scratch, row);
-            const existing = try self.tasks.getOrPut(scratch, row.input.task);
-            if (existing.found_existing) return error.DuplicateTask;
-            existing.value_ptr.* = position;
-        }
-        try validateOperations(&self, scratch);
-        for (self.records) |item| _ = try interaction.settlement(scratch, &self, item);
-        const recovery_view = try restore.inspect(scratch, &self);
+        try validateOperations(self, scratch);
+        for (self.records) |item| _ = try interaction.settlement(scratch, self, item);
+        const recovery_view = try restore.inspect(scratch, self);
         self.recovery = recovery_view.recovery;
         self.recovery_hold = recovery_view.recovery_hold;
         self.recovery_purpose = recovery_view.recovery_purpose;
         self.restore_cut = recovery_view.restore_cut;
-        self.imports = try continuity.prepareImports(scratch, &self);
-        self.portable = try continuity.preparePortable(scratch, &self);
-        try validateTurns(&self, cancellations);
+        self.imports = try continuity.prepareImports(scratch, self);
+        self.portable = try continuity.preparePortable(scratch, self);
+        try validateTurns(self, cancellations);
         for (self.records, 0..) |item, position| {
             if (item.input != .genesis or recordHead(item) == null) continue;
-            try obligations.append(scratch, try buildObligation(&self, position, cancellations));
+            try obligations.append(scratch, try buildObligation(self, position, cancellations));
         }
         self.obligations = try obligations.toOwnedSlice(scratch);
         for (self.records) |item| switch (item.input) {
@@ -132,9 +161,45 @@ pub const Index = struct {
                 return error.MissingGenesis,
             else => {},
         };
-        return self;
     }
 };
+
+pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
+    if (page_limit == 0) return error.InvalidPageLimit;
+    var index = Index.empty(a);
+    errdefer index.deinit();
+    var receipts = std.heap.ArenaAllocator.init(a);
+    defer receipts.deinit();
+    var cancellations: std.ArrayList(Cancellation) = .empty;
+    var temporary = std.heap.ArenaAllocator.init(a);
+    defer temporary.deinit();
+    var after: ?t.Id = null;
+    while (true) {
+        var page = try service.taskPage(a, after, page_limit);
+        defer page.deinit();
+        for (page.tasks) |task| {
+            const scratch = temporary.allocator();
+            const loaded = try retained.load(service, scratch, task, page_limit);
+            const item = try index.add(@import("protean_native"), scratch, retained.row(loaded), loaded.snapshot.bytes);
+            const replacement = switch (item.input) {
+                .step => |step| if (step.supersession) |x| x.cancellation else null,
+                .turn => |turn| if (turn.replacement) |x| x.cancellation else null,
+                else => null,
+            };
+            if (replacement) |request| {
+                const receipt = try readCancellation(service, receipts.allocator(), request);
+                try cancellations.append(receipts.allocator(), receipt.value);
+            }
+            if (!temporary.reset(.retain_capacity)) return error.OutOfMemory;
+        }
+        const next = page.next orelse break;
+        if (after) |previous| if (std.mem.order(u8, &previous, &next) != .lt)
+            return error.InvalidTaskOrder;
+        after = next;
+    }
+    try index.finish(cancellations.items);
+    return index;
+}
 
 pub fn digest(bytes: []const u8) t.Digest {
     var result: t.Digest = undefined;
@@ -149,7 +214,13 @@ fn verify(value: Value, task: t.Id, schema: []const u8, encoding: Encoding) !voi
         return error.UnsupportedEncoding;
 }
 
-fn decodeRow(comptime Native: type, a: std.mem.Allocator, row: Row) !Record {
+fn decodeRow(
+    comptime Native: type,
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    row: Row,
+    snapshot_bytes: ?[]const u8,
+) !Record {
     try verify(row.input, row.input.task, t.input_schema_id, .contract);
     const input = try c.decodeOwned(t.Input, a, row.input.bytes);
     var item: Record = .{
@@ -163,7 +234,7 @@ fn decodeRow(comptime Native: type, a: std.mem.Allocator, row: Row) !Record {
             (try c.decodeOwned(
                 retained.Snapshot,
                 a,
-                try c.encodeOwned(retained.Snapshot, a, snapshot),
+                snapshot_bytes orelse try c.encodeOwned(retained.Snapshot, scratch, snapshot),
             )).value
         else
             null,
@@ -181,11 +252,13 @@ fn decodeRow(comptime Native: type, a: std.mem.Allocator, row: Row) !Record {
             if (failure) t.failure_schema_id else t.output_schema_id,
             .json,
         );
-        const parsed = try Native.json.parseAsset(a, result.bytes, result.bytes.len);
+        const parsed = try Native.json.parseAsset(scratch, result.bytes, result.bytes.len);
         if (failure) {
-            _ = try Native.values.fromJson(t.Failure, a, parsed.value);
+            _ = try Native.values.fromJson(t.Failure, scratch, parsed.value);
         } else {
-            item.result = try Native.values.fromJson(t.Output, a, parsed.value);
+            const output = try Native.values.fromJson(t.Output, scratch, parsed.value);
+            const bytes = try c.encodeOwned(t.Output, scratch, output);
+            item.result = (try c.decodeOwned(t.Output, a, bytes)).value;
             if (!std.mem.eql(u8, @tagName(item.input), @tagName(item.result.?)))
                 return error.WrongResultKind;
         }
