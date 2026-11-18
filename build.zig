@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
     }
     if (crash_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig");
-        const checks = addSelfHostedTest(b, .{
+        const checks = addPlatformTest(b, .{
             .filters = &.{"process crash owner fixture"},
             .root_module = root,
         });
@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     }
     if (scale_tests) {
         const root = nativeTestRoot(b, dependency, optimize, assets, "scale_test.zig");
-        const checks = addSelfHostedTest(b, .{
+        const checks = addPlatformTest(b, .{
             .filters = &.{"native scale measurement"},
             .root_module = root,
         });
@@ -97,7 +97,7 @@ fn nativeTests(
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
-        const checks = addSelfHostedTest(b, .{
+        const checks = addPlatformTest(b, .{
             .filters = if (partition) |part|
                 nativePartitionFilters(group, part)
             else if (filter) |value| &.{value} else &.{},
@@ -193,30 +193,19 @@ fn dependencyGraph(
     });
 }
 
-fn addSelfHostedTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
+fn useLlvm(target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
+}
+
+fn addPlatformTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var selected = options;
-    selected.use_llvm = false;
-    const target = selected.root_module.resolved_target.?.result;
-    if (target.os.tag == .macos and target.cpu.arch == .aarch64) {
-        // The stock simple runner omits the environment and per-test leak checks.
-        // Select the pinned compiler's full terminal entry for native macOS.
-        const runner = b.addSystemCommand(&.{
-            "sed",
-            \\/^pub fn main(/,/^}/c\
-            \\pub fn main(init: std.process.Init.Minimal) void { mainTerminal(init); }
-        });
-        runner.addFileArg2(b.graph.path(.zig_lib, "compiler/test_runner.zig"), .{});
-        selected.test_runner = .{
-            .path = runner.captureStdOut(.{ .basename = "test_runner.zig" }),
-            .mode = .simple,
-        };
-    }
+    selected.use_llvm = useLlvm(selected.root_module.resolved_target.?);
     return b.addTest(selected);
 }
 
 fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
     const bootstrap = b.addExecutable(.{
-        .use_llvm = false,
+        .use_llvm = useLlvm(b.graph.host),
         .name = "paredros-dependencies",
         .root_module = b.createModule(.{
             .root_source_file = dependency.path("tools/native/dependencies.zig"),
@@ -261,7 +250,7 @@ fn testStep(
     name: []const u8,
     description: []const u8,
 ) *std.Build.Step.Compile {
-    const checks = addSelfHostedTest(b, .{
+    const checks = addPlatformTest(b, .{
         .filters = if (filter) |value| &.{value} else &.{},
         .root_module = root,
     });
@@ -336,7 +325,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
             .types = b.path("app/types.zig"),
         } },
     });
-    result.executable.use_llvm = false;
+    result.executable.use_llvm = useLlvm(result.executable.root_module.resolved_target.?);
     result.executable.root_module.single_threaded = false;
     const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     if (symbols) {

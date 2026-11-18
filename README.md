@@ -10,8 +10,10 @@ qualification have not been performed.
 
 ## Build
 
-Use exact Zig 0.17.1. The native product targets `aarch64-macos` and
-`x86_64-linux-musl`.
+Use exact Zig 0.17.1. Linux builds target `x86_64-linux-musl` with Zig’s direct
+x86-64 backend. Apple Silicon builds target `aarch64-macos` with LLVM because
+Zig 0.17.1’s direct ARM64 backend cannot compile the concurrent workers used by
+the daemon.
 
 ```sh
 zig build setup
