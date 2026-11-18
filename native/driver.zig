@@ -24,6 +24,10 @@ pub fn Driver(comptime Types: type) type {
         model: ?t.ModelBinding = null,
         page_limit: u32 = 128,
         attached: bool = false,
+        after_rebuild: ?struct {
+            context: *anyopaque,
+            observe: *const fn (*anyopaque, std.mem.Allocator, *const idx.Index) anyerror!void,
+        } = null,
 
         pub fn attach(self: *Self, a: std.mem.Allocator) !void {
             var index = try self.attachIndexed(a);
@@ -48,7 +52,13 @@ pub fn Driver(comptime Types: type) type {
         }
 
         pub fn rebuild(self: *Self, a: std.mem.Allocator) !idx.Index {
-            return catalog.rebuild(self.service, a, self.page_limit);
+            var index = try catalog.rebuild(self.service, a, self.page_limit);
+            errdefer index.deinit();
+            if (self.after_rebuild) |observer| {
+                self.after_rebuild = null;
+                try observer.observe(observer.context, a, &index);
+            }
+            return index;
         }
 
         fn dispatch(

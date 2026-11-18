@@ -71,6 +71,16 @@ It reported 99,999 pending directives and returned 16 with continuation cursor
 cleanly and the three store fingerprints matched. The executable SHA-256 was
 `ed0ce49b90047b6f55cef39e651480c466cbfd046a90d5f8c4b7b38591ce2a8e`.
 
+The next macOS ARM64 build also served a queued read when the scheduler finished
+rebuilding the index. On the same 100,000-task history, the control socket appeared
+30.322 s after launch. The first status took 16.762 s from socket creation
+(47.084 s from launch), and the second took 17.657 s. Each returned 16 of 99,999
+pending directives with continuation cursor 16. The daemon shut down cleanly
+and the namespace identity, seal and database hashes matched their pre-launch
+values. Sampled daemon RSS peaked at 2.94 GiB. This LLVM build used Protean
+`3118918` and had SHA-256
+`352691af37ba9378f6938cb9263b9e0867dddd336ec4ce900834236425b56d7a`.
+
 The 30 empty checks after the baseline took a median 1.760 s and p95 1.828 s
 of owner time. Database growth had a median of 128 KiB and p95 of 152 KiB.
 Both medians exceeded the initial targets of 250 ms and 64 KiB.

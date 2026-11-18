@@ -385,7 +385,7 @@ test "native daemon attachment handles one queued mutation before an ordinary pa
     setup.daemon = try Daemon.init(setup.fixture.arena.allocator(), &setup.driver, &setup.server.?, .{
         .context = &setup.control,
         .call = Control.call,
-        .on_attach = .{ .enabled = Observing.enabled, .call = Observing.call },
+        .observation = .{ .enabled = Observing.enabled, .call = Observing.call },
     }, .{});
     try std.testing.expectEqual(1, setup.control.count);
     try std.testing.expect(setup.control.durable_before_ack);
@@ -393,4 +393,67 @@ test "native daemon attachment handles one queued mutation before an ordinary pa
     try response(&setup, &mutating, "paused");
     try response(&setup, &reading, "fenced");
     try std.testing.expectEqual(2, setup.control.count);
+}
+
+test "native daemon scheduled observation preserves queued mutation order and advances its phases" {
+    const Observer = struct {
+        fn enabled() bool {
+            return true;
+        }
+
+        fn reads(_: std.mem.Allocator, bytes: []const u8) bool {
+            return std.mem.eql(u8, bytes, "view");
+        }
+
+        fn inspect(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *Driver,
+            uid: u32,
+            bytes: []const u8,
+            index: *const @import("../native/index.zig").Index,
+        ) ![]const u8 {
+            const target: *Control = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(socket.currentUid(), uid);
+            try std.testing.expectEqualStrings("view", bytes);
+            target.count += 1;
+            return if (index.obligation(target.target).?.ordinaryDispatch()) "observed-active" else "observed-fenced";
+        }
+    };
+    var setup: Setup = .{};
+    defer setup.deinit();
+    try setup.init();
+    setup.daemon.?.control.observation = .{ .enabled = Observer.enabled, .read_only = Observer.reads, .call = Observer.inspect };
+    var first = try socket.Client.init(a, setup.server.?.path, .{});
+    defer first.deinit();
+    var mutating = try socket.Client.init(a, setup.server.?.path, .{});
+    defer mutating.deinit();
+    var last = try socket.Client.init(a, setup.server.?.path, .{});
+    defer last.deinit();
+    const budget = setup.server.?.config.io_bytes_per_poll;
+    setup.server.?.config.io_bytes_per_poll = 3;
+    try send(&first, "view\n");
+    try std.testing.expectEqual(.progressed, try setup.poll(0));
+    try std.testing.expect(setup.daemon.?.scheduling == .import_turns);
+    try std.testing.expectEqual(1, setup.control.count);
+    setup.server.?.config.io_bytes_per_poll = budget;
+    try std.testing.expect(try setup.server.?.pollNext() == null);
+
+    setup.server.?.config.io_bytes_per_poll = 3;
+    try send(&mutating, "pause\n");
+    _ = try setup.poll(0);
+    try std.testing.expect(setup.daemon.?.scheduling == .recover_turns);
+    try std.testing.expectEqual(1, setup.control.count);
+    try std.testing.expect(!setup.control.durable_before_ack);
+
+    setup.server.?.config.io_bytes_per_poll = budget;
+    try send(&last, "view\n");
+    _ = try setup.poll(0);
+    try std.testing.expect(setup.daemon.?.scheduling == .turn_deliveries);
+    try std.testing.expectEqual(2, setup.control.count);
+    try std.testing.expect(setup.control.durable_before_ack);
+    try response(&setup, &first, "observed-active");
+    try response(&setup, &mutating, "paused");
+    try response(&setup, &last, "fenced");
+    try std.testing.expectEqual(3, setup.control.count);
 }

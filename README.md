@@ -52,8 +52,8 @@ acquisition counts in a fresh process. It does not contact live providers.
 
 The Linux workflow splits continuity and transitions with
 `-Dnative-partition=first|second|third`; each named test runs in exactly one partition.
-The unchanged import-only root runs in all three partitions, giving 313 checks in CI
-and 309 in the six unfiltered local groups. The product and crash fixture compile
+The unchanged import-only root runs in all three partitions, giving 314 checks in CI
+and 310 in the six unfiltered local groups. The product and crash fixture compile
 separately, and every artifact executes in a fresh job. Each job retains its
 ten-minute limit. Prepared compiler work is reused through the authenticated
 current-run archive; build jobs do not save a redundant cache after uploading

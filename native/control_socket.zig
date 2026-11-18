@@ -35,6 +35,11 @@ const Connection = struct {
 };
 const Identity = struct { device: u64, inode: u64 };
 
+pub const Selection = struct {
+    allocator: std.mem.Allocator,
+    permits: *const fn (std.mem.Allocator, []const u8) bool,
+};
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     path: [:0]u8,
@@ -88,6 +93,10 @@ pub const Server = struct {
     }
 
     pub fn pollNext(self: *Server) !?Request {
+        return self.pollSelected(null);
+    }
+
+    pub fn pollSelected(self: *Server, selection: ?Selection) !?Request {
         try self.acceptClients();
         var budget = self.config.io_bytes_per_poll;
         for (0..self.connections.len) |_| {
@@ -104,6 +113,12 @@ pub const Server = struct {
             if (connection.fd < 0 or connection.state != .ready) {
                 if (budget == 0) return null;
                 continue;
+            }
+            if (selection) |filter| {
+                if (!filter.permits(filter.allocator, connection.input.items)) {
+                    self.cursor = slot;
+                    return null;
+                }
             }
             const bytes = try connection.input.toOwnedSlice(self.allocator);
             connection.state = .awaiting_response;

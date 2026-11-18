@@ -495,7 +495,12 @@ fn serve(
     var daemon = try Daemon.init(a, &driver, &server, .{
         .context = &runtime_context,
         .call = dispatch,
-        .on_attach = if (!recover and config.mode == .offline) .{ .enabled = acceptingControls, .call = dispatchAttached } else null,
+        .observation = .{
+            .on_start = !recover and config.mode == .offline,
+            .enabled = acceptingControls,
+            .read_only = control.observingFrame,
+            .call = dispatchAttached,
+        },
     }, .{ .stop_grace_ms = 45_000 });
     defer releaseDaemon(a, io, &daemon);
     if (recover) try beginRecovery(a, io, &driver, config.current_uid);

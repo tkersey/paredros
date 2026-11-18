@@ -135,8 +135,7 @@ fn execute(
     if (uid != config.current_uid) return error.PermissionDenied;
     var parsed = try native.json.parse(a, bytes, .{ .bytes = frame_bytes_max });
     defer parsed.deinit();
-    const request = try native.values.fromJson(Request, a, parsed.value);
-    if (request.version != 1) return error.UnsupportedProtocol;
+    const request = try decodeRequest(a, parsed.value);
     const origin: t.Origin = .{ .local = .{ .uid = uid } };
     if (readOnly(request)) {
         if (validated) |index| return inspect(a, index, request, try driver.clock.now(driver.clock.context));
@@ -154,6 +153,21 @@ fn execute(
         try admitted(a, try admitCommand(a, driver, config, origin, request, operation_id));
     try native.json.put(a, &response, "operation", native.json.string(operation_id));
     return response;
+}
+
+pub fn observingFrame(a: std.mem.Allocator, bytes: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var parsed = native.json.parse(arena.allocator(), bytes, .{ .bytes = frame_bytes_max }) catch return false;
+    defer parsed.deinit();
+    const request = decodeRequest(arena.allocator(), parsed.value) catch return false;
+    return readOnly(request);
+}
+
+fn decodeRequest(a: std.mem.Allocator, value: native.json.Value) !Request {
+    const request = try native.values.fromJson(Request, a, value);
+    if (request.version != 1) return error.UnsupportedProtocol;
+    return request;
 }
 
 fn readOnly(request: Request) bool {
