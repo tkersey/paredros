@@ -10,3 +10,9 @@ pub fn main(init: std.process.Init) void {
     }) catch |err| native.reportFailure(err);
     if (code != 0) std.process.exit(code);
 }
+
+comptime {
+    const builtin = @import("builtin");
+    if (builtin.zig_backend != .stage2_x86_64 or builtin.single_threaded)
+        @compileError("this Linux build requires the threaded direct Zig x86-64 backend");
+}

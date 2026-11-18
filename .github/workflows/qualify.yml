@@ -1,8 +1,7 @@
-name: Offline qualification
+name: Check direct Linux embedding with the pinned Zig C toolchain
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: [diagnostic/direct-linux-embedding]
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,7 +51,7 @@ jobs:
       - name: Select execution groups
         id: matrix
         run: |
-          execution=$(node .github/native-execution.mjs)
+          execution=$(node .github/native-execution.mjs | jq -c '.include |= map(select(.part == "product" or .part == "crash"))')
           echo "execution=$execution" >> "$GITHUB_OUTPUT"
       - &identify_inputs
         name: Identify exact native inputs
@@ -169,7 +168,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [authority, providers, transitions-first, transitions-second, transitions-third, rendering, methods, continuity-first, continuity-second, continuity-third, product, crash]
+        part: [product, crash]
     env:
       PART: ${{ matrix.part }}
     steps:
