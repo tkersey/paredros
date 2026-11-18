@@ -4,7 +4,70 @@ These measurements use synthetic provider responses and real native task storage
 They do not qualify Slack, GitHub service latency, paid inference, or deployment.
 The implementation and final dependency selection remain under qualification.
 
-## Environment and reproduction
+## Threaded LLVM build on Apple Silicon, November 17
+
+PAREDROS `48a838c` used Protean `787e3ae` and Zig 0.17.1 with LLVM,
+safe optimization, and multithreading on an Apple M2 Pro with 32 GiB RAM
+and macOS 27.3. The scale executable had SHA-256
+`59af2ddaefacf5a95e0134ba6d504f309b32c6a906283111e273ff0983e71a02`.
+Other qualification work ran on the same host.
+
+| Terminal tasks | Namespace open | Index rebuild | Namespace bytes | Pause directive median | Pause directive p95 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 59.53 ms | 15.32 ms | 843,920 | 59.11 ms | 59.86 ms |
+| 10,000 | 1.208 s | 1.571 s | 65,073,296 | 59.08 ms | 60.84 ms |
+| 100,000 | 14.243 s | 16.884 s | 650,330,256 | 59.76 ms | 63.23 ms |
+
+Each history contains one genesis task and one pause directive for each remaining
+task. The timing columns for opening and rebuilding measure those operations
+individually. Across all 99,999 directives, owner time ranged from 56.63 to
+256.41 ms, with a nearest-rank p99 of 67.19 ms. Each table row uses all
+directives through that history size and nearest-rank p95.
+
+The 100,000-task namespace retained 1,200,004 objects, 1,100,001 dependencies,
+300,000 events, and 100,000 each of tasks, operation receipts, records and local
+admissions. From 10,000 to 100,000 tasks, the namespace grew by an average of
+6,503 bytes per additional directive.
+
+A separate namespace used the product's offline launch configuration and contained
+10,000 terminal tasks at launch. The shipped-form executable, SHA-256
+`67ce97e291d4a3333c6019ff1ec51de41cdbfa80c0c2189caaa9ae3bf181f25c`,
+created its control socket at 3.925 s and returned its first successful status at
+8.651 s after launch. That response reported 9,999 pending directives, returned
+the first 16 with a continuation cursor, and the daemon then shut down cleanly.
+This run met the initial 10-second startup target.
+
+The 30 empty checks after the baseline took a median 1.760 s and p95 1.828 s
+of owner time. Database growth had a median of 128 KiB and p95 of 152 KiB.
+Both medians exceeded the initial targets of 250 ms and 64 KiB.
+
+## Zig C backend and GNU GCC on Apple Silicon, November 17
+
+On an Apple M2 Pro with 32 GiB RAM and macOS 27.3, Zig 0.17.1 emitted C with
+runtime safety enabled. GNU GCC 16.2 compiled it at `-O2`. The scale executable
+used PAREDROS source `68684d9` and the Protean build helper at `caee1bd`.
+Its SHA-256 was `fda79efd213b0b363fa85ba7ed3dff4404a389bc48e6ce9d3efaa3f28e7bb6eb`.
+Other qualification work ran on the same machine.
+
+| Workload | Samples | Median | p95 (nearest rank) |
+|---|---:|---:|---:|
+| Owner time per pause directive through 100 terminal tasks | 99 | 92.74 ms | 94.44 ms |
+| Owner time per pause directive through 10,000 terminal tasks | 9,999 | 95.04 ms | 102.08 ms |
+| Owner time per empty check after the baseline | 30 | 3.002 s | 3.234 s |
+| Database growth per empty check after the baseline | 30 | 132 KiB | 148 KiB |
+
+At 100 terminal tasks, the native namespace opened in 131.34 ms, and the
+application index rebuilt in 22.13 ms. The namespace occupied 852,112 bytes.
+At 10,000 terminal tasks, native opening took 1.719 s, index rebuild took
+2.258 s, and the namespace occupied 65,237,136 bytes. These timings cover
+namespace opening and index construction. Full daemon startup also performs
+preflight checks and constructs its dispatch gate.
+
+The 30 empty checks exceeded both initial targets of 250 ms and 64 KiB. With
+genesis and the baseline check included, their namespace contained 32 tasks,
+3,219 objects, 4,880 dependencies, 404 records and 493 events.
+
+## November 15–16 environment and reproduction
 
 The November 15–16, 2026 observations used an Apple M2 Pro, 32 GiB RAM,
 macOS 27.3, Zig 0.17.1, and `-Doptimize=safe`. Scale and empty-check measurements
