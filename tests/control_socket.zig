@@ -401,3 +401,28 @@ test "control socket response bounds preserve pending state and close an oversiz
     try std.testing.expectEqual(error.FrameTooLarge, exchange.failure.?);
     try std.testing.expectError(error.Disconnected, client.request("{}"));
 }
+
+test "control socket can enqueue a response within its write budget before the next owner operation" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    var server = try transport.Server.init(a, directory.socket, .{ .operator_uid = transport.currentUid() });
+    defer server.deinit();
+    var client = try transport.Client.init(a, directory.socket, .{});
+    defer client.deinit();
+    try send(client.fd, "read\n");
+    var request = try next(&server);
+    defer request.deinit();
+
+    const body: [16 * 1024]u8 = @splat('x');
+    try server.respond(request.token, &body);
+    try std.testing.expect(try server.pollNext() == null);
+    var frame: [body.len + 1]u8 = undefined;
+    var length: usize = 0;
+    while (length < frame.len) {
+        const received = c.recv(client.fd, frame[length..].ptr, frame.len - length, 0);
+        if (received <= 0) return error.IncompleteWriteBudget;
+        length += @intCast(received);
+    }
+    try std.testing.expectEqualStrings(&body, frame[0..body.len]);
+    try std.testing.expectEqual('\n', frame[body.len]);
+}

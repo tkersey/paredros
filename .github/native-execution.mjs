@@ -2,9 +2,9 @@ const group = (count, ...filters) => ({count, filters});
 
 const suites = {
   authority: {
-    driver: group(18, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
+    driver: group(19, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
     proposal: group(1, 'control proposal consumer shows and confirms maximal retained body'),
-    controls: group(76, 'tests.native_session.', 'control CLI preserves', 'control protocol freezes',
+    controls: group(77, 'tests.native_session.', 'control CLI preserves', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },

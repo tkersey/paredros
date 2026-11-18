@@ -175,6 +175,7 @@ pub const Server = struct {
                     closeFd(fd);
                     return error.GenerationExhausted;
                 };
+                reserveWriteBudget(fd, self.config);
                 connection.* = .{ .fd = fd, .generation = self.next_generation, .uid = uid };
                 self.next_generation = next;
                 break;
@@ -362,6 +363,14 @@ fn openSocket() !c_int {
     errdefer closeFd(fd);
     try configureSocket(fd);
     return fd;
+}
+
+fn reserveWriteBudget(fd: c_int, config: Config) void {
+    const budget: c_int = @intCast(@min(config.io_bytes_per_poll, config.max_frame_bytes + 1, std.math.maxInt(c_int)));
+    var current: c_int = 0;
+    var length: c.socklen_t = @sizeOf(c_int);
+    if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.SNDBUF, &current, &length) == 0 and current < budget)
+        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.SNDBUF, &budget, @sizeOf(c_int));
 }
 
 fn configureSocket(fd: c_int) !void {

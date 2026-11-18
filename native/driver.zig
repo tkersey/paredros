@@ -26,15 +26,20 @@ pub fn Driver(comptime Types: type) type {
         attached: bool = false,
 
         pub fn attach(self: *Self, a: std.mem.Allocator) !void {
+            var index = try self.attachIndexed(a);
+            index.deinit();
+        }
+
+        pub fn attachIndexed(self: *Self, a: std.mem.Allocator) !idx.Index {
             if (self.attached) return error.AlreadyAttached;
             self.service.dispatch_gate = .held;
-            var index = try self.rebuild(a);
-            defer index.deinit();
+            const index = try self.rebuild(a);
             self.service.dispatch_gate = .{ .selected = .{
                 .context = self,
                 .permits = dispatch,
             } };
             self.attached = true;
+            return index;
         }
 
         pub fn detach(self: *Self) void {
