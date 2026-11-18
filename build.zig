@@ -172,14 +172,20 @@ fn dependencyGraph(
     optimize: std.lang.Optimize,
     enabled: bool,
 ) *std.Build.Dependency {
+    const linux_cc: ?[]const u8 = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64)
+        "musl-gcc"
+    else
+        null;
     if (!enabled) return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
+        .@"native-gcc" = linux_cc,
         .native = false,
     });
     return b.dependency("protean", .{
         .target = target,
         .optimize = optimize,
+        .@"native-gcc" = linux_cc,
         .@"kosmos-source" = b.option(
             std.Build.LazyPath,
             "kosmos-source",
