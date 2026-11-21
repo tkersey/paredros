@@ -128,6 +128,12 @@ the same authenticated local socket. Mutations accept `--operation ID`; reuse an
 ID only for the same request. An admission response means the operation is
 durable. It does not mean a remote message was delivered.
 
+`status` reports the running daemon's application version and executable SHA-256
+under `data.daemon`. `data.namespace_bytes` sums the logical lengths of the live
+namespace's database, identity, seal, and lock files, including the SQLite
+journal and pending seal when present. It excludes backups and filesystem block
+overhead. An active commit can change the file sizes between observations.
+
 Monitor views include a bounded first page of pending directives, their total,
 and `pending_directives_next`. Use `monitor directives ID --after ORDINAL
 --limit N` to continue from that ordinal until the next cursor is null. Each page

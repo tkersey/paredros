@@ -138,10 +138,10 @@ fn execute(
     const request = try decodeRequest(a, parsed.value);
     const origin: t.Origin = .{ .local = .{ .uid = uid } };
     if (readOnly(request)) {
-        if (validated) |index| return inspect(a, index, request, try driver.clock.now(driver.clock.context));
+        if (validated) |index| return inspect(a, driver.service, index, request, try driver.clock.now(driver.clock.context));
         var index = try driver.rebuild(a);
         defer index.deinit();
-        return inspect(a, &index, request, try driver.clock.now(driver.clock.context));
+        return inspect(a, driver.service, &index, request, try driver.clock.now(driver.clock.context));
     }
     const operation_id = try operation(request);
     if (request.command != .transfer_export and request.command != .transfer_import and
@@ -401,12 +401,13 @@ fn admitted(a: std.mem.Allocator, task_id: t.Id) !native.json.Value {
 
 fn inspect(
     a: std.mem.Allocator,
+    service: anytype,
     index: *const idx.Index,
     request: Request,
     clock_ms: i64,
 ) !native.json.Value {
     const data = switch (request.command) {
-        .status => |value| try status(a, index, clock_ms, value.after, value.limit),
+        .status => |value| try status(a, service, index, clock_ms, value.after, value.limit),
         .monitor_show => |id| try monitor(a, index, id, clock_ms),
         .monitor_directives => |page| try pendingDirectives(a, index, page.target, page.after, page.limit),
         .task_show => |id| try task(a, index, id),
@@ -454,8 +455,30 @@ fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !native
     return native.values.toJson(experiments.Campaign, a, observed.value);
 }
 
+fn namespaceBytes(io: std.Io, directory: std.Io.Dir) !u64 {
+    const File = struct { name: []const u8, transient: bool = false };
+    var total: u64 = 0;
+    for ([_]File{
+        .{ .name = "identity" },
+        .{ .name = "owner.lock" },
+        .{ .name = "state.sqlite" },
+        .{ .name = "seal" },
+        .{ .name = "state.sqlite-journal", .transient = true },
+        .{ .name = "seal.next", .transient = true },
+    }) |file| {
+        const stat = directory.statFile(io, file.name, .{ .follow_symlinks = false }) catch |err| {
+            if (err == error.FileNotFound and file.transient) continue;
+            return err;
+        };
+        if (stat.kind != .file) return error.UnsafeStatePath;
+        total = try std.math.add(u64, total, stat.size);
+    }
+    return total;
+}
+
 fn status(
     a: std.mem.Allocator,
+    service: anytype,
     index: *const idx.Index,
     clock_ms: i64,
     after: ?t.Id,
@@ -477,6 +500,14 @@ fn status(
         next = obligation.task;
     }
     var result = native.json.object();
+    const bytes = try namespaceBytes(service.io, .{ .handle = service.namespace.directory });
+    try native.json.put(a, &result, "namespace_bytes", try native.values.toJson(u64, a, bytes));
+    var daemon = native.json.object();
+    try native.json.put(a, &daemon, "application_version", service.application.metadata.object.get("application_version").?);
+    try native.json.put(a, &daemon, "artifact_sha256", native.json.string(
+        try a.dupe(u8, &std.fmt.bytesToHex(service.profile.runtime_identity, .lower)),
+    ));
+    try native.json.put(a, &result, "daemon", daemon);
     try native.json.put(a, &result, "obligations", .{ .array = items });
     try native.json.put(a, &result, "next", if (items.items.len == limit)
         try native.values.toJson(?t.Id, a, next)

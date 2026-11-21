@@ -68,6 +68,15 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
     try:
         initial=json.loads(run(['status'],config=config).stdout)
         assert initial['status']=='observed' and initial['data']['obligations']==[]
+        def status_namespace_bytes(response):
+            observed = int(response['data']['namespace_bytes'])
+            expected = sum(file.stat().st_size for file in (base/'state').iterdir())
+            assert observed == expected, (observed, expected)
+            daemon = response['data']['daemon']
+            assert daemon['artifact_sha256'] == manifest['artifact_sha256']
+            assert daemon['application_version'] == manifest['application_version']
+            return observed
+        initial_bytes = status_namespace_bytes(initial)
         command=['monitor','add','--wording','Offline fixture only.','--interval-ms','900000','--operation','smoke-monitor']
         first=json.loads(run(command,config=config).stdout)
         second=json.loads(run(command,config=config).stdout)
@@ -137,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
     try:
         reopened=json.loads(run(['status'],config=config).stdout)
         assert len(reopened['data']['obligations'])==1
+        assert status_namespace_bytes(reopened) > initial_bytes
         assert json.loads(run(command,config=config).stdout)['data']['task']==task
         results.append('reopened namespace retains monitor identity and operation retry')
     finally:
