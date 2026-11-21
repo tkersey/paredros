@@ -112,7 +112,10 @@ const Setup = struct {
         const task = try self.fixture.execute(initial.envelope.operation.bytes, .{
             .genesis = initial,
         });
-        const path = try std.fmt.allocPrint(frame, "{s}-control", .{self.fixture.path});
+        // The server and clients share a cwd. Keep checkout length out of sockaddr_un.
+        const path = try std.fs.path.join(frame, &.{
+            std.testing.TmpDir.parent_dir_path, &self.fixture.temporary.?.sub_path, "control",
+        });
         self.server = try socket.Server.init(a, path, .{ .operator_uid = socket.currentUid() });
         self.driver = .{ .service = &self.fixture.service.?, .clock = .{
             .context = self,
