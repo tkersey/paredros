@@ -35,20 +35,54 @@ with its namespace when retaining the original execution history.
 
 ## Offline checks
 
+Run `zig build check` after editing GitHub or Slack protocol handling. It exercises
+normalization, evidence digests, pagination, Slack delivery classification, and
+other provider assertions. The check compiles a small host test executable and
+executes it on each invocation. For a change to native GitHub capture or
+recovery, add the real parked-page, reopen, and resume check.
+
 ```sh
-zig build test -Dnative=false -Doptimize=safe
-zig build build-native-tests build-crash-tests -Dnative-tests=true -Dcrash-tests=true -Doptimize=safe
-zig build test-native -Dnative-tests=true -Doptimize=safe
-uv run --no-project python tests/process_crash.py zig-out/test-tools/paredros-crash-tests
-uv run --no-project python tests/product_smoke.py zig-out/bin/paredros
+zig build check
+zig build check -Dcheck-recovery=true
 ```
 
-Native tests compile into six groups and all groups run by default. The separate
-build step permits reuse of completed compilation; it does not count as test
-execution. `-Dnative-group=NAME` and `-Dtest-filter=TEXT` select diagnostics only.
-The process-death controller uses local provider fixtures, kills the process at
-named admission, dispatch, or capture boundaries, and checks retained state and
-acquisition counts in a fresh process. It does not contact live providers.
+Run `zig build qualify` for the complete offline inventory on the current host
+with Zig 0.17.1, Node, and uv installed. On x86-64 Linux under Rosetta, export
+`ZIG_DEBUG_CMD=1` before invoking Zig. Use `zig build qualify -- --list` to
+inspect the groups. Each invocation executes the tests and writes fresh timings,
+outcomes, and logs under `zig-out/qualification/`. Compiled artifacts can be
+reused. The Linux campaign must complete all 24 arms in one 600-second execution.
+
+Historical reopen and import use fixtures produced by the older application.
+The scale check opens a product-configured namespace containing 100,000 real
+tasks. Keep dedicated offline fixtures under
+`.zig-cache/qualification-fixtures/{reopen,archive,100k}`, or set
+`PAREDROS_HISTORY_REOPEN`, `PAREDROS_HISTORY_ARCHIVE`, and
+`PAREDROS_HISTORY_100K` to their respective directories. An absent fixture
+leaves the corresponding check incomplete. To provision another machine, build
+the legacy application at commit `77866577394711e6152a1e97fdecfeb0cfcd2f2c`
+in a separate checkout. The following commands create a dedicated historical
+namespace and snapshot with that binary and seed a separate scale namespace with
+the installed product. Run these once per fixture, outside the timed checks.
+
+```sh
+uv run --no-project python tests/seed_history.py /path/to/legacy-checkout .zig-cache/qualification-fixtures/reopen
+ln -s reopen .zig-cache/qualification-fixtures/archive
+zig build setup
+zig build install build-scale-tests -Dnative=true -Dscale-tests=true -Doptimize=safe
+uv run --no-project python tests/seed_scale_fixture.py
+```
+
+The scale fixture takes roughly 100 minutes to generate on the measured Mac.
+Keep the generated namespace at its original location between candidates.
+Ctrl-C lets the current batch close. Running the same generation command
+again with the same producer resumes at the saved batch.
+
+For individual diagnostics, `zig build test` runs the source contracts.
+`zig build test-native -Dnative-tests=true -Dnative-group=NAME -Doptimize=safe`
+runs a native suite. The process-death controller uses local fixtures, kills
+the process at named admission, dispatch, or capture boundaries, and checks
+retained state and acquisition counts in a fresh process.
 
 The Linux workflow splits continuity and transitions with
 `-Dnative-partition=first|second|third`; each named test runs in exactly one partition.

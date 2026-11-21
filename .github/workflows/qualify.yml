@@ -41,7 +41,7 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     outputs:
-      key: ${{ steps.inputs.outputs.key }}
+      key: ${{ steps.inputs.outputs.acquisition }}
       sha256: ${{ steps.archive.outputs.sha256 }}
       execution: ${{ steps.matrix.outputs.execution }}
     steps:
@@ -67,31 +67,15 @@ jobs:
           compiler=$(tar -C "$compiler_root" --sort=name --mtime=@0 \
             --owner=0 --group=0 --numeric-owner --dereference -cf - zig lib LICENSE \
             | sha256sum | cut -d' ' -f1)
-          COMPILER_SHA256="$compiler" node <<'JS'
-          const fs = require('node:fs');
-          const {execFileSync} = require('node:child_process');
-          const {createHash} = require('node:crypto');
-          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-          const files = execFileSync('git', ['ls-files', '-z'], {encoding: 'utf8'}).split('\0').filter(Boolean).sort();
-          const target = 'x86_64-linux-musl';
-          const clang = execFileSync('zig', ['cc', '-target', target, '--version'], {encoding: 'utf8'}).split('\n')[0];
-          if (!/\bclang version\b/i.test(clang)) throw new Error('Zig must use Clang for Linux C sources');
-          const compiler = {distribution_sha256: process.env.COMPILER_SHA256,
-            zig: execFileSync('zig', ['version'], {encoding: 'utf8'}).trim(), clang};
-          const inputs = {compiler, host: process.platform + '-' + process.arch,
-            target, optimize: 'safe', finalBackend: 'stage2_x86_64',
-            jitHelpers: process.env.ZIG_DEBUG_CMD, jobs: 2,
-            files: files.map(file => [file, fs.statSync(file).mode & 0o777, hash(fs.readFileSync(file))])};
-          const key = 'paredros-native-v2-' + hash(JSON.stringify(inputs));
-          fs.writeFileSync(process.env.RUNNER_TEMP + '/native-inputs.key', key + '\n');
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'key=' + key + '\n');
-          JS
+          COMPILER_SHA256="$compiler" node .github/native-inputs.mjs keys >> "$GITHUB_OUTPUT"
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
-          path: .zig-cache
-          key: ${{ steps.inputs.outputs.key }}-acquisition
+          path: |
+            .zig-cache
+            .protean-native/inputs
+          key: ${{ steps.inputs.outputs.acquisition }}
       - name: Acquire and authenticate pinned native inputs
-        run: zig build setup -Doptimize=safe -j2 --verbose --summary all
+        run: node .github/native-inputs.mjs acquisition
       - name: Seal acquired inputs
         id: archive
         run: |
@@ -100,7 +84,7 @@ jobs:
           echo "sha256=$(sha256sum "$RUNNER_TEMP/acquisition.tar.zst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: acquisition-${{ steps.inputs.outputs.key }}
+          name: acquisition-${{ steps.inputs.outputs.acquisition }}
           path: ${{ runner.temp }}/acquisition.tar.zst
           compression-level: 0
           if-no-files-found: error
@@ -111,7 +95,7 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_backup && 'mac-backup' || 'ubuntu-22.04' }}
     timeout-minutes: 10
     outputs:
-      key: ${{ steps.inputs.outputs.key }}
+      key: ${{ steps.inputs.outputs.preparation }}
       sha256: ${{ steps.archive.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -126,13 +110,13 @@ jobs:
       - *identify_inputs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: acquisition-${{ steps.inputs.outputs.key }}
+          name: acquisition-${{ steps.inputs.outputs.acquisition }}
           path: ${{ runner.temp }}/acquisition
       - name: Verify acquired inputs
         env:
           ACQUISITION_KEY: ${{ needs.acquire.outputs.key }}
           ACQUISITION_SHA256: ${{ needs.acquire.outputs.sha256 }}
-          INPUT_KEY: ${{ steps.inputs.outputs.key }}
+          INPUT_KEY: ${{ steps.inputs.outputs.acquisition }}
         run: |
           test "$ACQUISITION_KEY" = "$INPUT_KEY"
           printf '%s  %s\n' "$ACQUISITION_SHA256" "$RUNNER_TEMP/acquisition/acquisition.tar.zst" | sha256sum --check --strict
@@ -140,7 +124,7 @@ jobs:
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache
-          key: ${{ steps.inputs.outputs.key }}-preparation
+          key: ${{ steps.inputs.outputs.preparation }}
       - name: Materialize application and native prerequisites
         run: |
           nproc
@@ -154,19 +138,19 @@ jobs:
           ' &
           observer=$!
           trap 'kill "$observer" 2>/dev/null || true; wait "$observer" 2>/dev/null || true' EXIT
-          zig build prepare-native -Dnative=true -Dtarget=x86_64-linux-musl -Doptimize=safe -j2 --verbose --summary all
+          node .github/native-inputs.mjs preparation
       - name: Seal prepared inputs
         id: archive
         run: |
           cmp app/types.zig zig-out/prepared/types.zig
-          cp "$RUNNER_TEMP/native-inputs.key" zig-out/prepared/inputs.key
+          printf '%s\n' "${{ steps.inputs.outputs.preparation }}" > zig-out/prepared/inputs.key
           (cd zig-out/prepared && sha256sum program.bpi3 application.json types.zig > SHA256SUMS)
           tar -cf - .zig-cache zig-pkg .protean-native/inputs -C zig-out prepared \
             | zstd -T2 -1 -o "$RUNNER_TEMP/preparation.tar.zst"
           echo "sha256=$(sha256sum "$RUNNER_TEMP/preparation.tar.zst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: preparation-${{ steps.inputs.outputs.key }}
+          name: preparation-${{ steps.inputs.outputs.preparation }}
           path: ${{ runner.temp }}/preparation.tar.zst
           compression-level: 0
           if-no-files-found: error
@@ -195,18 +179,18 @@ jobs:
       - *identify_inputs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: preparation-${{ steps.inputs.outputs.key }}
+          name: preparation-${{ steps.inputs.outputs.preparation }}
           path: ${{ runner.temp }}/preparation
       - name: Verify prepared inputs
         env:
           PREPARATION_KEY: ${{ needs.prepare.outputs.key }}
           PREPARATION_SHA256: ${{ needs.prepare.outputs.sha256 }}
-          INPUT_KEY: ${{ steps.inputs.outputs.key }}
+          INPUT_KEY: ${{ steps.inputs.outputs.preparation }}
         run: |
           test "$PREPARATION_KEY" = "$INPUT_KEY"
           printf '%s  %s\n' "$PREPARATION_SHA256" "$RUNNER_TEMP/preparation/preparation.tar.zst" | sha256sum --check --strict
           zstd -dc "$RUNNER_TEMP/preparation/preparation.tar.zst" | tar -xpf -
-          cmp "$RUNNER_TEMP/native-inputs.key" prepared/inputs.key
+          test "$(cat prepared/inputs.key)" = "$INPUT_KEY"
           (cd prepared && sha256sum --check --strict SHA256SUMS)
           cmp app/types.zig prepared/types.zig
       - name: Compile selected artifact

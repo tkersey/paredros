@@ -2,3 +2,4 @@
 zig-out/
 zig-pkg/
 .protean-native/
+__pycache__/

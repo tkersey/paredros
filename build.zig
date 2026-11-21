@@ -4,6 +4,13 @@ const NativeGroup = enum { authority, providers, transitions, rendering, methods
 const NativePartition = enum { first, second, third };
 
 pub fn build(b: *std.Build) void {
+    const qualify = b.addSystemCommand(&.{ "uv", "run", "--no-project", "python" });
+    qualify.addFileArg2(b.path("tests/qualify.py"), .{ .make_absolute = true });
+    qualify.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    qualify.addPassthruArgs();
+    qualify.setCwd(b.path("."));
+    qualify.has_side_effects = true;
+    b.step("qualify", "Run full offline qualification on this host").dependOn(&qualify.step);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const native_tests = b.option(bool, "native-tests", "Run native owner tests") orelse false;
@@ -22,7 +29,8 @@ pub fn build(b: *std.Build) void {
         "test-product-assets",
         "Generate product assets for native test fixtures",
     ) orelse true;
-    const enabled = native_tests or native_product or crash_tests or scale_tests;
+    const check_recovery = b.option(bool, "check-recovery", "Include the GitHub capture and reopen witness in check") orelse false;
+    const enabled = native_tests or native_product or crash_tests or scale_tests or check_recovery;
     const dependency = dependencyGraph(b, target, optimize, enabled);
     setupInputs(b, dependency);
     const filter = b.option([]const u8, "test-filter", "Select a focused diagnostic");
@@ -40,7 +48,28 @@ pub fn build(b: *std.Build) void {
             .{ .name = "horos", .module = dependency.module("horos_host_authoring") },
         },
     });
-    _ = testStep(b, source_root, filter, "test", "Run PAREDROS contract tests");
+    testStep(b, source_root, filter, b.step("test", "Run PAREDROS contract tests"));
+    const check = b.step("check", "Check GitHub and Slack provider protocols (add -Dcheck-recovery=true for capture/reopen)");
+    const checked = b.addSystemCommand(&.{ "echo", if (check_recovery)
+        "Passed GitHub and Slack provider protocol checks and the native GitHub capture/reopen witness."
+    else
+        "Passed GitHub and Slack provider protocol checks. For native GitHub capture/reopen, run zig build check -Dcheck-recovery=true." });
+    checked.has_side_effects = true;
+    check.dependOn(&checked.step);
+    const provider_root = b.createModule(.{
+        .root_source_file = b.path("provider_check.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "application_types", .module = host_types },
+            .{ .name = "protean_contracts", .module = host_contracts },
+        },
+    });
+    testStep(b, provider_root, null, &checked.step);
+    if (check_recovery) {
+        const recovery = nativeTestRoot(b, dependency, optimize, null, "native_providers_test.zig");
+        testStep(b, recovery, "native GitHub multipage capture survives restart before interpretation without refetch", &checked.step);
+    }
     const assets = if (native_product or crash_tests or scale_tests or
         (native_tests and test_product_assets))
         product(b, dependency)
@@ -251,9 +280,8 @@ fn testStep(
     b: *std.Build,
     root: *std.Build.Module,
     filter: ?[]const u8,
-    name: []const u8,
-    description: []const u8,
-) *std.Build.Step.Compile {
+    step: *std.Build.Step,
+) void {
     const checks = addPlatformTest(b, .{
         .filters = if (filter) |value| &.{value} else &.{},
         .root_module = root,
@@ -261,8 +289,7 @@ fn testStep(
     const run = b.addRunArtifact(checks);
     if (checks.test_runner != null) run.expectExitCode(0);
     run.has_side_effects = true;
-    b.step(name, description).dependOn(&run.step);
-    return checks;
+    step.dependOn(&run.step);
 }
 
 fn nativeTestRoot(
