@@ -522,6 +522,12 @@ fn monitor(
     else
         null else null;
     try native.json.put(a, &result, "source_age_ms", try native.values.toJson(?u64, a, age));
+    const materialize = @import("materialize.zig");
+    try native.json.put(a, &result, "backlog", try native.values.toJson(
+        materialize.Backlog,
+        a,
+        try materialize.backlog(a, index, obligation),
+    ));
     const reconciliation = try @import("reconciliation.zig").inspect(a, index, id);
     try native.json.put(a, &result, "reconciliation", native.json.string(
         @tagName(reconciliation.capability),

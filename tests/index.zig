@@ -649,16 +649,32 @@ test "index copied batches must be the contiguous outstanding prefix" {
                 &.{ rendering, completed, initial },
                 &.{},
             );
-            index.deinit();
-        } else try std.testing.expectError(
-            error.BatchCoverageGap,
-            idx.Index.init(
-                Native,
+            defer index.deinit();
+            const backlog = try @import("../native/materialize.zig").backlog(
+                a,
+                &index,
+                index.obligation(initial.input.task).?,
+            );
+            try std.testing.expectEqual(1, backlog.untold_batches);
+            try std.testing.expectEqualDeep(ref(completed), backlog.oldest.?.reference);
+            try std.testing.expectEqual(1, backlog.oldest.?.sequence);
+            try std.testing.expectEqual(100, backlog.oldest.?.acquired_ms);
+            try std.testing.expectEqual(t.Coverage.complete, backlog.oldest.?.coverage);
+        } else {
+            try std.testing.expectError(
+                error.BatchCoverageGap,
+                idx.Index.init(Native, std.testing.allocator, &.{ rendering, completed, initial }, &.{}),
+            );
+            var index = try idx.Index.init(Native, std.testing.allocator, &.{ completed, initial }, &.{});
+            defer index.deinit();
+            const backlog = try @import("../native/materialize.zig").backlog(
                 std.testing.allocator,
-                &.{ rendering, completed, initial },
-                &.{},
-            ),
-        );
+                &index,
+                index.obligation(initial.input.task).?,
+            );
+            try std.testing.expectEqual(2, backlog.untold_batches);
+            try std.testing.expect(backlog.oldest == null);
+        }
     }
 }
 

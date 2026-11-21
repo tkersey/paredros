@@ -134,6 +134,11 @@ and `pending_directives_next`. Use `monitor directives ID --after ORDINAL
 describes the current retained state; controls may be folded between requests.
 Individual admitted tasks remain available through `task show ID`.
 
+The monitor's `backlog.untold_batches` counts observed batch sequences still owed
+to the owner. `backlog.oldest` identifies the first outstanding sequence, its
+retained task/result reference, acquisition time, and coverage. A positive count
+with a null oldest record exposes missing evidence at that sequence.
+
 Monitor views report reconciliation as `pending`, `qualified`, or `degraded`,
 with retained readback references in `reconciliation_evidence`. A successful
 readback does not hide a failed audit whose order cannot be established. These

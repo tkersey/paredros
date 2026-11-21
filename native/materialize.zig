@@ -257,15 +257,55 @@ fn auditFact(record: idx.Record) !@FieldType(t.Settlement, "delivery") {
     };
 }
 
+const BatchFact = @FieldType(t.Step, "batches").Child;
+
+pub const Backlog = struct {
+    untold_batches: u64,
+    oldest: ?struct {
+        sequence: u64,
+        reference: t.Reference,
+        acquired_ms: i64,
+        coverage: t.Coverage,
+    } = null,
+};
+
+pub fn backlog(a: std.mem.Allocator, index: *const idx.Index, obligation: *const idx.Obligation) !Backlog {
+    const head = index.head(obligation);
+    const count = try std.math.sub(u64, head.observed.sequence, head.told.sequence);
+    if (count == 0) return .{ .untold_batches = 0 };
+    const wanted = head.told.sequence + 1;
+    for (obligation.chain) |position| {
+        const output = index.records[position].result.?;
+        if (output != .step) continue;
+        const batch = output.step.batch orelse continue;
+        if (batch.sequence == wanted)
+            return backlogWithEvidence(count, .{ .reference = index.reference(position), .value = batch });
+    }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var imported: std.ArrayList(BatchFact) = .empty;
+    try importedBatches(arena.allocator(), index, obligation, wanted, &imported);
+    if (imported.items.len != 0) return backlogWithEvidence(count, imported.items[0]);
+    return .{ .untold_batches = count };
+}
+
+fn backlogWithEvidence(count: u64, fact: BatchFact) Backlog {
+    return .{ .untold_batches = count, .oldest = .{
+        .sequence = fact.value.sequence,
+        .reference = fact.reference,
+        .acquired_ms = fact.value.acquired_ms,
+        .coverage = fact.value.coverage,
+    } };
+}
+
 fn batches(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
 ) ![]const @FieldType(t.Step, "batches").Child {
-    const BatchFact = @FieldType(t.Step, "batches").Child;
     const head = index.head(obligation);
     var candidates: std.ArrayList(BatchFact) = .empty;
-    try importedBatches(a, index, obligation, &candidates);
+    try importedBatches(a, index, obligation, null, &candidates);
     for (obligation.chain) |position| {
         const output = index.records[position].result.?;
         if (output != .step) continue;
@@ -300,7 +340,8 @@ fn importedBatches(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
-    result: *std.ArrayList(@FieldType(t.Step, "batches").Child),
+    wanted: ?u64,
+    result: *std.ArrayList(BatchFact),
 ) !void {
     const imported = continuity.findImport(index, obligation.task) orelse return;
     const head = index.head(obligation);
@@ -309,7 +350,12 @@ fn importedBatches(
             continue;
         const reference = try continuity.binding(imported.metadata.members.items, member.identity);
         const source = try continuity.resolve(index, obligation.task, reference, .batch);
-        const decoded = try continuity.decode(.batch, a, source);
+        var decoded = try continuity.decode(.batch, a, source);
+        if (wanted) |sequence| if (sequence != decoded.value.sequence) {
+            decoded.deinit();
+            continue;
+        };
         try result.append(a, .{ .reference = reference, .value = decoded.value });
+        if (wanted != null) return;
     }
 }

@@ -150,6 +150,13 @@ test "control protocol freezes activation retry and acknowledges persisted restr
         "paused",
         try native.json.text(data.object.get("effective_mode").?),
     );
+    const backlog = try native.values.fromJson(
+        @import("../native/materialize.zig").Backlog,
+        frame,
+        data.object.get("backlog").?,
+    );
+    try std.testing.expectEqual(0, backlog.untold_batches);
+    try std.testing.expect(backlog.oldest == null);
     try std.testing.expectEqual(1, data.object.get("pending_directives").?.array.items.len);
     try std.testing.expect(!data.object.get("ordinary_dispatch").?.bool);
     const denied = try dispatch(frame, &driver, pause, 502);
