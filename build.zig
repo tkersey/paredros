@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const enabled = native_tests or native_product or crash_tests or scale_tests or check_recovery;
     const dependency = dependencyGraph(b, target, optimize, enabled);
     setupInputs(b, dependency);
+    if (enabled) stabilizeClangObjects(b, dependency);
     const filter = b.option([]const u8, "test-filter", "Select a focused diagnostic");
     const host_protean = dependency.module("protean_host_authoring");
     const host_contracts = dependency.module("protean_contracts_host");
@@ -337,6 +338,29 @@ const ProductAssets = struct {
     symbols: bool,
 };
 
+// WriteFiles names its output directory by content but can replace identical
+// files there. Cache the copy by that directory so Zig sees stable link inputs.
+fn stableFile(b: *std.Build, content_directory: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+    const copy = b.addSystemCommand(&.{ "cp", name });
+    copy.setCwd(content_directory);
+    return copy.addOutputFileArg2(name, .{ .make_absolute = true });
+}
+
+fn stabilizeClangObjects(b: *std.Build, dependency: *std.Build.Dependency) void {
+    const inputs = dependency.namedLazyPath("native-clang-inputs");
+    for (dependency.module("protean_native").link_objects.items) |linked| {
+        if (linked != .other_step or !std.mem.eql(u8, linked.other_step.name, "protean-native-c")) continue;
+        for (linked.other_step.root_module.link_objects.items) |*object| {
+            if (object.* != .static_path or object.static_path != .generated) continue;
+            const path = object.static_path.generated;
+            if (path.index != inputs.generated.index or path.up != 0) continue;
+            if (std.mem.eql(u8, path.sub_path, "sqlite3.o") or std.mem.eql(u8, path.sub_path, "native_c.o")) {
+                object.static_path = stableFile(b, inputs, path.sub_path);
+            }
+        }
+    }
+}
+
 fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     const emitted = b.option(
         std.Build.LazyPath,
@@ -367,14 +391,18 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     const protean = dependency.module("protean_native_types");
     environment.addImport("protean", protean);
     environment.addImport("horos", protean.import_table.get("horos").?);
+    const manifest_files = b.addWriteFiles();
+    _ = manifest_files.addCopyFile(result.manifest, "manifest.json");
+    const manifest = stableFile(b, manifest_files.getDirectory(), "manifest.json");
+    result.executable.root_module.import_table.get("native_manifest").?.root_source_file = manifest;
     prepareNative(b, result.executable, result.assets);
     b.addNamedLazyPath("paredros-image", result.assets.image);
     b.addNamedLazyPath("paredros-application", result.assets.application);
-    b.addNamedLazyPath("paredros-manifest", result.manifest);
+    b.addNamedLazyPath("paredros-manifest", manifest);
     return .{
         .image = result.assets.image,
         .application = result.assets.application,
-        .manifest = result.manifest,
+        .manifest = manifest,
         .symbols = symbols,
     };
 }
