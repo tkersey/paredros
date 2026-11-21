@@ -191,7 +191,19 @@ def product_expectations(system):
             "c_family": "clang", "c_driver": "zig build-obj", "zig_version": "0.17.1"}
 
 
-def run(jobs, output, started, source=None):
+def select_group(jobs, name):
+    if name is None:
+        return jobs
+    needed = {name}
+    for job in reversed(jobs):
+        if job.name in needed:
+            needed.update(job.needs)
+    selected = [job for job in jobs if job.name in needed]
+    require(len(selected) == len(needed), f"unknown qualification group: {name}")
+    return selected
+
+
+def run(jobs, output, started, source=None, selection=None):
     rows = {job.name: {"state": "unrun"} for job in jobs}
     require(len(rows) == len(jobs), "duplicate qualification job")
 
@@ -199,11 +211,13 @@ def run(jobs, output, started, source=None):
     source_error = None
 
     def save():
+        success = source_error is None and all(item["state"] == "passed" for item in rows.values())
         report = {"platform": [platform.system(), platform.machine()], "per_job_seconds": 600,
+                  "selected_group": selection, "qualified": selection is None and success,
                   "source": initial, "source_error": source_error,
                   "expected_product": product_expectations(platform.system()),
                   "elapsed_seconds": round(time.monotonic() - started, 3), "jobs": rows,
-                  "passed": source_error is None and all(item["state"] == "passed" for item in rows.values())}
+                  "passed": success}
         temp = output / "result.tmp"
         temp.write_text(json.dumps(report, indent=2) + "\n")
         temp.replace(output / "result.json")
@@ -260,7 +274,9 @@ def main():
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zig", help="Zig compiler used by the outer build")
-    parser.add_argument("--list", action="store_true", help="print the local inventory without running it")
+    options = parser.add_mutually_exclusive_group()
+    options.add_argument("--list", action="store_true", help="print the local inventory without running it")
+    options.add_argument("--group", help="run one diagnostic group and its prerequisites")
     args = parser.parse_args()
     system = (platform.system(), platform.machine())
     base = Path("zig-out/qualification").resolve()
@@ -284,7 +300,8 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         print(f"Qualification results: {output}", flush=True)
         initial = source_identity()
-        return run(inventory(args.zig, system, install, output), output, started, initial)
+        jobs = select_group(inventory(args.zig, system, install, output), args.group)
+        return run(jobs, output, started, initial, args.group)
 
 
 if __name__ == "__main__":

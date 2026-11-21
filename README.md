@@ -52,6 +52,8 @@ with Zig 0.17.1, Node, and uv installed. On x86-64 Linux under Rosetta, export
 inspect the groups. Each invocation executes the tests and writes fresh timings,
 outcomes, and logs under `zig-out/qualification/`. Compiled artifacts can be
 reused. The Linux campaign must complete all 24 arms in one 600-second execution.
+For a single group and its prerequisites use `zig build qualify -- --group NAME`.
+This diagnostic requires only the fixtures used by the selected group.
 
 Historical reopen and import use fixtures produced by the older application.
 The scale check opens a product-configured namespace containing 100,000 real
