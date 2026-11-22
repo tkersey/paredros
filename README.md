@@ -73,8 +73,9 @@ The scale check opens a product-configured namespace containing 100,000 real
 tasks. Keep dedicated offline fixtures under
 `.zig-cache/qualification-fixtures/{reopen,archive,100k}`, or set
 `PAREDROS_HISTORY_REOPEN`, `PAREDROS_HISTORY_ARCHIVE`, and
-`PAREDROS_HISTORY_100K` to their respective directories. An absent fixture
-leaves the corresponding check incomplete. To provision another machine, build
+`PAREDROS_HISTORY_100K` to their respective directories. If a selected check's
+fixture is missing, qualification stops before running anything and reports
+every check incomplete. To provision another machine, build
 the legacy application at commit `77866577394711e6152a1e97fdecfeb0cfcd2f2c`
 in a separate checkout. The following commands create a dedicated historical
 namespace and snapshot with that binary and seed a separate scale namespace with

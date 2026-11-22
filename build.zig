@@ -475,7 +475,8 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     _ = manifest_files.addCopyFile(result.manifest, "manifest.json");
     const manifest = stableFile(b, manifest_files.getDirectory(), "manifest.json");
     result.executable.root_module.import_table.get("native_manifest").?.root_source_file = manifest;
-    emittedSteps(b, if (emitted == null) result.assets else sourceAssets(b, dependency));
+    const source = if (emitted == null) result.assets else sourceAssets(b, dependency);
+    emittedSteps(b, source, emitted orelse b.path("app/emitted"));
     b.addNamedLazyPath("paredros-image", result.assets.image);
     b.addNamedLazyPath("paredros-application", result.assets.application);
     b.addNamedLazyPath("paredros-manifest", manifest);
@@ -501,22 +502,26 @@ fn sourceAssets(b: *std.Build, dependency: *std.Build.Dependency) protean_build.
     return source.assets;
 }
 
-fn emittedSteps(b: *std.Build, source: protean_build.NativeAssets) void {
-    const check = b.step("check-emitted", "Require app/emitted to match the authored source");
+fn emittedSteps(
+    b: *std.Build,
+    source: protean_build.NativeAssets,
+    selected: std.Build.LazyPath,
+) void {
+    const check = b.step("check-emitted", "Require embedded assets to match the authored source");
     const update = b.step("update-emitted", "Refresh app/emitted from the authored source");
     const files = b.addUpdateSourceFiles();
     const outputs = .{
-        .{ source.image, "app/emitted/program.bpi3" },
-        .{ source.application, "app/emitted/application.json" },
+        .{ source.image, "program.bpi3" },
+        .{ source.application, "application.json" },
     };
     inline for (outputs) |output| {
         const compare = b.addSystemCommand(&.{"cmp"});
         compare.setName("cmp " ++ output[1] ++ " (zig build update-emitted)");
         compare.addFileArg(output[0]);
-        compare.addFileArg(b.path(output[1]));
+        compare.addFileArg(selected.path(b, output[1]));
         compare.expectExitCode(0);
         check.dependOn(&compare.step);
-        files.addCopyFileToSource(output[0], output[1]);
+        files.addCopyFileToSource(output[0], "app/emitted/" ++ output[1]);
     }
     update.dependOn(&files.step);
 }

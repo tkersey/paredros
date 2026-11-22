@@ -138,6 +138,7 @@ def reopen(binary, fixture, report, home):
         for field in ("observed", "told"):
             require(item["head"][field] == report["head"][field], f"reopened {field} head differs")
         require(item["reconciliation"] == "pending", "expected pending reconciliation")
+    require(files() == before, "reopening changed historical namespace files")
 
 
 def check_100k(binary, fixture, report, home):

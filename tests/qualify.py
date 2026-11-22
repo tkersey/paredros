@@ -140,7 +140,7 @@ def shared_deadline(started):
             row = subprocess.check_output(["ps", "-p", str(pid), "-o", "ppid=,etime=,comm="], text=True).split()
         except subprocess.CalledProcessError:
             break
-        if len(row) < 3 or Path(row[2]).name not in ("zig", "maker"):
+        if len(row) < 3 or Path(row[2]).name not in ("zig", "maker", "uv"):
             break
         clock, _, days = row[1].partition("-")[::-1] if "-" in row[1] else (row[1], "", "0")
         seconds = 0
