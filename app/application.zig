@@ -136,20 +136,8 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
     const restore = try b.caseOf(input, "restore");
     try envelope(c, directive.body(), directive.payload());
     const result = try b.match(input, .{
-        .genesis = try initial.ret(try invoke(
-            c,
-            initial.body(),
-            functions.genesis,
-            initial.payload(),
-            "genesis",
-        )),
-        .step = try advance.ret(try invoke(
-            c,
-            advance.body(),
-            functions.step,
-            advance.payload(),
-            "step",
-        )),
+        .genesis = try initial.ret(try invoke(c, initial, functions.genesis, "genesis")),
+        .step = try advance.ret(try invoke(c, advance, functions.step, "step")),
         .directive = try directive.ret(try directive.body().variant(
             try c.schema(t.Output),
             "directive",
@@ -159,58 +147,35 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
             try c.schema(t.Output),
             try c.literal(t.Failure, .{ .code = .{ .bytes = "notification_dispatch_bypass" } }),
         ),
-        .audit = try inspect.ret(try invoke(
-            c,
-            inspect.body(),
-            functions.audit,
-            inspect.payload(),
-            "audit",
-        )),
-        .turn = try converse.ret(try invoke(
-            c,
-            converse.body(),
-            functions.turn,
-            converse.payload(),
-            "turn",
-        )),
-        .experiment = try compare.ret(try invoke(
-            c,
-            compare.body(),
-            functions.experiment,
-            compare.payload(),
-            "experiment",
-        )),
-        .continuity_member = try member.ret(try preserve(
-            c,
-            member.body(),
-            member.payload(),
-            "continuity_member",
-        )),
-        .continuity_cut = try cut.ret(try preserve(
-            c,
-            cut.body(),
-            cut.payload(),
-            "continuity_cut",
-        )),
-        .restore = try restore.ret(try preserve(c, restore.body(), restore.payload(), "restore")),
-        .lineage_audit = try lineage.ret(try invoke(c, lineage.body(), functions.lineage_audit, lineage.payload(), "lineage_audit")),
+        .audit = try inspect.ret(try invoke(c, inspect, functions.audit, "audit")),
+        .turn = try converse.ret(try invoke(c, converse, functions.turn, "turn")),
+        .experiment = try compare.ret(try invoke(c, compare, functions.experiment, "experiment")),
+        .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
+        .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
+        .restore = try restore.ret(try preserve(c, restore, "restore")),
+        .lineage_audit = try lineage.ret(
+            try invoke(c, lineage, functions.lineage_audit, "lineage_audit"),
+        ),
     });
     try c.author.define(function, try b.ret(result));
     return function;
 }
 
-fn preserve(c: protean.Context, b: anytype, input: anytype, comptime tag: []const u8) !a.Value(t.Output) {
+fn preserve(c: protean.Context, case: anytype, comptime tag: []const u8) !a.Value(t.Output) {
+    const b = case.body();
+    const input = case.payload();
     try envelope(c, b, input);
     return b.variant(try c.schema(t.Output), tag, input);
 }
 
 fn invoke(
     c: protean.Context,
-    b: anytype,
+    case: anytype,
     function: anytype,
-    input: anytype,
     comptime tag: []const u8,
 ) !a.Value(t.Output) {
+    const b = case.body();
+    const input = case.payload();
     try envelope(c, b, input);
     return b.variant(try c.schema(t.Output), tag, try b.call(function, .{ .input = input }));
 }

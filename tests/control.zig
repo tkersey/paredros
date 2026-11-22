@@ -172,6 +172,48 @@ test "control protocol freezes activation retry and acknowledges persisted restr
     try std.testing.expect(!reopened.obligation(id).?.ordinaryDispatch());
 }
 
+fn expectDirectivePages(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    hex_id: []const u8,
+    expected: []const t.Directive,
+) !void {
+    var count: usize = 0;
+    var after: u64 = 0;
+    while (count < expected.len) {
+        const cursor = try std.fmt.allocPrint(frame, "{d}", .{after});
+        const bytes = try cli.request(frame, &.{
+            "monitor", "directives", hex_id, "--after", cursor, "--limit", "7",
+        }, "unused");
+        const request = try native.values.fromJson(
+            control.Request,
+            frame,
+            try decode(frame, bytes),
+        );
+        try std.testing.expect(request.operation == null);
+        const response = try dispatch(frame, driver, bytes, 501);
+        const page = response.object.get("data").?;
+        const items = page.object.get("pending_directives").?.array.items;
+        try std.testing.expect(items.len > 0 and items.len <= 7);
+        for (items) |item| {
+            const actual = try native.values.fromJson(t.Directive, frame, item);
+            try std.testing.expectEqualDeep(expected[count], actual);
+            count += 1;
+        }
+        const next = try native.values.fromJson(
+            ?u64,
+            frame,
+            page.object.get("pending_directives_next").?,
+        );
+        if (count == expected.len) {
+            try std.testing.expect(next == null);
+        } else {
+            try std.testing.expect(next.? > after);
+            after = next.?;
+        }
+    }
+}
+
 test "control pages pending directives with exact frozen contents" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
@@ -212,32 +254,7 @@ test "control pages pending directives with exact frozen contents" {
         frame,
         data.object.get("pending_directives_total").?,
     ));
-    var count: usize = 0;
-    var after: u64 = 0;
-    while (count < expected.len) {
-        const cursor = try std.fmt.allocPrint(frame, "{d}", .{after});
-        const bytes = try cli.request(frame, &.{
-            "monitor", "directives", &hex_id, "--after", cursor, "--limit", "7",
-        }, "unused");
-        const request = try native.values.fromJson(control.Request, frame, try decode(frame, bytes));
-        try std.testing.expect(request.operation == null);
-        const response = try dispatch(frame, &driver, bytes, 501);
-        const page = response.object.get("data").?;
-        const items = page.object.get("pending_directives").?.array.items;
-        try std.testing.expect(items.len > 0 and items.len <= 7);
-        for (items) |item| {
-            const actual = try native.values.fromJson(t.Directive, frame, item);
-            try std.testing.expectEqualDeep(expected[count], actual);
-            count += 1;
-        }
-        const next = try native.values.fromJson(?u64, frame, page.object.get("pending_directives_next").?);
-        if (count == expected.len) {
-            try std.testing.expect(next == null);
-        } else {
-            try std.testing.expect(next.? > after);
-            after = next.?;
-        }
-    }
+    try expectDirectivePages(frame, &driver, &hex_id, &expected);
     for ([_][]const u8{ "0", "65" }) |limit| {
         const request = try cli.request(frame, &.{
             "monitor", "directives", &hex_id, "--limit", limit,

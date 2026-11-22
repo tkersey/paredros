@@ -483,14 +483,7 @@ fn serve(
     defer signals.restore();
     var runtime_context: Runtime = .{
         .config = &launch.config,
-        .continuity = .{ .io = io, .source = .{
-            .namespace = namespace.identity,
-            .build = try cli.hex(t.Digest, admitted.manifest_id),
-            .image = admitted.image_identity,
-            .runtime = runtime,
-            .contracts = try cli.hex(t.Digest, admitted.protocol_schema_sha256),
-            .clock_ms = 0,
-        } },
+        .continuity = try continuityEnvironment(io, &namespace, &admitted, runtime),
     };
     var daemon = try Daemon.init(a, &driver, &server, .{
         .context = &runtime_context,
@@ -511,6 +504,22 @@ fn serve(
     }
     defer if (runtime_context.slack) |channel| channel.deinit();
     return loop(a, io, &daemon, &runtime_context);
+}
+
+fn continuityEnvironment(
+    io: std.Io,
+    namespace: *const native.Namespace,
+    admitted: *const native.discovery.Application,
+    runtime: t.Digest,
+) !continuity_control.Environment {
+    return .{ .io = io, .source = .{
+        .namespace = namespace.identity,
+        .build = try cli.hex(t.Digest, admitted.manifest_id),
+        .image = admitted.image_identity,
+        .runtime = runtime,
+        .contracts = try cli.hex(t.Digest, admitted.protocol_schema_sha256),
+        .clock_ms = 0,
+    } };
 }
 
 fn acceptingControls() bool {

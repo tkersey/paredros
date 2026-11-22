@@ -241,6 +241,19 @@ fn delivery() t.DeliveryIntent {
     };
 }
 
+fn populatedObservation() t.Observation {
+    return .{
+        .sequence = 17,
+        .epoch = 2,
+        .tip = @splat('a'),
+        .batch = .{ .retained = .{ .task = @splat(19), .digest = @splat(20) } },
+        .coverage = .complete,
+        .acquired_ms = 900,
+        .provider_date = .{ .bytes = "provider-time" },
+        .commit_count = 7,
+    };
+}
+
 fn populatedHead() t.Head {
     var head = genesis_fixture.expectedFresh(contracts_fixture.genesis());
     head.obligation = .{ .task = @splat(7) };
@@ -262,17 +275,12 @@ fn populatedHead() t.Head {
         .evidence = .{ .task = @splat(17), .digest = @splat(18) },
         .basis = .history_match,
     };
-    head.last_observation = .{
-        .sequence = 17,
-        .epoch = 2,
-        .tip = @splat('a'),
-        .batch = .{ .retained = .{ .task = @splat(19), .digest = @splat(20) } },
-        .coverage = .complete,
-        .acquired_ms = 900,
-        .provider_date = .{ .bytes = "provider-time" },
-        .commit_count = 7,
+    head.last_observation = populatedObservation();
+    head.digest = .{
+        .delivery = delivery(),
+        .hold = .uncertain_transmission,
+        .not_before_ms = 920,
     };
-    head.digest = .{ .delivery = delivery(), .hold = .uncertain_transmission, .not_before_ms = 920 };
     head.question = .{
         .identity = @splat(21),
         .condition = @splat(22),

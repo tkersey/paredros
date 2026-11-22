@@ -143,18 +143,11 @@ fn historyBody(allocator: std.mem.Allocator, lineage: t.Digest) ![]u8 {
     }, .{});
 }
 
-fn auditRecord(
+fn auditAttempts(
     allocator: std.mem.Allocator,
-    audit: t.LineageAudit,
     request: []const u8,
     captured: []const u8,
-) !idx.Record {
-    const input = try c.encodeOwned(t.Input, allocator, .{ .lineage_audit = audit });
-    const input_ref: retained.Value = .{
-        .schema_id = .{ .bytes = t.input_schema_id },
-        .encoding = .contract,
-        .reference = .{ .digest = preparation.hash(input), .bytes = input.len },
-    };
+) ![]retained.Attempt {
     const attempts = try allocator.alloc(retained.Attempt, 1);
     attempts[0] = .{
         .id = @splat(5),
@@ -174,6 +167,22 @@ fn auditRecord(
         },
         .usage = null,
     };
+    return attempts;
+}
+
+fn auditRecord(
+    allocator: std.mem.Allocator,
+    audit: t.LineageAudit,
+    request: []const u8,
+    captured: []const u8,
+) !idx.Record {
+    const input = try c.encodeOwned(t.Input, allocator, .{ .lineage_audit = audit });
+    const input_ref: retained.Value = .{
+        .schema_id = .{ .bytes = t.input_schema_id },
+        .encoding = .contract,
+        .reference = .{ .digest = preparation.hash(input), .bytes = input.len },
+    };
+    const attempts = try auditAttempts(allocator, request, captured);
     const responses = try allocator.alloc(retained.AttemptEvidence, 1);
     responses[0] = .{ .id = @splat(5), .response = captured, .reply = null };
     return .{

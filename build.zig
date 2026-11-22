@@ -4,21 +4,23 @@ const NativeGroup = enum { authority, providers, transitions, rendering, methods
 const NativePartition = enum { first, second, third };
 
 pub fn build(b: *std.Build) void {
-    const qualify = b.addSystemCommand(&.{ "uv", "run", "--no-project", "python" });
-    qualify.addFileArg2(b.path("tests/qualify.py"), .{ .make_absolute = true });
-    qualify.addFileArg2(.zig_exe, .{ .make_absolute = true });
-    qualify.addPassthruArgs();
-    qualify.setCwd(b.path("."));
-    qualify.has_side_effects = true;
-    b.step("qualify", "Run full offline qualification on this host").dependOn(&qualify.step);
+    qualifyStep(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const native_tests = b.option(bool, "native-tests", "Run native owner tests") orelse false;
-    const partition = b.option(NativePartition, "native-partition", "Select a continuity or transitions partition");
+    const partition = b.option(
+        NativePartition,
+        "native-partition",
+        "Select a continuity or transitions partition",
+    );
     if (partition != null and !native_tests)
         std.debug.panic("native-partition requires native-tests", .{});
     const crash_tests = b.option(bool, "crash-tests", "Build process-death witnesses") orelse false;
-    const scale_tests = b.option(bool, "scale-tests", "Build native storage measurements") orelse false;
+    const scale_tests = b.option(
+        bool,
+        "scale-tests",
+        "Build native storage measurements",
+    ) orelse false;
     const native_product = b.option(
         bool,
         "native",
@@ -29,12 +31,51 @@ pub fn build(b: *std.Build) void {
         "test-product-assets",
         "Generate product assets for native test fixtures",
     ) orelse true;
-    const check_recovery = b.option(bool, "check-recovery", "Include the GitHub capture and reopen witness in check") orelse false;
+    const check_recovery = b.option(
+        bool,
+        "check-recovery",
+        "Include the GitHub capture and reopen witness in check",
+    ) orelse false;
     const enabled = native_tests or native_product or crash_tests or scale_tests or check_recovery;
     const dependency = dependencyGraph(b, target, optimize, enabled);
     setupInputs(b, dependency);
     if (enabled) stabilizeClangObjects(b, dependency);
     const filter = b.option([]const u8, "test-filter", "Select a focused diagnostic");
+    hostSteps(b, dependency, optimize, filter, check_recovery);
+    const assets = if (native_product or crash_tests or scale_tests or
+        (native_tests and test_product_assets))
+        product(b, dependency)
+    else
+        null;
+    if (native_tests) {
+        const test_assets = if (test_product_assets) assets else null;
+        nativeTests(b, dependency, optimize, test_assets, filter, partition);
+    }
+    if (crash_tests) witnessStep(
+        b,
+        nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig"),
+        "process crash owner fixture",
+        "test-tools/paredros-crash-tests",
+        "build-crash-tests",
+        "Build process-death witnesses",
+    );
+    if (scale_tests) witnessStep(
+        b,
+        nativeTestRoot(b, dependency, optimize, assets, "scale_test.zig"),
+        "native scale measurement",
+        "test-tools/paredros-scale",
+        "build-scale-tests",
+        "Build native storage measurements",
+    );
+}
+
+fn hostSteps(
+    b: *std.Build,
+    dependency: *std.Build.Dependency,
+    optimize: std.lang.Optimize,
+    filter: ?[]const u8,
+    check_recovery: bool,
+) void {
     const host_protean = dependency.module("protean_host_authoring");
     const host_contracts = dependency.module("protean_contracts_host");
     const host_types = typesModule(b, b.graph.host, optimize, host_protean, host_contracts);
@@ -50,11 +91,37 @@ pub fn build(b: *std.Build) void {
         },
     });
     testStep(b, source_root, filter, b.step("test", "Run PAREDROS contract tests"));
-    const check = b.step("check", "Check GitHub and Slack provider protocols (add -Dcheck-recovery=true for capture/reopen)");
+    checkStep(b, dependency, optimize, host_types, host_contracts, check_recovery);
+}
+
+fn qualifyStep(b: *std.Build) void {
+    const qualify = b.addSystemCommand(&.{ "uv", "run", "--no-project", "python" });
+    qualify.addFileArg2(b.path("tests/qualify.py"), .{ .make_absolute = true });
+    qualify.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    qualify.addPassthruArgs();
+    qualify.setCwd(b.path("."));
+    qualify.has_side_effects = true;
+    b.step("qualify", "Run full offline qualification on this host").dependOn(&qualify.step);
+}
+
+fn checkStep(
+    b: *std.Build,
+    dependency: *std.Build.Dependency,
+    optimize: std.lang.Optimize,
+    host_types: *std.Build.Module,
+    host_contracts: *std.Build.Module,
+    check_recovery: bool,
+) void {
+    const check = b.step(
+        "check",
+        "Check GitHub and Slack provider protocols (add -Dcheck-recovery=true for capture/reopen)",
+    );
     const checked = b.addSystemCommand(&.{ "echo", if (check_recovery)
-        "Passed GitHub and Slack provider protocol checks and the native GitHub capture/reopen witness."
+        "Passed GitHub and Slack provider protocol checks and the native GitHub " ++
+            "capture/reopen witness."
     else
-        "Passed GitHub and Slack provider protocol checks. For native GitHub capture/reopen, run zig build check -Dcheck-recovery=true." });
+        "Passed GitHub and Slack provider protocol checks. For native GitHub " ++
+            "capture/reopen, run zig build check -Dcheck-recovery=true." });
     checked.has_side_effects = true;
     check.dependOn(&checked.step);
     const provider_root = b.createModule(.{
@@ -69,35 +136,30 @@ pub fn build(b: *std.Build) void {
     testStep(b, provider_root, null, &checked.step);
     if (check_recovery) {
         const recovery = nativeTestRoot(b, dependency, optimize, null, "native_providers_test.zig");
-        testStep(b, recovery, "native GitHub multipage capture survives restart before interpretation without refetch", &checked.step);
+        testStep(
+            b,
+            recovery,
+            "native GitHub multipage capture survives restart before interpretation " ++
+                "without refetch",
+            &checked.step,
+        );
     }
-    const assets = if (native_product or crash_tests or scale_tests or
-        (native_tests and test_product_assets))
-        product(b, dependency)
-    else
-        null;
-    if (native_tests) {
-        const test_assets = if (test_product_assets) assets else null;
-        nativeTests(b, dependency, optimize, test_assets, filter, partition);
-    }
-    if (crash_tests) {
-        const root = nativeTestRoot(b, dependency, optimize, assets, "crash_test.zig");
-        const checks = addPlatformTest(b, .{
-            .filters = &.{"process crash owner fixture"},
-            .root_module = root,
-        });
-        const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-crash-tests");
-        b.step("build-crash-tests", "Build process-death witnesses").dependOn(&install.step);
-    }
-    if (scale_tests) {
-        const root = nativeTestRoot(b, dependency, optimize, assets, "scale_test.zig");
-        const checks = addPlatformTest(b, .{
-            .filters = &.{"native scale measurement"},
-            .root_module = root,
-        });
-        const install = b.addInstallFile(checks.getEmittedBin(), "test-tools/paredros-scale");
-        b.step("build-scale-tests", "Build native storage measurements").dependOn(&install.step);
-    }
+}
+
+fn witnessStep(
+    b: *std.Build,
+    root: *std.Build.Module,
+    comptime filter: []const u8,
+    install_path: []const u8,
+    step_name: []const u8,
+    description: []const u8,
+) void {
+    const checks = addPlatformTest(b, .{
+        .filters = &.{filter},
+        .root_module = root,
+    });
+    const install = b.addInstallFile(checks.getEmittedBin(), install_path);
+    b.step(step_name, description).dependOn(&install.step);
 }
 
 fn nativeTests(

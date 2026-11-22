@@ -400,32 +400,17 @@ pub fn schedule(
         const record = index.records[position];
         if (record.result == null or record.result.? != .step) continue;
         const producer = index.reference(position);
-        for (record.result.?.step.audit_requests.items, 0..) |wanted, ordinal| {
-            if (wanted == .frontier) try tasks.append(a, try @import("lineage_audit.zig").admit(
-                service,
-                scratch,
-                index,
-                target,
-                producer,
-            ));
-            var matched = false;
-            for (deliveries) |delivery| {
-                if (!std.meta.eql(delivery.target, @as(?t.Id, target))) continue;
-                if (wanted == .delivery and !std.meta.eql(wanted.delivery, delivery.value.key))
-                    continue;
-                matched = true;
-                try tasks.append(a, try admitDerived(
-                    service,
-                    scratch,
-                    index,
-                    deliveries,
-                    producer,
-                    @intCast(ordinal + 1),
-                    delivery,
-                ));
-            }
-            if (wanted == .delivery and !matched) return error.MissingAdmittedDelivery;
-        }
+        try scheduleRequested(
+            service,
+            a,
+            scratch,
+            index,
+            target,
+            deliveries,
+            producer,
+            record.result.?.step.audit_requests.items,
+            &tasks,
+        );
         for (deliveries) |delivery| {
             if (!std.meta.eql(delivery.target, @as(?t.Id, target)) or
                 !try automatic(index, obligation, position, delivery.value, clock_ms)) continue;
@@ -463,6 +448,45 @@ pub fn schedule(
         }
     }
     return tasks.toOwnedSlice(a);
+}
+
+fn scheduleRequested(
+    service: anytype,
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    index: *const idx.Index,
+    target: t.Id,
+    deliveries: []const Delivery,
+    producer: t.Reference,
+    requests: []const t.AuditRequest,
+    tasks: *std.ArrayList(t.Id),
+) !void {
+    for (requests, 0..) |wanted, ordinal| {
+        if (wanted == .frontier) try tasks.append(a, try @import("lineage_audit.zig").admit(
+            service,
+            scratch,
+            index,
+            target,
+            producer,
+        ));
+        var matched = false;
+        for (deliveries) |delivery| {
+            if (!std.meta.eql(delivery.target, @as(?t.Id, target))) continue;
+            if (wanted == .delivery and !std.meta.eql(wanted.delivery, delivery.value.key))
+                continue;
+            matched = true;
+            try tasks.append(a, try admitDerived(
+                service,
+                scratch,
+                index,
+                deliveries,
+                producer,
+                @intCast(ordinal + 1),
+                delivery,
+            ));
+        }
+        if (wanted == .delivery and !matched) return error.MissingAdmittedDelivery;
+    }
 }
 
 fn admitDerived(
