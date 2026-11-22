@@ -189,7 +189,9 @@ fn nativeTests(
     );
     compile.dependOn(&runner.step);
     for (std.enums.values(NativeGroup)) |group| {
-        if (selected) |groups| if (std.mem.indexOfScalar(NativeGroup, groups, group) == null) continue;
+        if (selected) |groups| {
+            if (std.mem.indexOfScalar(NativeGroup, groups, group) == null) continue;
+        }
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
