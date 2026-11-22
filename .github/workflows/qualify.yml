@@ -63,22 +63,8 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
-      - id: packages
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            zig-pkg
-            ~/.cache/zig/p
-          key: zig-packages-${{ hashFiles('build.zig.zon') }}
       - name: Qualify ${{ matrix.groups }}
         run: zig build qualify -- --group "${{ matrix.groups }}"
-      - if: ${{ always() && steps.packages.outputs.cache-hit != 'true' && hashFiles('zig-pkg/**') != '' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            zig-pkg
-            ~/.cache/zig/p
-          key: zig-packages-${{ hashFiles('build.zig.zon') }}
   native:
     name: native
     needs: [qualify, tiger-style]
