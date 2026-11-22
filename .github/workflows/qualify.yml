@@ -41,7 +41,7 @@ jobs:
       matrix:
         include:
           - lane: source
-            groups: source
+            groups: source,emitted
           - lane: authority
             groups: authority-driver,authority-proposal,authority-controls
           - lane: providers

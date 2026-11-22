@@ -51,7 +51,12 @@ essential set within one 600-second budget measured from the `zig build`
 invocation: TigerStyle over every tracked Zig file, the 106 source contracts, the
 native `authority` and `providers` owner groups, the installed product's smoke
 checks, twelve process-death cases, and historical namespace reopen and archive
-import. On macOS one build compiles every essential artifact concurrently. On
+import. On macOS one build compiles every essential artifact concurrently.
+The product and native tests embed the committed emitted application in
+`app/emitted/`, so they compile alongside Protean's emitter instead of after it.
+Qualification runs `check-emitted`, which requires those bytes to equal a fresh
+emission from `app/`. After editing `app/`, run
+`zig build update-emitted -Dnative=true -Doptimize=safe` and commit the result. On
 x86-64 Linux under Rosetta, export `ZIG_DEBUG_CMD=1` before invoking Zig. Use
 `zig build qualify -- --list` to inspect the groups. Each invocation executes the
 tests and writes fresh timings, outcomes, and logs under `zig-out/qualification/`.
@@ -95,8 +100,9 @@ controller uses local fixtures, kills the process at named admission, dispatch, 
 capture boundaries, and checks retained state and acquisition counts in a fresh
 process.
 
-CI runs TigerStyle and five lanes on GitHub-hosted Ubuntu x86-64: source, authority
-(in three partitions), providers, product and crash. Each lane runs
+CI runs TigerStyle and five lanes on GitHub-hosted Ubuntu x86-64: source with the
+emitted-application check, authority (in three partitions), providers, product and
+crash. Each lane runs
 `zig build qualify -- --group` and the complete workflow must finish within 600
 seconds. Historical reopen and import need local fixtures and run in local and
 fallback qualification. When none of a hosted run's jobs start, the fallback
@@ -111,6 +117,13 @@ All three upstream changes completed their required qualification, serial review
 and landing. Application qualification and reviews must cover this selected pin;
 upstream verification alone does not qualify PAREDROS. Live-provider qualification
 remains deferred.
+
+By owner decision this release omits three specified behaviors: Slack and GitHub
+transport health in `status`; the single announcement for a reference that returns
+`404` on consecutive checks (A65), whose head field would make existing namespaces
+unreadable; and the visible storage hold for exhausted storage. When SQLite reports
+a full database, Protean fences the store (`StorageUnavailable`); the `storage`
+delivery-hold variant stays reserved in the schema but is never produced.
 
 [Offline measurements](docs/measurements.md) document task storage, startup,
 empty-check costs, reproduction commands, and the current performance limits.

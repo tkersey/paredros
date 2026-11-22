@@ -475,7 +475,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     _ = manifest_files.addCopyFile(result.manifest, "manifest.json");
     const manifest = stableFile(b, manifest_files.getDirectory(), "manifest.json");
     result.executable.root_module.import_table.get("native_manifest").?.root_source_file = manifest;
-    prepareNative(b, result.executable, result.assets);
+    emittedSteps(b, if (emitted == null) result.assets else sourceAssets(b, dependency));
     b.addNamedLazyPath("paredros-image", result.assets.image);
     b.addNamedLazyPath("paredros-application", result.assets.application);
     b.addNamedLazyPath("paredros-manifest", manifest);
@@ -487,26 +487,36 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
     };
 }
 
-fn prepareNative(
-    b: *std.Build,
-    executable: *std.Build.Step.Compile,
-    assets: protean_build.NativeAssets,
-) void {
-    const prepare = b.step("prepare-native", "Materialize application and native build inputs");
-    for (executable.root_module.getGraph().modules) |module| {
-        if (module.root_source_file) |source| source.addStepDependencies(prepare);
-        for (module.link_objects.items) |object| switch (object) {
-            .other_step => |linked| prepare.dependOn(&linked.step),
-            .static_path => |source| source.addStepDependencies(prepare),
-            else => {},
-        };
-    }
+fn sourceAssets(b: *std.Build, dependency: *std.Build.Dependency) protean_build.NativeAssets {
+    const install = b.getInstallStep();
+    const source = protean_build.addNativeSystem(b, dependency, .{
+        .name = "paredros-source",
+        .environment = b.path("environment.zig"),
+        .application = .{ .source = .{
+            .definition = b.path("app/definition.zig"),
+            .types = b.path("app/types.zig"),
+        } },
+    });
+    std.debug.assert(install.dependencies.pop() == &source.install.step);
+    return source.assets;
+}
+
+fn emittedSteps(b: *std.Build, source: protean_build.NativeAssets) void {
+    const check = b.step("check-emitted", "Require app/emitted to match the authored source");
+    const update = b.step("update-emitted", "Refresh app/emitted from the authored source");
+    const files = b.addUpdateSourceFiles();
     const outputs = .{
-        .{ assets.image, "prepared/program.bpi3" },
-        .{ assets.application, "prepared/application.json" },
-        .{ assets.types, "prepared/types.zig" },
+        .{ source.image, "app/emitted/program.bpi3" },
+        .{ source.application, "app/emitted/application.json" },
     };
     inline for (outputs) |output| {
-        prepare.dependOn(&b.addInstallFile(output[0], output[1]).step);
+        const compare = b.addSystemCommand(&.{"cmp"});
+        compare.setName("cmp " ++ output[1] ++ " (zig build update-emitted)");
+        compare.addFileArg(output[0]);
+        compare.addFileArg(b.path(output[1]));
+        compare.expectExitCode(0);
+        check.dependOn(&compare.step);
+        files.addCopyFileToSource(output[0], output[1]);
     }
+    update.dependOn(&files.step);
 }

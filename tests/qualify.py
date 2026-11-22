@@ -66,24 +66,22 @@ def inventory(zig, system, install, output, full):
                     for line in log.read_text(errors="replace").splitlines()), "expected 106 passing source tests")
 
     target = ["-Dtarget=x86_64-linux-musl"] if linux else []
-    prepared = install / "prepared"
-    assets = f"-Demitted-application={prepared}"
+    assets = "-Demitted-application=app/emitted"
     binary = install / "bin/paredros"
     tools = install / "test-tools"
     combined = full and not linux
     jobs = [
         Job("tigerstyle", ["bash", "tools/tiger-style.sh", "--all", "HEAD"]),
         Job("setup", build("setup")),
-        Job("prepare", build("prepare-native", "-Dnative=true", *target), ("setup",), lambda _: require(
-            (prepared / "types.zig").read_bytes() == Path("app/types.zig").read_bytes(), "prepared types changed")),
     ]
     if combined:
         groups = [f"-Dnative-group={group}" for group in ESSENTIAL_GROUPS]
-        jobs.append(Job("build", build("test", "install", "build-crash-tests", "build-native-tests",
-                                       "-Dnative=true", "-Dcrash-tests=true", "-Dnative-tests=true",
-                                       *groups, assets), ("prepare",), source_tests))
+        jobs.append(Job("build", build("check-emitted", "test", "install", "build-crash-tests",
+                                       "build-native-tests", "-Dnative=true", "-Dcrash-tests=true",
+                                       "-Dnative-tests=true", *groups, assets), ("setup",), source_tests))
     else:
         jobs.append(Job("source", build("test", "-Dnative=false"), verify=source_tests))
+        jobs.append(Job("emitted", build("check-emitted", "-Dnative=true", *target, assets), ("setup",)))
     product = "build" if combined else "build-product"
     for part in dict.fromkeys(row["part"] for row in matrix):
         group, _, partition = part.partition("-")
@@ -98,7 +96,7 @@ def inventory(zig, system, install, output, full):
             recipe.append(assets if group in ("authority", "continuity") else "-Dtest-product-assets=false")
         builder = "build" if combined else "build-" + part
         if not combined:
-            jobs.append(Job(builder, build(*recipe), ("prepare" if assets in recipe else "setup",)))
+            jobs.append(Job(builder, build(*recipe), ("setup",)))
         for row in (item for item in matrix if item["part"] == part):
             name, count = row["name"], row["count"]
             executable = tools / "native" / part
