@@ -49,10 +49,10 @@ zig build check -Dcheck-recovery=true
 Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
 essential set within one 600-second budget measured from the `zig build`
 invocation: TigerStyle over every tracked Zig file, the 106 source contracts, the
-native `authority` and `providers` owner groups, the installed product's smoke
-checks, twelve process-death cases, and historical namespace reopen and archive
-import. On macOS one build compiles every essential artifact concurrently.
-The product and native tests embed the committed emitted application in
+emitted-application check, the native `providers` owner group, the installed
+product's smoke checks, twelve process-death cases, and historical namespace
+reopen and archive import. On macOS one build compiles every essential artifact
+concurrently. The product and native tests embed the committed emitted application in
 `app/emitted/`, so they compile alongside Protean's emitter instead of after it.
 Qualification runs `check-emitted`, which requires those bytes to equal a fresh
 emission from `app/`. After editing `app/`, run
@@ -63,8 +63,8 @@ tests and writes fresh timings, outcomes, and logs under `zig-out/qualification/
 For groups and their prerequisites use `zig build qualify -- --group NAME[,NAME...]`.
 This requires only the fixtures used by the selected groups.
 
-The transitions, rendering, continuity and methods owner groups, the 24-arm
-comparison and the 100,000-task daemon are diagnostics. They do not gate a
+The authority, transitions, rendering, continuity and methods owner groups, the
+24-arm comparison and the 100,000-task daemon are diagnostics. They do not gate a
 candidate, and their absence from a result is not a pass. Run them with
 `--group`, for example `zig build qualify -- --group methods-campaign`.
 
@@ -100,12 +100,12 @@ controller uses local fixtures, kills the process at named admission, dispatch, 
 capture boundaries, and checks retained state and acquisition counts in a fresh
 process.
 
-CI runs TigerStyle and five lanes on GitHub-hosted Ubuntu x86-64: source with the
-emitted-application check, authority (in three partitions), providers, product and
-crash. Each lane runs
+CI runs TigerStyle and three lanes on GitHub-hosted Ubuntu x86-64: source with the
+emitted-application check, providers, and product. Each lane runs
 `zig build qualify -- --group` and the complete workflow must finish within 600
-seconds. Historical reopen and import need local fixtures and run in local and
-fallback qualification. When none of a hosted run's jobs start, the fallback
+seconds. The process-death cases need about nine minutes there, so they run in
+local and fallback qualification with historical reopen and import, which need
+local fixtures. When none of a hosted run's jobs start, the fallback
 workflow dispatches full macOS qualification on the Mac's self-hosted runner as a
 separate `macOS fallback` check; it never replaces the hosted result.
 

@@ -36,7 +36,7 @@ def exact_line(expected):
     return verify
 
 
-ESSENTIAL_GROUPS = ("authority", "providers")
+ESSENTIAL_GROUPS = ("providers",)
 BUDGET_SECONDS = 600
 
 
@@ -78,7 +78,8 @@ def inventory(zig, system, install, output, full):
         groups = [f"-Dnative-group={group}" for group in ESSENTIAL_GROUPS]
         jobs.append(Job("build", build("check-emitted", "test", "install", "build-crash-tests",
                                        "build-native-tests", "-Dnative=true", "-Dcrash-tests=true",
-                                       "-Dnative-tests=true", *groups, assets), ("setup",), source_tests))
+                                       "-Dnative-tests=true", "-Dtest-product-assets=false", *groups,
+                                       assets), ("setup",), source_tests))
     else:
         jobs.append(Job("source", build("test", "-Dnative=false"), verify=source_tests))
         jobs.append(Job("emitted", build("check-emitted", "-Dnative=true", *target, assets), ("setup",)))

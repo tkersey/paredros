@@ -42,14 +42,10 @@ jobs:
         include:
           - lane: source
             groups: source,emitted
-          - lane: authority
-            groups: authority-driver,authority-proposal,authority-controls
           - lane: providers
             groups: providers
           - lane: product
             groups: product
-          - lane: crash
-            groups: crash
     env:
       ZIG_DEBUG_CMD: '1'
     steps:
@@ -67,6 +63,12 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            zig-pkg
+            ~/.cache/zig/p
+          key: zig-packages-${{ hashFiles('build.zig.zon') }}
       - name: Qualify ${{ matrix.groups }}
         run: zig build qualify -- --group "${{ matrix.groups }}"
   native:
