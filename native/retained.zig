@@ -272,7 +272,8 @@ fn loadAttempts(
     var entries: std.ArrayList(Attempt) = .empty;
     var evidence: std.ArrayList(AttemptEvidence) = .empty;
     var after: ?t.Digest = null;
-    while (true) {
+    var exhausted = false;
+    while (!exhausted) {
         var page = try service.attemptPage(a, task, revision, after, limit);
         defer page.deinit();
         for (page.attempts) |attempt| {
@@ -311,10 +312,11 @@ fn loadAttempts(
             try entries.append(a, value);
             try evidence.append(a, raw);
         }
-        const next = page.next orelse break;
-        if (after) |previous| if (std.mem.order(u8, &previous, &next) != .lt)
-            return error.InvalidAttemptOrder;
-        after = next;
+        if (page.next) |next| {
+            if (after) |previous| if (std.mem.order(u8, &previous, &next) != .lt)
+                return error.InvalidAttemptOrder;
+            after = next;
+        } else exhausted = true;
     }
     return .{ .values = try entries.toOwnedSlice(a), .evidence = try evidence.toOwnedSlice(a) };
 }

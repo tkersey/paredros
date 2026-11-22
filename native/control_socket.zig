@@ -484,9 +484,8 @@ fn deadline(timeout_ms: u32) !i128 {
 
 fn waitReady(fd: c_int, events: c_short, until: i128) !void {
     var selected: c.pollfd = .{ .fd = fd, .events = events, .revents = 0 };
-    while (true) {
-        const remaining = until - try milliseconds();
-        if (remaining <= 0) return error.Timeout;
+    var remaining = until - try milliseconds();
+    while (remaining > 0) : (remaining = until - try milliseconds()) {
         const timeout: c_int = @intCast(@min(remaining, std.math.maxInt(c_int)));
         const ready = c.poll(@ptrCast(&selected), 1, timeout);
         if (ready < 0) switch (std.posix.errno(ready)) {
@@ -497,6 +496,7 @@ fn waitReady(fd: c_int, events: c_short, until: i128) !void {
         if (selected.revents & c.POLL.NVAL != 0) return error.Disconnected;
         return;
     }
+    return error.Timeout;
 }
 
 fn finishConnect(fd: c_int, until: i128) !void {

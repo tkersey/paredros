@@ -174,13 +174,19 @@ pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
     var temporary = std.heap.ArenaAllocator.init(a);
     defer temporary.deinit();
     var after: ?t.Id = null;
-    while (true) {
+    var exhausted = false;
+    while (!exhausted) {
         var page = try service.taskPage(a, after, page_limit);
         defer page.deinit();
         for (page.tasks) |task| {
             const scratch = temporary.allocator();
             const loaded = try retained.load(service, scratch, task, page_limit);
-            const item = try index.add(@import("protean_native"), scratch, retained.row(loaded), loaded.snapshot.bytes);
+            const item = try index.add(
+                @import("protean_native"),
+                scratch,
+                retained.row(loaded),
+                loaded.snapshot.bytes,
+            );
             const replacement = switch (item.input) {
                 .step => |step| if (step.supersession) |x| x.cancellation else null,
                 .turn => |turn| if (turn.replacement) |x| x.cancellation else null,
@@ -192,10 +198,11 @@ pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
             }
             if (!temporary.reset(.retain_capacity)) return error.OutOfMemory;
         }
-        const next = page.next orelse break;
-        if (after) |previous| if (std.mem.order(u8, &previous, &next) != .lt)
-            return error.InvalidTaskOrder;
-        after = next;
+        if (page.next) |next| {
+            if (after) |previous| if (std.mem.order(u8, &previous, &next) != .lt)
+                return error.InvalidTaskOrder;
+            after = next;
+        } else exhausted = true;
     }
     try index.finish(cancellations.items);
     return index;
