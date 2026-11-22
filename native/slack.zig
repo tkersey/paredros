@@ -92,6 +92,11 @@ fn equals(value: std.json.Value, key: []const u8, expected: []const u8) bool {
     return same(string(value, key) catch return false, expected);
 }
 
+fn topLevel(message: std.json.Value) bool {
+    const thread = optional(message, "thread_ts") orelse return true;
+    return same(text(thread) catch return false, string(message, "ts") catch return false);
+}
+
 fn digest(parts: []const []const u8) Digest {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     for (parts) |part| {
@@ -255,8 +260,7 @@ fn parseInteraction(binding: Binding, payload: std.json.Value) !Interaction {
     if (!equals(container, "type", "message") or
         !equals(container, "channel_id", binding.channel_id)) return error.WrongOrigin;
     const message = try get(payload, "message");
-    if (!botOrigin(binding, message) or optional(message, "thread_ts") != null)
-        return error.WrongOrigin;
+    if (!botOrigin(binding, message) or !topLevel(message)) return error.WrongOrigin;
     const ts = try string(message, "ts");
     _ = try Timestamp.parse(ts);
     if (!equals(container, "message_ts", ts)) return error.Malformed;
@@ -621,7 +625,7 @@ pub fn bindInteraction(
     known_ts: ?[]const u8,
 ) !void {
     if (!botOrigin(prepared.binding, interaction.message) or
-        optional(interaction.message, "thread_ts") != null or
+        !topLevel(interaction.message) or
         !equals(interaction.message, "ts", interaction.message_timestamp))
         return error.UnboundInteraction;
     inline for (@typeInfo(Binding).@"struct".field_names) |name| {
@@ -845,8 +849,7 @@ pub const HistoryAudit = struct {
             self.messages_left -= 1;
             try self.observe(message);
         }
-        const metadata = try get(parsed.value, "response_metadata");
-        const next = try string(metadata, "next_cursor");
+        const next = try nextCursor(parsed.value);
         if (next.len == 0) {
             if (optional(parsed.value, "has_more")) |more| {
                 if (more != .bool or more.bool) {
@@ -875,7 +878,7 @@ pub const HistoryAudit = struct {
             if (equals(message, "bot_id", self.binding.bot_id)) self.reason = .metadata;
             return;
         }
-        if (!equals(message, "type", "message") or optional(message, "thread_ts") != null) {
+        if (!equals(message, "type", "message") or !topLevel(message)) {
             self.reason = .metadata;
             return;
         }
@@ -925,6 +928,14 @@ pub const HistoryAudit = struct {
         return .not_observed;
     }
 };
+
+fn nextCursor(page: std.json.Value) ![]const u8 {
+    const metadata = optional(page, "response_metadata") orelse return "";
+    if (metadata != .object) return error.Malformed;
+    const next = optional(metadata, "next_cursor") orelse return "";
+    if (next == .null) return "";
+    return text(next);
+}
 
 fn sameOptional(left: ?[]const u8, right: ?[]const u8) bool {
     if (left == null or right == null) return left == null and right == null;

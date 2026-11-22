@@ -659,6 +659,101 @@ test "Slack history rejects wrong destinations metadata conflicts partial window
     try std.testing.expectEqual(.metadata, invalid.finding().inconclusive);
 }
 
+fn without(allocator: std.mem.Allocator, bytes: []const u8, key: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    _ = parsed.value.object.orderedRemove(key);
+    return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+}
+
+fn auditPage(
+    prepared: slack.Prepared,
+    canary: ?slack.Canary,
+    page: []const u8,
+) !slack.HistoryAudit {
+    var audit = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        canary,
+        history_limits,
+    );
+    errdefer audit.deinit();
+    try audit.ingest(audit.request(), .{ .status = 200, .body = page });
+    return audit;
+}
+
+test "Slack history treats an absent or null final cursor as exhaustion" {
+    var prepared = try slack.prepare(a, binding, "wanted", &.{}, marker);
+    defer prepared.deinit();
+    const message = try historyMessage(a, prepared, "1730000000.000003", "A1");
+    defer a.free(message);
+    const page = try historyPage(a, &.{message}, "", false);
+    defer a.free(page);
+    const bare = try without(a, page, "response_metadata");
+    defer a.free(bare);
+    var present = try auditPage(prepared, null, bare);
+    defer present.deinit();
+    try std.testing.expectEqualStrings("1730000000.000003", present.finding().present);
+    const empty = try modified(a, page, &.{"response_metadata"}, .{ .object = .empty });
+    defer a.free(empty);
+    var exhausted = try auditPage(prepared, null, empty);
+    defer exhausted.deinit();
+    try std.testing.expect(exhausted.finding() == .present);
+    const nulled = try modified(a, page, &.{ "response_metadata", "next_cursor" }, .null);
+    defer a.free(nulled);
+    var ended = try auditPage(prepared, null, nulled);
+    defer ended.deinit();
+    try std.testing.expect(ended.finding() == .present);
+    const more = try modified(a, bare, &.{"has_more"}, .{ .bool = true });
+    defer a.free(more);
+    var truncated = try auditPage(prepared, null, more);
+    defer truncated.deinit();
+    try std.testing.expectEqual(.cursor, truncated.finding().inconclusive);
+    const broken = try modified(a, page, &.{"response_metadata"}, .{ .string = "" });
+    defer a.free(broken);
+    var malformed = try auditPage(prepared, null, broken);
+    defer malformed.deinit();
+    try std.testing.expectEqual(.malformed, malformed.finding().inconclusive);
+}
+
+test "Slack thread parents stay top level while thread replies remain disqualified" {
+    var prepared = try slack.prepare(a, binding, "wanted", &.{button}, marker);
+    defer prepared.deinit();
+    const ts = "1730000000.000003";
+    const message = try historyMessage(a, prepared, ts, "A1");
+    defer a.free(message);
+    const parent = try modified(a, message, &.{"thread_ts"}, .{ .string = ts });
+    defer a.free(parent);
+    const parent_page = try historyPage(a, &.{parent}, "", false);
+    defer a.free(parent_page);
+    var present = try auditPage(prepared, null, parent_page);
+    defer present.deinit();
+    try std.testing.expectEqualStrings(ts, present.finding().present);
+    const reply = try modified(a, message, &.{"thread_ts"}, .{ .string = "1730000000.000002" });
+    defer a.free(reply);
+    const reply_page = try historyPage(a, &.{reply}, "", false);
+    defer a.free(reply_page);
+    var unclear = try auditPage(prepared, null, reply_page);
+    defer unclear.deinit();
+    try std.testing.expectEqual(.metadata, unclear.finding().inconclusive);
+    const bytes = try interaction(a, prepared, "envelope");
+    defer a.free(bytes);
+    const thread = [_][]const u8{ "payload", "message", "thread_ts" };
+    const clicked = try modified(a, bytes, &thread, .{ .string = ts });
+    defer a.free(clicked);
+    var accepted = try slack.parseEnvelope(a, binding, clicked, .{});
+    defer accepted.deinit();
+    try slack.bindInteraction(a, accepted.disposition.interaction, prepared, button, ts);
+    const replied = try modified(a, bytes, &thread, .{ .string = "1730000000.000002" });
+    defer a.free(replied);
+    var refused = try slack.parseEnvelope(a, binding, replied, .{});
+    defer refused.deinit();
+    try std.testing.expectEqual(.wrong_origin, refused.disposition.ignored);
+}
+
 fn allocationWitness(allocator: std.mem.Allocator) !void {
     const bytes = try envelope(allocator, "first", "event", "input");
     defer allocator.free(bytes);
