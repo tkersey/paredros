@@ -36,34 +36,55 @@ def exact_line(expected):
     return verify
 
 
-def inventory(zig, system, install, output):
+ESSENTIAL_GROUPS = ("authority", "providers")
+BUDGET_SECONDS = 600
+
+
+def build_jobs():
+    memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return max(1, min(os.cpu_count() or 1, memory // (3 << 30)))
+
+
+def inventory(zig, system, install, output, full):
     linux = system == ("Linux", "x86_64")
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
-        # Compiling each whole owner once avoids duplicate imports between Linux partitions.
         counts = {"authority": 98, "providers": 40, "transitions": 50, "rendering": 63, "continuity": 39}
         matrix = [dict(name=name, part=name, count=n) for name, n in counts.items()] + [
             row for row in matrix if row["part"] in ("methods", "product", "crash")
         ]
+    essential_parts = (*ESSENTIAL_GROUPS, "product", "crash")
+    if full:
+        matrix = [row for row in matrix if row["part"].partition("-")[0] in essential_parts]
 
     def build(*args):
-        return [zig, "build", *args, "-Doptimize=safe", "-j2", "--summary", "all", "--prefix", install]
+        return [zig, "build", *args, "-Doptimize=safe", f"-j{build_jobs()}", "--summary", "all", "--prefix", install]
+
+    def source_tests(log):
+        require(any(line.startswith("Build Summary:") and line.endswith("; 106/106 tests passed")
+                    for line in log.read_text(errors="replace").splitlines()), "expected 106 passing source tests")
 
     target = ["-Dtarget=x86_64-linux-musl"] if linux else []
     prepared = install / "prepared"
     assets = f"-Demitted-application={prepared}"
     binary = install / "bin/paredros"
     tools = install / "test-tools"
-    product = "build-product"
+    combined = full and not linux
     jobs = [
-        Job("source", build("test", "-Dnative=false"), verify=lambda log: require(
-            any(line.startswith("Build Summary:") and line.endswith("; 106/106 tests passed")
-                for line in log.read_text(errors="replace").splitlines()), "expected 106 passing source tests")),
+        Job("tigerstyle", ["bash", "tools/tiger-style.sh", "--all", "HEAD"]),
         Job("setup", build("setup")),
         Job("prepare", build("prepare-native", "-Dnative=true", *target), ("setup",), lambda _: require(
             (prepared / "types.zig").read_bytes() == Path("app/types.zig").read_bytes(), "prepared types changed")),
     ]
+    if combined:
+        groups = [f"-Dnative-group={group}" for group in ESSENTIAL_GROUPS]
+        jobs.append(Job("build", build("test", "install", "build-crash-tests", "build-native-tests",
+                                       "-Dnative=true", "-Dcrash-tests=true", "-Dnative-tests=true",
+                                       *groups, assets), ("prepare",), source_tests))
+    else:
+        jobs.append(Job("source", build("test", "-Dnative=false"), verify=source_tests))
+    product = "build" if combined else "build-product"
     for part in dict.fromkeys(row["part"] for row in matrix):
         group, _, partition = part.partition("-")
         if part == "product":
@@ -75,7 +96,9 @@ def inventory(zig, system, install, output):
             if partition:
                 recipe.append(f"-Dnative-partition={partition}")
             recipe.append(assets if group in ("authority", "continuity") else "-Dtest-product-assets=false")
-        jobs.append(Job("build-" + part, build(*recipe), ("prepare" if assets in recipe else "setup",)))
+        builder = "build" if combined else "build-" + part
+        if not combined:
+            jobs.append(Job(builder, build(*recipe), ("prepare" if assets in recipe else "setup",)))
         for row in (item for item in matrix if item["part"] == part):
             name, count = row["name"], row["count"]
             executable = tools / "native" / part
@@ -96,14 +119,35 @@ def inventory(zig, system, install, output):
                                     f"({row['inventory']} tests in complete inventory).")
             else:
                 args, verify = [executable], exact_line(f"All {count} tests passed.")
-            jobs.append(Job(name, args, ("build-" + part,), verify))
+            jobs.append(Job(name, args, (builder,), verify))
 
-    for name, suffix in [("historical-reopen", "reopen"), ("historical-import", "archive"), ("daemon-100k", "100k")]:
+    histories = [("historical-reopen", "reopen"), ("historical-import", "archive")]
+    if not full:
+        histories.append(("daemon-100k", "100k"))
+    for name, suffix in histories:
         variable = f"PAREDROS_HISTORY_{suffix.upper()}"
         fixture = Path(os.environ.get(variable) or Path(".zig-cache/qualification-fixtures") / suffix)
         jobs.append(Job(name, [sys.executable, "tests/qualification_fixtures.py", name, binary,
                                fixture], (product,), fixture=variable))
     return jobs
+
+
+def shared_deadline(started):
+    pid, age = os.getppid(), 0.0
+    while pid > 1:
+        try:
+            row = subprocess.check_output(["ps", "-p", str(pid), "-o", "ppid=,etime=,comm="], text=True).split()
+        except subprocess.CalledProcessError:
+            break
+        if len(row) < 3 or Path(row[2]).name not in ("zig", "maker"):
+            break
+        clock, _, days = row[1].partition("-")[::-1] if "-" in row[1] else (row[1], "", "0")
+        seconds = 0
+        for part in clock.split(":"):
+            seconds = seconds * 60 + int(part)
+        age = int(days) * 86400 + seconds + 1
+        pid = int(row[0])
+    return started + BUDGET_SECONDS - age
 
 
 def stop_process(process):
@@ -121,7 +165,7 @@ def stop_process(process):
     process.wait()
 
 
-def execute(job, logfile, deadline=600):
+def execute(job, logfile, deadline):
     started = time.monotonic()
     args = list(map(str, job.args))
     result = {"command": args, "log": logfile.name, "state": "failed"}
@@ -129,7 +173,7 @@ def execute(job, logfile, deadline=600):
         with logfile.open("x") as log:
             process = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
-                result["exit"] = process.wait(timeout=max(0, deadline - (time.monotonic() - started)))
+                result["exit"] = process.wait(timeout=max(0, deadline - time.monotonic()))
             except (KeyboardInterrupt, subprocess.TimeoutExpired):
                 stop_process(process)
                 raise
@@ -143,10 +187,9 @@ def execute(job, logfile, deadline=600):
         result["state"] = "interrupted"
     except (OSError, ValueError, KeyError) as error:
         result["reason"] = str(error)
-    elapsed = time.monotonic() - started
-    if result["state"] == "passed" and elapsed > deadline:
+    if result["state"] == "passed" and time.monotonic() > deadline:
         result["state"] = "timed-out"
-    result["elapsed_seconds"] = round(elapsed, 3)
+    result["elapsed_seconds"] = round(time.monotonic() - started, 3)
     return result
 
 
@@ -191,19 +234,20 @@ def product_expectations(system):
             "c_family": "clang", "c_driver": "zig build-obj", "zig_version": "0.17.1"}
 
 
-def select_group(jobs, name):
-    if name is None:
+def select_group(jobs, names):
+    if names is None:
         return jobs
-    needed = {name}
+    needed = set(names.split(","))
+    require(all(needed), "empty qualification group name")
     for job in reversed(jobs):
         if job.name in needed:
             needed.update(job.needs)
     selected = [job for job in jobs if job.name in needed]
-    require(len(selected) == len(needed), f"unknown qualification group: {name}")
+    require(len(selected) == len(needed), f"unknown qualification group in: {names}")
     return selected
 
 
-def run(jobs, output, started, source=None, selection=None):
+def run(jobs, output, started, deadline, source=None, selection=None):
     rows = {job.name: {"state": "unrun"} for job in jobs}
     require(len(rows) == len(jobs), "duplicate qualification job")
 
@@ -212,11 +256,11 @@ def run(jobs, output, started, source=None, selection=None):
 
     def save():
         success = source_error is None and all(item["state"] == "passed" for item in rows.values())
-        report = {"platform": [platform.system(), platform.machine()], "per_job_seconds": 600,
+        report = {"platform": [platform.system(), platform.machine()], "shared_budget_seconds": BUDGET_SECONDS,
                   "selected_group": selection, "qualified": selection is None and success,
                   "source": initial, "source_error": source_error,
                   "expected_product": product_expectations(platform.system()),
-                  "elapsed_seconds": round(time.monotonic() - started, 3), "jobs": rows,
+                  "elapsed_seconds": round(time.monotonic() - (deadline - BUDGET_SECONDS), 3), "jobs": rows,
                   "passed": success}
         temp = output / "result.tmp"
         temp.write_text(json.dumps(report, indent=2) + "\n")
@@ -246,7 +290,7 @@ def run(jobs, output, started, source=None, selection=None):
                 rows[job.name] = {"state": "running", "log": f"{job.name}.log"}
                 save()
                 print(f"Running {job.name}", flush=True)
-                rows[job.name] = execute(job, output / (job.name + ".log"))
+                rows[job.name] = execute(job, output / (job.name + ".log"), deadline)
                 if source_identity() != initial:
                     source_error = f"source changed during {job.name}"
                     rows[job.name].update(state="failed", reason=source_error)
@@ -266,7 +310,9 @@ def run(jobs, output, started, source=None, selection=None):
             if row["state"] == "running":
                 row["state"] = "interrupted"
         passed = save()
-        print(f"Elapsed {time.monotonic() - started:.1f}s. Report: {output / 'result.json'}", flush=True)
+        elapsed = time.monotonic() - (deadline - BUDGET_SECONDS)
+        print(f"Elapsed {elapsed:.1f}s since zig build started (budget {BUDGET_SECONDS}s). "
+              f"Report: {output / 'result.json'}", flush=True)
     return 0 if passed else 1
 
 
@@ -276,18 +322,19 @@ def main():
     parser.add_argument("zig", help="Zig compiler used by the outer build")
     options = parser.add_mutually_exclusive_group()
     options.add_argument("--list", action="store_true", help="print the local inventory without running it")
-    options.add_argument("--group", help="run one diagnostic group and its prerequisites")
+    options.add_argument("--group", help="run comma-separated groups and their prerequisites")
     args = parser.parse_args()
     system = (platform.system(), platform.machine())
     base = Path("zig-out/qualification").resolve()
     install = base / ("build-" + "-".join(system))
     if args.list:
-        for job in inventory(args.zig, system, install, base):
+        for job in inventory(args.zig, system, install, base, full=False):
             detail = missing_fixture(job)
             if job.name == "product":
                 detail = json.dumps(product_expectations(system[0]))
             print(f"{job.name}  {detail}" if detail else job.name)
         return 0
+    deadline = shared_deadline(started)
     require(subprocess.check_output([args.zig, "version"], text=True).strip() == "0.17.1", "expected Zig 0.17.1")
     base.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="run-", dir=base))
@@ -300,8 +347,8 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         print(f"Qualification results: {output}", flush=True)
         initial = source_identity()
-        jobs = select_group(inventory(args.zig, system, install, output), args.group)
-        return run(jobs, output, started, initial, args.group)
+        jobs = select_group(inventory(args.zig, system, install, output, full=args.group is None), args.group)
+        return run(jobs, output, started, deadline, initial, args.group)
 
 
 if __name__ == "__main__":

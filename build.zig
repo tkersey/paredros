@@ -170,13 +170,14 @@ fn nativeTests(
     filter: ?[]const u8,
     partition: ?NativePartition,
 ) void {
-    const selected = b.option(NativeGroup, "native-group", "Select a native diagnostic group");
+    const selected = b.option([]const NativeGroup, "native-group", "Select native owner groups");
     if (partition != null) {
         if (filter != null)
             std.debug.panic("native-partition cannot be combined with test-filter", .{});
-        if (selected == null or (selected.? != .continuity and selected.? != .transitions))
+        const single = if (selected) |groups| groups.len == 1 else false;
+        if (!single or (selected.?[0] != .continuity and selected.?[0] != .transitions))
             std.debug.panic(
-                "native-partition requires continuity or transitions native-group",
+                "native-partition requires one continuity or transitions native-group",
                 .{},
             );
     }
@@ -188,7 +189,7 @@ fn nativeTests(
     );
     compile.dependOn(&runner.step);
     for (std.enums.values(NativeGroup)) |group| {
-        if (selected != null and selected.? != group) continue;
+        if (selected) |groups| if (std.mem.indexOfScalar(NativeGroup, groups, group) == null) continue;
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
