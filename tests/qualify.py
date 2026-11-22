@@ -106,6 +106,8 @@ def inventory(zig, system, install, output, full):
                 report = output / (name + ".json")
                 args = [sys.executable, "tests/product_smoke.py" if is_product else "tests/process_crash.py",
                         binary if is_product else tools / "paredros-crash-tests", "--report", report]
+                if is_product and linux:
+                    args.append("--essential")
 
                 def verify(_, report=report, count=count, is_product=is_product):
                     data = json.loads(report.read_bytes())

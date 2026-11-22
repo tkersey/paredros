@@ -2,6 +2,7 @@ import argparse, hashlib, json, os, pathlib, platform, re, signal, subprocess, t
 parser=argparse.ArgumentParser()
 parser.add_argument('binary',type=pathlib.Path)
 parser.add_argument('--report',type=pathlib.Path)
+parser.add_argument('--essential',action='store_true',help='omit the licenses, version, and offline ask probes')
 args=parser.parse_args()
 binary=args.binary.resolve(strict=True)
 measurements={'startup_to_socket_seconds':[], 'control_seconds':[], 'rss_samples_kib':[]}
@@ -29,8 +30,9 @@ assert c_compiler['family'] == 'clang' and c_compiler['driver'] == 'zig build-ob
 assert c_compiler['zig_executable_sha256'] == manifest['compiler']['executable_sha256']
 for field in ('sqlite_object_sha256', 'posix_shim_object_sha256'):
     assert re.fullmatch(r'[0-9a-f]{64}', c_compiler[field]), field
-assert json.loads(run(['licenses']).stdout)['artifact_sha256']==manifest['artifact_sha256']
-assert 'paredros' in run(['--version']).stdout
+if not args.essential:
+    assert json.loads(run(['licenses']).stdout)['artifact_sha256']==manifest['artifact_sha256']
+    assert 'paredros' in run(['--version']).stdout
 results.append('embedded manifest and executing artifact hash agree')
 with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
     base=pathlib.Path(raw).resolve()
@@ -101,32 +103,34 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
           'model':{'account':'offline','slug':'fixture-model','effort':'medium','siwc_bin':'/definitely-not-present/siwc','auth_dir':'/definitely-not-present/auth'}}
         live_path=base/'client-only.json';live_path.write_text(json.dumps(live))
         assert json.loads(run(['status'],config=live_path).stdout)['status']=='observed'
-        answer_process=subprocess.Popen([str(binary),'--config',str(config),'ask','Explain the offline state.','--target',task,'--operation','smoke-ask'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-        started=time.monotonic()
-        status_samples=[]
-        try:
-            while answer_process.poll() is None:
-                if time.monotonic()-started>310: raise AssertionError('ask deadline')
-                measurements['rss_samples_kib'].append({'phase':'offline_ask','kib':int(subprocess.check_output(['ps','-o','rss=','-p',str(process.pid)],text=True))})
-                if len(status_samples)<30:
-                    before=time.monotonic()
-                    status=json.loads(run(['status'],config=config).stdout)
-                    assert status['status']=='observed'
-                    status_samples.append(time.monotonic()-before)
-                time.sleep(.1)
-            stdout,stderr=answer_process.communicate(timeout=5)
-            assert answer_process.returncode in (0,1),(answer_process.returncode,stdout,stderr)
-            answer=subprocess.CompletedProcess(answer_process.args,answer_process.returncode,stdout,stderr)
-            measurements['ask_with_status_probes_seconds']=time.monotonic()-started
-            measurements['status_during_ask_seconds']=status_samples
-        finally:
-            if answer_process.poll() is None:
-                answer_process.kill()
-                answer_process.wait(timeout=5)
-        answer_value=json.loads(answer.stdout)
-        assert answer_value['status']=='observed'
-        assert answer_value['data']['task_status'] in {'completed','failed','cancelled','waiting_input','parked','blocked','unknown'}
-        results.append('offline daemon status, idempotent monitor, durable pause, JSON relay, and ask settlement')
+        if not args.essential:
+            answer_process=subprocess.Popen([str(binary),'--config',str(config),'ask','Explain the offline state.','--target',task,'--operation','smoke-ask'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            started=time.monotonic()
+            status_samples=[]
+            try:
+                while answer_process.poll() is None:
+                    if time.monotonic()-started>310: raise AssertionError('ask deadline')
+                    measurements['rss_samples_kib'].append({'phase':'offline_ask','kib':int(subprocess.check_output(['ps','-o','rss=','-p',str(process.pid)],text=True))})
+                    if len(status_samples)<30:
+                        before=time.monotonic()
+                        status=json.loads(run(['status'],config=config).stdout)
+                        assert status['status']=='observed'
+                        status_samples.append(time.monotonic()-before)
+                    time.sleep(.1)
+                stdout,stderr=answer_process.communicate(timeout=5)
+                assert answer_process.returncode in (0,1),(answer_process.returncode,stdout,stderr)
+                answer=subprocess.CompletedProcess(answer_process.args,answer_process.returncode,stdout,stderr)
+                measurements['ask_with_status_probes_seconds']=time.monotonic()-started
+                measurements['status_during_ask_seconds']=status_samples
+            finally:
+                if answer_process.poll() is None:
+                    answer_process.kill()
+                    answer_process.wait(timeout=5)
+            answer_value=json.loads(answer.stdout)
+            assert answer_value['status']=='observed'
+            assert answer_value['data']['task_status'] in {'completed','failed','cancelled','waiting_input','parked','blocked','unknown'}
+        results.append('offline daemon status, idempotent monitor, durable pause, JSON relay'
+                       + ('' if args.essential else ', and ask settlement'))
         results.append('client-only live metadata does not read unavailable secrets or execute helper')
     finally:
         stop(process)
@@ -151,7 +155,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
         results.append('reopened namespace retains monitor identity and operation retry')
     finally:
         stop(process)
-report={'passed':results,'count':len(results),'artifact_sha256':manifest['artifact_sha256'],
+report={'passed':results,'count':len(results),'essential':args.essential,'artifact_sha256':manifest['artifact_sha256'],
         'artifact_zig_backend':manifest['artifact_zig_backend'],'measurements':measurements,'live_services':False}
 encoded=json.dumps(report,indent=2)+'\n'
 if args.report: args.report.write_text(encoded)

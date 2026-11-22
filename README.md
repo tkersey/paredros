@@ -103,10 +103,12 @@ process.
 CI runs TigerStyle and three lanes on GitHub-hosted Ubuntu x86-64: source with the
 emitted-application check, providers, and product. Each lane runs
 `zig build qualify -- --group` and the complete workflow must finish within 600
-seconds. The process-death cases need about nine minutes there, so they run in
-local and fallback qualification with historical reopen and import, which need
-local fixtures. When none of a hosted run's jobs start, the fallback
-workflow dispatches full macOS qualification on the Mac's self-hosted runner as a
+seconds. Its product smoke passes `--essential`, omitting the licenses, version
+and offline ask probes, which cost about 75 seconds on the direct backend; the
+macOS smoke keeps them. The process-death cases need about nine minutes there,
+so they run in local and fallback qualification with historical reopen and
+import, which need local fixtures. When none of a hosted run's jobs start, the
+fallback workflow dispatches full macOS qualification on the Mac's self-hosted runner as a
 separate `macOS fallback` check; it never replaces the hosted result.
 
 PAREDROS pins Protean by commit and package hash in `build.zig.zon`. It uses
