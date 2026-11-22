@@ -46,14 +46,22 @@ zig build check
 zig build check -Dcheck-recovery=true
 ```
 
-Run `zig build qualify` for the complete offline inventory on the current host
-with Zig 0.17.1, Node, and uv installed. On x86-64 Linux under Rosetta, export
-`ZIG_DEBUG_CMD=1` before invoking Zig. Use `zig build qualify -- --list` to
-inspect the groups. Each invocation executes the tests and writes fresh timings,
-outcomes, and logs under `zig-out/qualification/`. Compiled artifacts can be
-reused. The Linux campaign must complete all 24 arms in one 600-second execution.
-For a single group and its prerequisites use `zig build qualify -- --group NAME`.
-This diagnostic requires only the fixtures used by the selected group.
+Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
+essential set within one 600-second budget measured from the `zig build`
+invocation: TigerStyle over every tracked Zig file, the 106 source contracts, the
+native `authority` and `providers` owner groups, the installed product's smoke
+checks, twelve process-death cases, and historical namespace reopen and archive
+import. On macOS one build compiles every essential artifact concurrently. On
+x86-64 Linux under Rosetta, export `ZIG_DEBUG_CMD=1` before invoking Zig. Use
+`zig build qualify -- --list` to inspect the groups. Each invocation executes the
+tests and writes fresh timings, outcomes, and logs under `zig-out/qualification/`.
+For groups and their prerequisites use `zig build qualify -- --group NAME[,NAME...]`.
+This requires only the fixtures used by the selected groups.
+
+The transitions, rendering, continuity and methods owner groups, the 24-arm
+comparison and the 100,000-task daemon are diagnostics. They do not gate a
+candidate, and their absence from a result is not a pass. Run them with
+`--group`, for example `zig build qualify -- --group methods-campaign`.
 
 Historical reopen and import use fixtures produced by the older application.
 The scale check opens a product-configured namespace containing 100,000 real
@@ -82,25 +90,24 @@ again with the same producer resumes at the saved batch.
 
 For individual diagnostics, `zig build test` runs the source contracts.
 `zig build test-native -Dnative-tests=true -Dnative-group=NAME -Doptimize=safe`
-runs a native suite. The process-death controller uses local fixtures, kills
-the process at named admission, dispatch, or capture boundaries, and checks
-retained state and acquisition counts in a fresh process.
+runs native suites; repeat `-Dnative-group` to select several. The process-death
+controller uses local fixtures, kills the process at named admission, dispatch, or
+capture boundaries, and checks retained state and acquisition counts in a fresh
+process.
 
-The Linux workflow splits continuity and transitions with
-`-Dnative-partition=first|second|third`; each named test runs in exactly one partition.
-The unchanged import-only root runs in all three partitions, giving 315 checks in CI
-and 311 in the six unfiltered local groups. The product and crash fixture compile
-separately, and every artifact executes in a fresh job. Each job retains its
-ten-minute limit. Prepared compiler work is reused through the authenticated
-current-run archive; build jobs do not save a redundant cache after uploading
-their completed artifact. Source checks, five product smoke assertions, and twelve
-process-death cases are additional. The workflow defaults to Ubuntu x86-64.
-Manual dispatch can select the Mac's self-hosted Linux runner with `mac_backup`.
+CI runs TigerStyle and five lanes on GitHub-hosted Ubuntu x86-64: source, authority
+(in three partitions), providers, product and crash. Each lane runs
+`zig build qualify -- --group` and the complete workflow must finish within 600
+seconds. Historical reopen and import need local fixtures and run in local and
+fallback qualification. When none of a hosted run's jobs start, the fallback
+workflow dispatches full macOS qualification on the Mac's self-hosted runner as a
+separate `macOS fallback` check; it never replaces the hosted result.
 
 PAREDROS pins Protean by commit and package hash in `build.zig.zon`. It uses
-[the native embedding and recovery changes](https://github.com/tkersey/protean/pull/74)
-and [the authenticated Kosmos borrowing update](https://github.com/tkersey/protean/pull/75).
-Both upstream changes completed their required qualification, serial reviews,
+[the native embedding and recovery changes](https://github.com/tkersey/protean/pull/74),
+[the authenticated Kosmos borrowing update](https://github.com/tkersey/protean/pull/75)
+and [direct Linux x86-64 builds with bundled Clang](https://github.com/tkersey/protean/pull/76).
+All three upstream changes completed their required qualification, serial reviews,
 and landing. Application qualification and reviews must cover this selected pin;
 upstream verification alone does not qualify PAREDROS. Live-provider qualification
 remains deferred.
