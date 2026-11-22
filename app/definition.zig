@@ -23,5 +23,8 @@ pub const capabilities = .{
     .{ .identity = method.workspace_identity, .resource_role = "workspace" },
     .{ .identity = method.codec_identity, .resource_role = "frozen" },
     .{ .identity = @import("experiment_contract.zig").codec_identity, .resource_role = "frozen" },
-    .{ .identity = @import("experiment_contract.zig").clock_identity, .resource_role = "measurement" },
+    .{
+        .identity = @import("experiment_contract.zig").clock_identity,
+        .resource_role = "measurement",
+    },
 };

@@ -37,7 +37,14 @@ pub const Result = struct {
 pub const Function = a.Function(struct { input: Input }, Result);
 const Frame = struct { text: Text, listed_oids: Oids, invalid_highlights: u64, abbreviated: bool };
 const ClipResult = struct { text: cts.Utf8, abbreviated: bool };
-const ClipInput = struct { text: cts.Utf8, index: u64, budget: u64, used: u64, start: u64, output: cts.Utf8 };
+const ClipInput = struct {
+    text: cts.Utf8,
+    index: u64,
+    budget: u64,
+    used: u64,
+    start: u64,
+    output: cts.Utf8,
+};
 const Clip = a.Function(struct { state: ClipInput }, ClipResult);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
@@ -327,7 +334,12 @@ fn listFunction(c: protean.Context, clip: Clip, oid: oid_text.Function) !List {
     return function;
 }
 
-fn notesFunction(c: protean.Context, clip: Clip, oid: oid_text.Function, contains: Contains) !Notes {
+fn notesFunction(
+    c: protean.Context,
+    clip: Clip,
+    oid: oid_text.Function,
+    contains: Contains,
+) !Notes {
     const function = try c.author.function("retain only acquired commit method highlights", .{
         .commits = try c.schema(Commits),
         .highlights = try c.schema(Highlights),

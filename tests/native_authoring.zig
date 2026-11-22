@@ -60,37 +60,147 @@ const TemporalCase = struct {
 };
 
 const temporal_cases = [_]TemporalCase{
-    .{ .input = .{ .anchor_ms = -1900, .interval_ms = 1000, .clock_ms = -1000 }, .expected = .{ .value = -900 } },
-    .{ .input = .{ .anchor_ms = -1900, .interval_ms = 1000, .clock_ms = -900 }, .expected = .{ .value = 100 } },
-    .{ .input = .{ .anchor_ms = 100, .interval_ms = 1000, .clock_ms = -1000 }, .expected = .{ .value = 100 } },
-    .{ .input = .{ .anchor_ms = 100, .interval_ms = 1000, .clock_ms = 100 }, .expected = .{ .value = 1100 } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = 1, .clock_ms = std.math.minInt(i64) }, .expected = .{ .value = std.math.minInt(i64) + 1 } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = 1, .clock_ms = 0 }, .expected = .{ .value = 1 } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = 1 << 63, .clock_ms = std.math.minInt(i64) }, .expected = .{ .value = 0 } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = std.math.maxInt(u64), .clock_ms = std.math.minInt(i64) }, .expected = .{ .value = std.math.maxInt(i64) } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = std.math.maxInt(u64), .clock_ms = std.math.maxInt(i64) - 1 }, .expected = .{ .value = std.math.maxInt(i64) } },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = std.math.maxInt(u64), .clock_ms = std.math.maxInt(i64) }, .expected = .overflow },
-    .{ .input = .{ .anchor_ms = -1, .interval_ms = 1 << 63, .clock_ms = -1 }, .expected = .{ .value = std.math.maxInt(i64) } },
-    .{ .input = .{ .anchor_ms = -1, .interval_ms = 1 << 63, .clock_ms = 0 }, .expected = .{ .value = std.math.maxInt(i64) } },
-    .{ .input = .{ .anchor_ms = 0, .interval_ms = std.math.maxInt(u64), .clock_ms = -1 }, .expected = .{ .value = 0 } },
-    .{ .input = .{ .anchor_ms = 0, .interval_ms = std.math.maxInt(u64), .clock_ms = 0 }, .expected = .overflow },
-    .{ .input = .{ .anchor_ms = std.math.maxInt(i64), .interval_ms = 1, .clock_ms = std.math.maxInt(i64) - 1 }, .expected = .{ .value = std.math.maxInt(i64) } },
-    .{ .input = .{ .anchor_ms = std.math.maxInt(i64), .interval_ms = 1, .clock_ms = std.math.maxInt(i64) }, .expected = .overflow },
-    .{ .input = .{ .anchor_ms = 0, .interval_ms = 1, .clock_ms = std.math.maxInt(i64) }, .expected = .overflow },
-    .{ .input = .{ .anchor_ms = std.math.maxInt(i64), .interval_ms = 0, .clock_ms = std.math.minInt(i64) }, .expected = .invalid_interval },
-    .{ .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = 0, .clock_ms = std.math.maxInt(i64) }, .expected = .invalid_interval },
-    .{ .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -10 }, .expected = .{ .value = -7 } },
-    .{ .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -1 }, .expected = .{ .value = 2 } },
-    .{ .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -11 }, .expected = .{ .value = -10 } },
+    .{
+        .input = .{ .anchor_ms = -1900, .interval_ms = 1000, .clock_ms = -1000 },
+        .expected = .{ .value = -900 },
+    },
+    .{
+        .input = .{ .anchor_ms = -1900, .interval_ms = 1000, .clock_ms = -900 },
+        .expected = .{ .value = 100 },
+    },
+    .{
+        .input = .{ .anchor_ms = 100, .interval_ms = 1000, .clock_ms = -1000 },
+        .expected = .{ .value = 100 },
+    },
+    .{
+        .input = .{ .anchor_ms = 100, .interval_ms = 1000, .clock_ms = 100 },
+        .expected = .{ .value = 1100 },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = 1,
+            .clock_ms = std.math.minInt(i64),
+        },
+        .expected = .{ .value = std.math.minInt(i64) + 1 },
+    },
+    .{
+        .input = .{ .anchor_ms = std.math.minInt(i64), .interval_ms = 1, .clock_ms = 0 },
+        .expected = .{ .value = 1 },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = 1 << 63,
+            .clock_ms = std.math.minInt(i64),
+        },
+        .expected = .{ .value = 0 },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = std.math.maxInt(u64),
+            .clock_ms = std.math.minInt(i64),
+        },
+        .expected = .{ .value = std.math.maxInt(i64) },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = std.math.maxInt(u64),
+            .clock_ms = std.math.maxInt(i64) - 1,
+        },
+        .expected = .{ .value = std.math.maxInt(i64) },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = std.math.maxInt(u64),
+            .clock_ms = std.math.maxInt(i64),
+        },
+        .expected = .overflow,
+    },
+    .{
+        .input = .{ .anchor_ms = -1, .interval_ms = 1 << 63, .clock_ms = -1 },
+        .expected = .{ .value = std.math.maxInt(i64) },
+    },
+    .{
+        .input = .{ .anchor_ms = -1, .interval_ms = 1 << 63, .clock_ms = 0 },
+        .expected = .{ .value = std.math.maxInt(i64) },
+    },
+    .{
+        .input = .{ .anchor_ms = 0, .interval_ms = std.math.maxInt(u64), .clock_ms = -1 },
+        .expected = .{ .value = 0 },
+    },
+    .{
+        .input = .{ .anchor_ms = 0, .interval_ms = std.math.maxInt(u64), .clock_ms = 0 },
+        .expected = .overflow,
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.maxInt(i64),
+            .interval_ms = 1,
+            .clock_ms = std.math.maxInt(i64) - 1,
+        },
+        .expected = .{ .value = std.math.maxInt(i64) },
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.maxInt(i64),
+            .interval_ms = 1,
+            .clock_ms = std.math.maxInt(i64),
+        },
+        .expected = .overflow,
+    },
+    .{
+        .input = .{ .anchor_ms = 0, .interval_ms = 1, .clock_ms = std.math.maxInt(i64) },
+        .expected = .overflow,
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.maxInt(i64),
+            .interval_ms = 0,
+            .clock_ms = std.math.minInt(i64),
+        },
+        .expected = .invalid_interval,
+    },
+    .{
+        .input = .{
+            .anchor_ms = std.math.minInt(i64),
+            .interval_ms = 0,
+            .clock_ms = std.math.maxInt(i64),
+        },
+        .expected = .invalid_interval,
+    },
+    .{
+        .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -10 },
+        .expected = .{ .value = -7 },
+    },
+    .{
+        .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -1 },
+        .expected = .{ .value = 2 },
+    },
+    .{
+        .input = .{ .anchor_ms = -10, .interval_ms = 3, .clock_ms = -11 },
+        .expected = .{ .value = -10 },
+    },
 };
 
-test "native authoring temporal agrees with independent schedule oracle across exact arithmetic edges" {
+test "native authoring temporal agrees with independent schedule oracle at exact arithmetic edges" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
     for (temporal_cases, 0..) |case, index| {
-        const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "temporal-{d}", .{index});
-        const independent = schedule.firstAfter(case.input.anchor_ms, case.input.interval_ms, case.input.clock_ms);
+        const operation = try std.fmt.allocPrint(
+            fixture.arena.allocator(),
+            "temporal-{d}",
+            .{index},
+        );
+        const independent = schedule.firstAfter(
+            case.input.anchor_ms,
+            case.input.interval_ms,
+            case.input.clock_ms,
+        );
         switch (case.expected) {
             .value => |value| {
                 try std.testing.expectEqual(value, try independent);
@@ -113,7 +223,12 @@ test "native authoring temporal agrees with independent schedule oracle across e
 fn delivery() t.DeliveryIntent {
     return .{
         .destination = contracts_fixture.specification().destination,
-        .key = .{ .lineage = @splat(2), .purpose = .digest, .identity = @splat(3), .generation = 7 },
+        .key = .{
+            .lineage = @splat(2),
+            .purpose = .digest,
+            .identity = @splat(3),
+            .generation = 7,
+        },
         .payload = .{
             .obligation = @splat(4),
             .specification_revision = 6,
@@ -216,7 +331,7 @@ fn controlledHead(previous: t.Head, control: mode.Control) t.Head {
     return head;
 }
 
-test "native authoring modes preserve every other head field across controls holds and final states" {
+test "native authoring modes preserve other head fields across controls holds and final states" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -228,9 +343,16 @@ test "native authoring modes preserve every other head field across controls hol
                 previous.mode = old_mode;
                 previous.desired_mode = if (old_mode == .cancelled) .cancelled else .active;
                 previous.recovery_hold = hold;
-                const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "mode-{d}", .{index});
+                const operation = try std.fmt.allocPrint(
+                    fixture.arena.allocator(),
+                    "mode-{d}",
+                    .{index},
+                );
                 index += 1;
-                const task = try fixture.execute(operation, .{ .mode = .{ .head = previous, .control = control } });
+                const task = try fixture.execute(
+                    operation,
+                    .{ .mode = .{ .head = previous, .control = control } },
+                );
                 const result = try fixture.output(task);
                 try std.testing.expectEqualDeep(controlledHead(previous, control), result.mode);
             }

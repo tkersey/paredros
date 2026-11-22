@@ -389,11 +389,25 @@ fn dispatch(
     return dispatchObserved(context, a, driver, uid, bytes, null);
 }
 
-fn dispatchAttached(context: *anyopaque, a: std.mem.Allocator, driver: *Driver, uid: u32, bytes: []const u8, index: *const @import("index.zig").Index) ![]const u8 {
+fn dispatchAttached(
+    context: *anyopaque,
+    a: std.mem.Allocator,
+    driver: *Driver,
+    uid: u32,
+    bytes: []const u8,
+    index: *const @import("index.zig").Index,
+) ![]const u8 {
     return dispatchObserved(context, a, driver, uid, bytes, index);
 }
 
-fn dispatchObserved(context: *anyopaque, a: std.mem.Allocator, driver: *Driver, uid: u32, bytes: []const u8, index: ?*const @import("index.zig").Index) ![]const u8 {
+fn dispatchObserved(
+    context: *anyopaque,
+    a: std.mem.Allocator,
+    driver: *Driver,
+    uid: u32,
+    bytes: []const u8,
+    index: ?*const @import("index.zig").Index,
+) ![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     const response = try control.dispatchWithIndex(
         a,

@@ -25,12 +25,24 @@ fn advanceOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !?t.Id 
     var saved = try driver.service.task(a, record.task);
     defer saved.deinit();
     const status = try driver.service.status(a, saved.value);
-    const action = recovery_status.classify(status, saved.value.blocker, saved.value.current_occurrence, record.owner_snapshot orelse return error.MissingOwnerSnapshot);
+    const action = recovery_status.classify(
+        status,
+        saved.value.blocker,
+        saved.value.current_occurrence,
+        record.owner_snapshot orelse return error.MissingOwnerSnapshot,
+    );
     if (action == .replace) {
         if (record.input.turn.attempt >= 2) return null;
         return try replace(driver, a, record);
     }
-    const resumed = try recovery_status.resumeSelected(driver.service, a, record.task, saved.value.revision, action, saved.value.current_occurrence);
+    const resumed = try recovery_status.resumeSelected(
+        driver.service,
+        a,
+        record.task,
+        saved.value.revision,
+        action,
+        saved.value.current_occurrence,
+    );
     if (resumed == .incompatible and record.input.turn.attempt < 2)
         return try replace(driver, a, record);
     return null;
@@ -67,10 +79,16 @@ fn replace(driver: anytype, a: std.mem.Allocator, record: idx.Record) !t.Id {
         .cancellation = .{
             .task = old.task,
             .operation = .{ .bytes = operation },
-            .bytes = .{ .bytes = try c.encodeOwned(@TypeOf(cancelled.receipt), scratch, cancelled.receipt) },
+            .bytes = .{
+                .bytes = try c.encodeOwned(@TypeOf(cancelled.receipt), scratch, cancelled.receipt),
+            },
         },
         .reference = owner.snapshot.reference,
         .owner_snapshot = .{ .bytes = owner.snapshot.bytes },
     };
-    return (try driver.service.submit(scratch, next.envelope.operation.bytes, .{ .turn = next })).receipt.task;
+    return (try driver.service.submit(
+        scratch,
+        next.envelope.operation.bytes,
+        .{ .turn = next },
+    )).receipt.task;
 }

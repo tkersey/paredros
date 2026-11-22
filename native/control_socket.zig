@@ -381,7 +381,9 @@ fn openSocket() !c_int {
 }
 
 fn reserveWriteBudget(fd: c_int, config: Config) void {
-    const budget: c_int = @intCast(@min(config.io_bytes_per_poll, config.max_frame_bytes + 1, std.math.maxInt(c_int)));
+    const budget: c_int = @intCast(
+        @min(config.io_bytes_per_poll, config.max_frame_bytes + 1, std.math.maxInt(c_int)),
+    );
     var current: c_int = 0;
     var length: c.socklen_t = @sizeOf(c_int);
     if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.SNDBUF, &current, &length) == 0 and current < budget)

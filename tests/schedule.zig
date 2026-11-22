@@ -51,7 +51,10 @@ test "anchor arithmetic is strict and checked across signed timestamp boundaries
     try std.testing.expectEqual(100, try schedule.firstAfter(100, 1_000, -1_000));
     try std.testing.expectEqual(1_100, try schedule.firstAfter(100, 1_000, 100));
     try std.testing.expectError(error.InvalidInterval, schedule.firstAfter(0, 0, 0));
-    try std.testing.expectError(error.ScheduleOverflow, schedule.firstAfter(0, 1, std.math.maxInt(i64)));
+    try std.testing.expectError(
+        error.ScheduleOverflow,
+        schedule.firstAfter(0, 1, std.math.maxInt(i64)),
+    );
     try std.testing.expectEqual(0, try schedule.firstAfter(0, std.math.maxInt(u64), -1));
 }
 

@@ -390,7 +390,10 @@ fn verifyWrite(f: *Fixture, driver: *Driver) !void {
     try std.testing.expectEqualDeep(witness.subject, repeated[0]);
     if (phase == .write_consumed) return verifyConsumed(f, driver);
     const resumed = try driver.resumeRetained(a, 8);
-    try std.testing.expectEqual(@as(u32, if (phase == .write_dispatched or phase == .write_completed) 0 else 1), resumed);
+    try std.testing.expectEqual(
+        @as(u32, if (phase == .write_dispatched or phase == .write_completed) 0 else 1),
+        resumed,
+    );
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     if (phase == .write_dispatched) {
@@ -428,7 +431,11 @@ fn verifyConsumed(f: *Fixture, driver: *Driver) !void {
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     for (0..8) |_| _ = try session.tick(a);
-    const history = try f.service.?.notificationHistory(a, witness.subject, app.notification_identity);
+    const history = try f.service.?.notificationHistory(
+        a,
+        witness.subject,
+        app.notification_identity,
+    );
     try std.testing.expectEqual(1, history.attempts);
     try std.testing.expect(history.captured.?.reply != null);
     try std.testing.expect(!history.transmissionExcluded());

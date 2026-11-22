@@ -7,7 +7,12 @@ const Fixture = @import("native_fixture.zig").Fixture(witness.Types, witness.App
 const genesis = @import("contracts.zig").genesis;
 const fresh = @import("native_genesis.zig").expectedFresh;
 
-fn directive(id: u8, ordinal: u64, predecessor: ?t.InputReference, body: t.DirectiveBody) t.DirectiveFact {
+fn directive(
+    id: u8,
+    ordinal: u64,
+    predecessor: ?t.InputReference,
+    body: t.DirectiveBody,
+) t.DirectiveFact {
     return .{
         .reference = .{ .task = @splat(id), .digest = @splat(id + 1) },
         .value = .{
@@ -35,7 +40,11 @@ test "native directive chain respects order and retains rejected disposition con
     const first = directive(2, 1, null, .{ .pause = {} });
     const refused = directive(3, 2, first.reference, .{ .check = {} });
     const last = directive(4, 3, refused.reference, .{ .@"resume" = {} });
-    const input: chain.Input = .{ .obligation = @splat(1), .head = fresh(genesis()), .directives = .{ .items = &.{ first, refused, last } } };
+    const input: chain.Input = .{
+        .obligation = @splat(1),
+        .head = fresh(genesis()),
+        .directives = .{ .items = &.{ first, refused, last } },
+    };
     const task = try f.execute("three-controls", input);
     const output = try f.output(task);
     var expected = input.head;
@@ -45,7 +54,10 @@ test "native directive chain respects order and retains rejected disposition con
     try std.testing.expectEqual(3, output.dispositions.items.len);
     try std.testing.expect(output.dispositions.items[0].outcome == .applied);
     try std.testing.expect(output.dispositions.items[2].outcome == .applied);
-    try std.testing.expectEqualStrings("test_policy_refusal", output.dispositions.items[1].outcome.rejected.bytes);
+    try std.testing.expectEqualStrings(
+        "test_policy_refusal",
+        output.dispositions.items[1].outcome.rejected.bytes,
+    );
     for (output.dispositions.items, input.directives.items) |disposition, fact| {
         try std.testing.expectEqualDeep(fact.reference, disposition.directive);
         try std.testing.expectEqual(fact.value.ordinal, disposition.ordinal);
@@ -66,7 +78,11 @@ test "native directive chain cannot skip reorder or borrow another predecessor o
     defer f.deinit();
     try f.init();
     const valid = directive(2, 1, null, .{ .pause = {} });
-    const input: chain.Input = .{ .obligation = @splat(1), .head = fresh(genesis()), .directives = .{ .items = &.{} } };
+    const input: chain.Input = .{
+        .obligation = @splat(1),
+        .head = fresh(genesis()),
+        .directives = .{ .items = &.{} },
+    };
     var bad = valid;
     bad.value.ordinal = 2;
     var value = input;

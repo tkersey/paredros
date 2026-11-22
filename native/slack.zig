@@ -109,7 +109,12 @@ fn count(text_value: []const u8, max: usize) !void {
 }
 
 fn validateAddress(binding: Binding) !void {
-    for ([_][]const u8{ binding.app_id, binding.team_id, binding.operator_id, binding.channel_id }) |id|
+    for ([_][]const u8{
+        binding.app_id,
+        binding.team_id,
+        binding.operator_id,
+        binding.channel_id,
+    }) |id|
         if (id.len == 0 or id.len > 128) return error.InvalidBinding;
     if (binding.channel_id[0] != 'D') return error.InvalidBinding;
 }
@@ -126,7 +131,12 @@ fn copyBinding(a: std.mem.Allocator, binding: Binding) !Binding {
     return result;
 }
 
-pub fn parseEnvelope(a: std.mem.Allocator, binding: Binding, bytes: []const u8, limits: Limits) !Ingress {
+pub fn parseEnvelope(
+    a: std.mem.Allocator,
+    binding: Binding,
+    bytes: []const u8,
+    limits: Limits,
+) !Ingress {
     try validateBinding(binding);
     var result: Ingress = .{
         .arena = .init(a),
@@ -155,7 +165,11 @@ pub fn parseEnvelope(a: std.mem.Allocator, binding: Binding, bytes: []const u8, 
     return result;
 }
 
-fn classify(binding: Binding, envelope: std.json.Value, limits: Limits) !@FieldType(Ingress, "disposition") {
+fn classify(
+    binding: Binding,
+    envelope: std.json.Value,
+    limits: Limits,
+) !@FieldType(Ingress, "disposition") {
     const payload = try get(envelope, "payload");
     if (!equals(payload, "api_app_id", binding.app_id)) return error.WrongOrigin;
     if (equals(envelope, "type", "events_api")) {
@@ -177,7 +191,14 @@ fn parseText(binding: Binding, payload: std.json.Value, limits: Limits) !Text {
         !equals(event, "channel", binding.channel_id)) return error.WrongOrigin;
     if (!equals(event, "type", "message") or !equals(event, "channel_type", "im"))
         return error.Unsupported;
-    for ([_][]const u8{ "subtype", "thread_ts", "bot_id", "files", "attachments", "edited" }) |field|
+    for ([_][]const u8{
+        "subtype",
+        "thread_ts",
+        "bot_id",
+        "files",
+        "attachments",
+        "edited",
+    }) |field|
         if (optional(event, field) != null) return error.Unsupported;
     const event_id = try string(payload, "event_id");
     if (event_id.len == 0 or event_id.len > 128) return error.Malformed;
@@ -186,10 +207,14 @@ fn parseText(binding: Binding, payload: std.json.Value, limits: Limits) !Text {
     try count(body, limits.text_characters);
     const ts = try string(event, "ts");
     _ = try Timestamp.parse(ts);
-    const operation = digest(&.{ "paredros.slack.event/1", binding.app_id, binding.team_id, event_id });
+    const operation = digest(
+        &.{ "paredros.slack.event/1", binding.app_id, binding.team_id, event_id },
+    );
     return .{
         .operation = operation,
-        .stable_request = digest(&.{ &operation, binding.operator_id, binding.channel_id, ts, body }),
+        .stable_request = digest(
+            &.{ &operation, binding.operator_id, binding.channel_id, ts, body },
+        ),
         .event_id = event_id,
         .timestamp = ts,
         .text = body,
@@ -287,7 +312,12 @@ fn boundedIdentifier(value: []const u8, maximum: usize) !void {
     try count(value, maximum);
 }
 
-pub const Button = struct { block_id: []const u8, action_id: []const u8, value: []const u8, label: []const u8 };
+pub const Button = struct {
+    block_id: []const u8,
+    action_id: []const u8,
+    value: []const u8,
+    label: []const u8,
+};
 pub const Marker = struct {
     key: Digest,
     generation: u64,
@@ -331,7 +361,12 @@ pub fn escape(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return output.toOwnedSlice(a);
 }
 
-fn put(a: std.mem.Allocator, target: *std.json.Value, key: []const u8, value: std.json.Value) !void {
+fn put(
+    a: std.mem.Allocator,
+    target: *std.json.Value,
+    key: []const u8,
+    value: std.json.Value,
+) !void {
     try target.object.put(a, try a.dupe(u8, key), value);
 }
 
@@ -410,7 +445,11 @@ fn descriptionBlocks(a: std.mem.Allocator, body: []const u8, blocks: *std.json.V
         try put(a, &label, "emoji", .{ .bool = false });
         var section = object(a);
         try put(a, &section, "type", try valueString(a, "section"));
-        const id = if (start == 0) "paredros_description" else try std.fmt.allocPrint(a, "paredros_description_{d}", .{blocks.array.items.len});
+        const id = if (start == 0) "paredros_description" else try std.fmt.allocPrint(
+            a,
+            "paredros_description_{d}",
+            .{blocks.array.items.len},
+        );
         try put(a, &section, "block_id", try valueString(a, id));
         try put(a, &section, "text", label);
         try blocks.array.append(section);
@@ -481,7 +520,13 @@ fn linkBlock(a: std.mem.Allocator, link: Link) !std.json.Value {
     return block;
 }
 
-pub fn prepare(a: std.mem.Allocator, binding: Binding, body: []const u8, buttons: []const Button, marker: Marker) !Prepared {
+pub fn prepare(
+    a: std.mem.Allocator,
+    binding: Binding,
+    body: []const u8,
+    buttons: []const Button,
+    marker: Marker,
+) !Prepared {
     return prepareLinked(a, binding, body, buttons, &.{}, marker);
 }
 
@@ -568,7 +613,13 @@ pub fn equalJson(left: std.json.Value, right: std.json.Value) bool {
     return true;
 }
 
-pub fn bindInteraction(a: std.mem.Allocator, interaction: Interaction, prepared: Prepared, button: Button, known_ts: ?[]const u8) !void {
+pub fn bindInteraction(
+    a: std.mem.Allocator,
+    interaction: Interaction,
+    prepared: Prepared,
+    button: Button,
+    known_ts: ?[]const u8,
+) !void {
     if (!botOrigin(prepared.binding, interaction.message) or
         optional(interaction.message, "thread_ts") != null or
         !equals(interaction.message, "ts", interaction.message_timestamp))
@@ -655,7 +706,15 @@ pub const HistoryAudit = struct {
     pages: std.ArrayList(HistoryPage) = .empty,
     observations: std.ArrayList(HistoryObservation) = .empty,
 
-    pub fn init(a: std.mem.Allocator, binding: Binding, marker: Marker, oldest: []const u8, latest: ?[]const u8, canary: ?Canary, limits: HistoryLimits) !HistoryAudit {
+    pub fn init(
+        a: std.mem.Allocator,
+        binding: Binding,
+        marker: Marker,
+        oldest: []const u8,
+        latest: ?[]const u8,
+        canary: ?Canary,
+        limits: HistoryLimits,
+    ) !HistoryAudit {
         var result = try initWindow(a, binding, marker.lineage, oldest, latest, limits);
         errdefer result.deinit();
         const allocator = result.arena.allocator();
@@ -738,8 +797,14 @@ pub const HistoryAudit = struct {
         }
         self.pages_left -= 1;
         const expected = self.request();
-        if (!same(requested.team_id, expected.team_id) or !same(requested.channel, expected.channel) or
-            !same(requested.oldest, expected.oldest) or !sameOptional(requested.latest, expected.latest) or
+        if (!same(
+            requested.team_id,
+            expected.team_id,
+        ) or !same(requested.channel, expected.channel) or
+            !same(
+                requested.oldest,
+                expected.oldest,
+            ) or !sameOptional(requested.latest, expected.latest) or
             !same(requested.cursor, expected.cursor) or !requested.inclusive or
             !requested.include_all_metadata) return error.InvalidHistoryRequest;
         const retained = try self.arena.allocator().dupe(u8, response.body);
@@ -759,7 +824,12 @@ pub const HistoryAudit = struct {
 
     fn ingestBody(self: *HistoryAudit, bytes: []const u8) !void {
         const a = self.arena.allocator();
-        const parsed = try std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            a,
+            bytes,
+            .{ .allocate = .alloc_always },
+        );
         const ok = try get(parsed.value, "ok");
         if (ok != .bool or !ok.bool) {
             self.reason = .access;
@@ -822,7 +892,10 @@ pub const HistoryAudit = struct {
             return;
         }
         if (self.canary) |canary| if (same(ts, canary.timestamp)) {
-            if (equalJson(metadata, canary.marker)) self.canary_seen = true else self.reason = .metadata;
+            if (equalJson(
+                metadata,
+                canary.marker,
+            )) self.canary_seen = true else self.reason = .metadata;
         };
         const payload = try get(metadata, "event_payload");
         if (equals(payload, "lineage_root", self.lineage))
@@ -864,7 +937,12 @@ fn validMetadata(metadata: std.json.Value) bool {
     const payload = get(metadata, "event_payload") catch return false;
     if (payload != .object or payload.object.count() != 14 or
         !equals(payload, "marker_schema", "paredros.delivery/1")) return false;
-    for ([_][]const u8{ "generation", "issue", "prior_observation", "covered_observation" }) |field| {
+    for ([_][]const u8{
+        "generation",
+        "issue",
+        "prior_observation",
+        "covered_observation",
+    }) |field| {
         const value = string(payload, field) catch return false;
         if (value.len == 0 or (value.len > 1 and value[0] == '0')) return false;
         for (value) |byte| if (!std.ascii.isDigit(byte)) return false;
@@ -878,9 +956,20 @@ fn validMetadata(metadata: std.json.Value) bool {
     for ([_][]const u8{ "lineage_root", "obligation", "source_epoch", "kind" }) |field| {
         boundedIdentifier(string(payload, field) catch return false, 128) catch return false;
     }
-    _ = std.meta.stringToEnum(@FieldType(Marker, "kind"), string(payload, "kind") catch return false) orelse return false;
-    const prior = std.fmt.parseInt(u64, string(payload, "prior_observation") catch return false, 10) catch return false;
-    const covered = std.fmt.parseInt(u64, string(payload, "covered_observation") catch return false, 10) catch return false;
+    _ = std.meta.stringToEnum(
+        @FieldType(Marker, "kind"),
+        string(payload, "kind") catch return false,
+    ) orelse return false;
+    const prior = std.fmt.parseInt(
+        u64,
+        string(payload, "prior_observation") catch return false,
+        10,
+    ) catch return false;
+    const covered = std.fmt.parseInt(
+        u64,
+        string(payload, "covered_observation") catch return false,
+        10,
+    ) catch return false;
     if (covered < prior) return false;
     for ([_][]const u8{ "base_oid", "tip_oid" }) |field| {
         const value = string(payload, field) catch return false;
@@ -904,12 +993,23 @@ pub const DeliveryResult = struct {
     }
 };
 
-pub fn interpretDelivery(a: std.mem.Allocator, binding: Binding, marker: Marker, response: Response, bytes_max: usize) !DeliveryResult {
+pub fn interpretDelivery(
+    a: std.mem.Allocator,
+    binding: Binding,
+    marker: Marker,
+    response: Response,
+    bytes_max: usize,
+) !DeliveryResult {
     try validateBinding(binding);
     var result: DeliveryResult = .{ .arena = .init(a) };
     errdefer result.deinit();
     if (response.status >= 500 or response.body.len > bytes_max) return result;
-    result.outcome = deliveryOutcome(result.arena.allocator(), binding, marker, response) catch |err|
+    result.outcome = deliveryOutcome(
+        result.arena.allocator(),
+        binding,
+        marker,
+        response,
+    ) catch |err|
         switch (err) {
             error.OutOfMemory => return err,
             else => .indeterminate,
@@ -917,13 +1017,40 @@ pub fn interpretDelivery(a: std.mem.Allocator, binding: Binding, marker: Marker,
     return result;
 }
 
-fn deliveryOutcome(a: std.mem.Allocator, binding: Binding, marker: Marker, response: Response) !@FieldType(DeliveryResult, "outcome") {
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, response.body, .{ .allocate = .alloc_always });
+fn deliveryOutcome(
+    a: std.mem.Allocator,
+    binding: Binding,
+    marker: Marker,
+    response: Response,
+) !@FieldType(DeliveryResult, "outcome") {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        a,
+        response.body,
+        .{ .allocate = .alloc_always },
+    );
     const ok = try get(parsed.value, "ok");
     if (ok != .bool) return error.Malformed;
     if (!ok.bool) {
         const failure = try string(parsed.value, "error");
-        for ([_][]const u8{ "not_authed", "invalid_auth", "account_inactive", "token_revoked", "missing_scope", "no_permission", "channel_not_found", "not_in_channel", "is_archived", "msg_too_long", "invalid_arguments", "invalid_blocks", "invalid_metadata" }) |known| if (same(failure, known)) return .{ .rejected = .{ .retryable = false, .reason = failure } };
+        for ([_][]const u8{
+            "not_authed",
+            "invalid_auth",
+            "account_inactive",
+            "token_revoked",
+            "missing_scope",
+            "no_permission",
+            "channel_not_found",
+            "not_in_channel",
+            "is_archived",
+            "msg_too_long",
+            "invalid_arguments",
+            "invalid_blocks",
+            "invalid_metadata",
+        }) |known| if (same(
+            failure,
+            known,
+        )) return .{ .rejected = .{ .retryable = false, .reason = failure } };
         if (same(failure, "ratelimited") or same(failure, "rate_limited"))
             return .{ .rejected = .{ .retryable = true, .reason = failure } };
         return .indeterminate;
@@ -946,5 +1073,11 @@ fn deliveryOutcome(a: std.mem.Allocator, binding: Binding, marker: Marker, respo
             };
         }
     }
-    return .{ .confirmed = .{ .timestamp = ts, .metadata_degraded = degraded, .rendering_fault = rendering_fault } };
+    return .{
+        .confirmed = .{
+            .timestamp = ts,
+            .metadata_degraded = degraded,
+            .rendering_fault = rendering_fault,
+        },
+    };
 }

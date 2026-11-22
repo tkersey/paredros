@@ -29,9 +29,17 @@ pub fn permits(
         .delivery => |value| std.mem.eql(u8, request.capability, slack.notification_identity) and
             @import("restore_eligibility.zig").allows(index, value) and
             try deliveryPermitted(a, index, value, clock_ms),
-        .audit => |value| std.mem.eql(u8, request.capability, @import("../app/audit_contract.zig").identity) and
+        .audit => |value| std.mem.eql(
+            u8,
+            request.capability,
+            @import("../app/audit_contract.zig").identity,
+        ) and
             try auditPermitted(a, index, value, clock_ms),
-        .lineage_audit => |value| std.mem.eql(u8, request.capability, @import("../app/lineage_audit_contract.zig").identity) and
+        .lineage_audit => |value| std.mem.eql(
+            u8,
+            request.capability,
+            @import("../app/lineage_audit_contract.zig").identity,
+        ) and
             try @import("lineage_audit.zig").permits(a, index, value),
         .turn => record.input.turn.envelope.origin != .derived,
         .experiment => |value| experimentPermitted(value, request.capability),

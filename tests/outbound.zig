@@ -939,7 +939,9 @@ test "activation reconciliation needs retained readback and never releases diges
     var store: Store = .{};
     defer store.deinit();
     fixture.head().digest.?.hold = .uncertain_transmission;
-    fixture.head().activation = @import("native_genesis.zig").expectedFresh(examples.genesis()).activation;
+    fixture.head().activation = @import("native_genesis.zig").expectedFresh(
+        examples.genesis(),
+    ).activation;
     const pending = fixture.head().*;
     const view = @import("../native/reconciliation.zig");
     try std.testing.expectEqual(.pending, try view.capability(a, &fixture.index, fixture.target));

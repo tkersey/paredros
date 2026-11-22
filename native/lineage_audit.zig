@@ -82,7 +82,12 @@ pub fn permits(a: std.mem.Allocator, index: *const idx.Index, value: t.LineageAu
     }
     const head = previous orelse return false;
     if (!std.meta.eql(head.lineage, value.lineage) or
-        !try continuity.equal(a, t.Destination, head.specification.destination, value.destination) or
+        !try continuity.equal(
+            a,
+            t.Destination,
+            head.specification.destination,
+            value.destination,
+        ) or
         value.page_limit != head.specification.policies.history_page_limit or
         value.page_limit == 0 or !std.mem.eql(u8, value.oldest.bytes, "0.000000")) return false;
     if (value.latest != null) return false;
@@ -92,7 +97,11 @@ pub fn permits(a: std.mem.Allocator, index: *const idx.Index, value: t.LineageAu
     return std.mem.eql(u8, expected, value.envelope.operation.bytes);
 }
 
-fn authorized(index: *const idx.Index, obligation: *const idx.Obligation, source: t.Reference) !bool {
+fn authorized(
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+    source: t.Reference,
+) !bool {
     const record = index.record(source.task) orelse return false;
     if (record.result_digest == null or record.result == null or
         !std.meta.eql(record.result_digest.?, source.digest)) return false;

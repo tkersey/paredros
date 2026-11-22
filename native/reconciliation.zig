@@ -53,7 +53,10 @@ pub fn inspect(a: std.mem.Allocator, index: *const idx.Index, target: t.Id) !Vie
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
             const scratch = arena.allocator();
-            const input = try @import("history_evidence.zig").sourceInput(scratch, source.value.input);
+            const input = try @import("history_evidence.zig").sourceInput(
+                scratch,
+                source.value.input,
+            );
             const output = try continuity.sourceOutput(scratch, source.value.result);
             if (try classify(scratch, head, input, output)) |outcome| result.observe(.{
                 .source_namespace = member.data.source.namespace,
@@ -64,9 +67,14 @@ pub fn inspect(a: std.mem.Allocator, index: *const idx.Index, target: t.Id) !Vie
         }
     }
     result.previously_qualified = result.successful_readback != null;
-    result.capability = if (result.failed_readback != null) .degraded else if (result.previously_qualified)
+    result.capability = if (result.failed_readback != null)
+        .degraded
+    else if (result.previously_qualified)
         .qualified
-    else if (result.send_metadata_missing != null) .degraded else .pending;
+    else if (result.send_metadata_missing != null)
+        .degraded
+    else
+        .pending;
     return result;
 }
 
@@ -82,7 +90,12 @@ fn classify(
         else => return null,
     };
     if (delivery.key.purpose != .activation or !std.meta.eql(delivery.key.lineage, head.lineage) or
-        !try continuity.equal(a, t.Destination, delivery.destination, head.specification.destination))
+        !try continuity.equal(
+            a,
+            t.Destination,
+            delivery.destination,
+            head.specification.destination,
+        ))
         return null;
     const outcome = output orelse return null;
     if (input == .delivery and outcome == .delivery) return switch (outcome.delivery) {

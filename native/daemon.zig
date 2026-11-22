@@ -33,7 +33,14 @@ pub fn Daemon(comptime Types: type) type {
                 on_start: bool = true,
                 enabled: *const fn () bool,
                 read_only: ?*const fn (std.mem.Allocator, []const u8) bool = null,
-                call: *const fn (*anyopaque, std.mem.Allocator, *Driver, u32, []const u8, *const Index) anyerror![]const u8,
+                call: *const fn (
+                    *anyopaque,
+                    std.mem.Allocator,
+                    *Driver,
+                    u32,
+                    []const u8,
+                    *const Index,
+                ) anyerror![]const u8,
             } = null,
             call: *const fn (
                 *anyopaque,
@@ -112,14 +119,19 @@ pub fn Daemon(comptime Types: type) type {
             var read: ScheduledRead = .{ .daemon = self };
             const scheduled = blk: {
                 if (self.control.observation) |observer| {
-                    if (handled_controls < self.config.controls_per_poll and observer.read_only != null and observer.enabled())
-                        self.driver.after_rebuild = .{ .context = &read, .observe = readWhileScheduling };
+                    if (handled_controls < self.config.controls_per_poll and
+                        observer.read_only != null and observer.enabled())
+                        self.driver.after_rebuild = .{
+                            .context = &read,
+                            .observe = readWhileScheduling,
+                        };
                 }
                 defer self.driver.after_rebuild = null;
                 break :blk try self.schedule(a);
             };
             const advanced = !self.session.busy() and try self.session.advance(a) == .progressed;
-            return if (handled_controls != 0 or read.handled or scheduled or completion != .none or advanced)
+            return if (handled_controls != 0 or read.handled or scheduled or
+                completion != .none or advanced)
                 .progressed
             else
                 .idle;
@@ -133,7 +145,11 @@ pub fn Daemon(comptime Types: type) type {
             return handled;
         }
 
-        fn readWhileScheduling(context: *anyopaque, a: std.mem.Allocator, index: *const Index) !void {
+        fn readWhileScheduling(
+            context: *anyopaque,
+            a: std.mem.Allocator,
+            index: *const Index,
+        ) !void {
             const read: *ScheduledRead = @ptrCast(@alignCast(context));
             const observer = read.daemon.control.observation.?;
             if (observer.enabled()) read.handled = try read.daemon.controlOne(a, index, .{
@@ -142,12 +158,24 @@ pub fn Daemon(comptime Types: type) type {
             });
         }
 
-        fn controlOne(self: *Self, a: std.mem.Allocator, attachment: ?*const Index, selection: ?socket.Selection) !bool {
+        fn controlOne(
+            self: *Self,
+            a: std.mem.Allocator,
+            attachment: ?*const Index,
+            selection: ?socket.Selection,
+        ) !bool {
             var request = (try self.server.pollSelected(selection)) orelse return false;
             defer request.deinit();
             const handler = self.control;
             const response = if (attachment) |index|
-                try handler.observation.?.call(handler.context, a, self.driver, request.uid, request.bytes, index)
+                try handler.observation.?.call(
+                    handler.context,
+                    a,
+                    self.driver,
+                    request.uid,
+                    request.bytes,
+                    index,
+                )
             else
                 try handler.call(handler.context, a, self.driver, request.uid, request.bytes);
             self.server.respond(request.token, response) catch |err| switch (err) {
@@ -160,7 +188,10 @@ pub fn Daemon(comptime Types: type) type {
         fn schedule(self: *Self, a: std.mem.Allocator) !bool {
             switch (self.scheduling) {
                 .retained => {
-                    const resumed = try self.driver.resumeRetained(a, self.config.obligations_per_poll);
+                    const resumed = try self.driver.resumeRetained(
+                        a,
+                        self.config.obligations_per_poll,
+                    );
                     self.scheduling = .import_turns;
                     return resumed != 0;
                 },
@@ -170,7 +201,10 @@ pub fn Daemon(comptime Types: type) type {
                     return imported;
                 },
                 .recover_turns => {
-                    const replacements = try self.driver.recoverTurns(a, self.config.obligations_per_poll);
+                    const replacements = try self.driver.recoverTurns(
+                        a,
+                        self.config.obligations_per_poll,
+                    );
                     defer a.free(replacements);
                     self.scheduling = .turn_deliveries;
                     return replacements.len != 0;

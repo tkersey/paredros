@@ -451,7 +451,11 @@ fn needsEscape(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
 pub fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var width = try b.constant(u64, 4);
     inline for (.{ .{ 240, 3 }, .{ 224, 2 }, .{ 128, 1 } }) |entry|
-        width = try b.select(try b.less(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), width);
+        width = try b.select(
+            try b.less(byte, try b.constant(u8, entry[0])),
+            try b.constant(u64, entry[1]),
+            width,
+        );
     return width;
 }
 
@@ -459,7 +463,11 @@ pub fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
 pub fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var cost = try b.constant(u64, 1);
     inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 } }) |entry|
-        cost = try b.select(try b.equal(byte, try b.constant(u8, entry[0])), try b.constant(u64, entry[1]), cost);
+        cost = try b.select(
+            try b.equal(byte, try b.constant(u8, entry[0])),
+            try b.constant(u64, entry[1]),
+            cost,
+        );
     return cost;
 }
 
@@ -494,13 +502,20 @@ fn spanScanner(c: protean.Context) !Scan {
         .cost = try raw.checked(.add, cost, try scalarCost(raw, byte), .{ .overflow = overflow }),
         .limit = limit,
     });
-    const scanned = try more.conditional(try needsEscape(more, byte), try escape.ret(span), try raw.ret(next));
+    const scanned = try more.conditional(
+        try needsEscape(more, byte),
+        try escape.ret(span),
+        try raw.ret(next),
+    );
     const active = try b.select(
         try b.less(cost, limit),
         try b.less(end, try b.blobLength(input)),
         try b.constant(bool, false),
     );
-    try c.author.define(scan, try b.ret(try b.conditional(active, try more.ret(scanned), try done.ret(span))));
+    try c.author.define(
+        scan,
+        try b.ret(try b.conditional(active, try more.ret(scanned), try done.ret(span))),
+    );
     return scan;
 }
 
@@ -522,7 +537,12 @@ fn textPiece(
         .input = input,
         .end = try raw.checked(.add, index, try scalarWidth(raw, byte), .{ .overflow = bounds }),
         .cost = try scalarCost(raw, byte),
-        .limit = try raw.checked(.subtract, try raw.constant(u64, budget + 1), used, .{ .overflow = overflow }),
+        .limit = try raw.checked(
+            .subtract,
+            try raw.constant(u64, budget + 1),
+            used,
+            .{ .overflow = overflow },
+        ),
     });
     const end = try raw.field(span, "end");
     const text = try raw.blobSlice(try c.schema(Text), input, index, end, .{

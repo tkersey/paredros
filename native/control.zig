@@ -138,10 +138,22 @@ fn execute(
     const request = try decodeRequest(a, parsed.value);
     const origin: t.Origin = .{ .local = .{ .uid = uid } };
     if (readOnly(request)) {
-        if (validated) |index| return inspect(a, driver.service, index, request, try driver.clock.now(driver.clock.context));
+        if (validated) |index| return inspect(
+            a,
+            driver.service,
+            index,
+            request,
+            try driver.clock.now(driver.clock.context),
+        );
         var index = try driver.rebuild(a);
         defer index.deinit();
-        return inspect(a, driver.service, &index, request, try driver.clock.now(driver.clock.context));
+        return inspect(
+            a,
+            driver.service,
+            &index,
+            request,
+            try driver.clock.now(driver.clock.context),
+        );
     }
     const operation_id = try operation(request);
     if (request.command != .transfer_export and request.command != .transfer_import and
@@ -158,7 +170,11 @@ fn execute(
 pub fn observingFrame(a: std.mem.Allocator, bytes: []const u8) bool {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var parsed = native.json.parse(arena.allocator(), bytes, .{ .bytes = frame_bytes_max }) catch return false;
+    var parsed = native.json.parse(
+        arena.allocator(),
+        bytes,
+        .{ .bytes = frame_bytes_max },
+    ) catch return false;
     defer parsed.deinit();
     const request = decodeRequest(arena.allocator(), parsed.value) catch return false;
     return readOnly(request);
@@ -409,11 +425,19 @@ fn inspect(
     const data = switch (request.command) {
         .status => |value| try status(a, service, index, clock_ms, value.after, value.limit),
         .monitor_show => |id| try monitor(a, index, id, clock_ms),
-        .monitor_directives => |page| try pendingDirectives(a, index, page.target, page.after, page.limit),
+        .monitor_directives => |page| try pendingDirectives(
+            a,
+            index,
+            page.target,
+            page.after,
+            page.limit,
+        ),
         .task_show => |id| try task(a, index, id),
-        .method_show => |id| try native.values.toJson(t.Method, a, index.head(
-            index.obligation(id) orelse return error.UnknownObligation,
-        ).method),
+        .method_show => |id| try native.values.toJson(
+            t.Method,
+            a,
+            index.head(index.obligation(id) orelse return error.UnknownObligation).method,
+        ),
         .delivery_show => |key| try deliveries(a, index, key),
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
@@ -503,7 +527,12 @@ fn status(
     const bytes = try namespaceBytes(service.io, .{ .handle = service.namespace.directory });
     try native.json.put(a, &result, "namespace_bytes", try native.values.toJson(u64, a, bytes));
     var daemon = native.json.object();
-    try native.json.put(a, &daemon, "application_version", service.application.metadata.object.get("application_version").?);
+    try native.json.put(
+        a,
+        &daemon,
+        "application_version",
+        service.application.metadata.object.get("application_version").?,
+    );
     try native.json.put(a, &daemon, "artifact_sha256", native.json.string(
         try a.dupe(u8, &std.fmt.bytesToHex(service.profile.runtime_identity, .lower)),
     ));
@@ -599,8 +628,18 @@ fn appendPending(
     for (obligation.directives) |position| {
         if (index.records[position].input.directive.ordinal > folded) total += 1;
     }
-    try native.json.put(a, result, "pending_directives_total", try native.values.toJson(u64, a, total));
-    try native.json.put(a, result, "folded_directive_ordinal", try native.values.toJson(u64, a, folded));
+    try native.json.put(
+        a,
+        result,
+        "pending_directives_total",
+        try native.values.toJson(u64, a, total),
+    );
+    try native.json.put(
+        a,
+        result,
+        "folded_directive_ordinal",
+        try native.values.toJson(u64, a, folded),
+    );
     var pending: std.array_list.Managed(native.json.Value) = .init(a);
     var cursor = @max(after orelse folded, folded);
     var more = false;
@@ -613,8 +652,17 @@ fn appendPending(
         }
         try pending.append(try native.values.toJson(t.Directive, a, directive));
         try native.json.put(a, result, "pending_directives", .{ .array = pending });
-        try native.json.put(a, result, "pending_directives_next", try native.values.toJson(u64, a, directive.ordinal));
-        if (!try native.json.fits(a, try reply(a, "observed", result.*), .{ .bytes = frame_bytes_max })) {
+        try native.json.put(
+            a,
+            result,
+            "pending_directives_next",
+            try native.values.toJson(u64, a, directive.ordinal),
+        );
+        if (!try native.json.fits(
+            a,
+            try reply(a, "observed", result.*),
+            .{ .bytes = frame_bytes_max },
+        )) {
             _ = pending.pop();
             if (pending.items.len == 0) return error.Capacity;
             more = true;
@@ -623,7 +671,12 @@ fn appendPending(
         cursor = directive.ordinal;
     }
     try native.json.put(a, result, "pending_directives", .{ .array = pending });
-    try native.json.put(a, result, "pending_directives_next", try native.values.toJson(?u64, a, if (more) cursor else null));
+    try native.json.put(
+        a,
+        result,
+        "pending_directives_next",
+        try native.values.toJson(?u64, a, if (more) cursor else null),
+    );
 }
 
 fn task(a: std.mem.Allocator, index: *const idx.Index, id: t.Id) !native.json.Value {

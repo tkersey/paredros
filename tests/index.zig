@@ -663,9 +663,19 @@ test "index copied batches must be the contiguous outstanding prefix" {
         } else {
             try std.testing.expectError(
                 error.BatchCoverageGap,
-                idx.Index.init(Native, std.testing.allocator, &.{ rendering, completed, initial }, &.{}),
+                idx.Index.init(
+                    Native,
+                    std.testing.allocator,
+                    &.{ rendering, completed, initial },
+                    &.{},
+                ),
             );
-            var index = try idx.Index.init(Native, std.testing.allocator, &.{ completed, initial }, &.{});
+            var index = try idx.Index.init(
+                Native,
+                std.testing.allocator,
+                &.{ completed, initial },
+                &.{},
+            );
             defer index.deinit();
             const backlog = try @import("../native/materialize.zig").backlog(
                 std.testing.allocator,
@@ -983,7 +993,10 @@ test "index materialization freezes ordered controls and owner facts into a vali
     defer rebuilt.deinit();
     try std.testing.expectEqual(0, rebuilt.obligation(initial.input.task).?.eligible.?);
     try std.testing.expect(!rebuilt.obligation(initial.input.task).?.ordinaryDispatch());
-    try std.testing.expectError(error.LiveStep, materialize.step(a, &rebuilt, @splat(1), 901, null));
+    try std.testing.expectError(
+        error.LiveStep,
+        materialize.step(a, &rebuilt, @splat(1), 901, null),
+    );
 }
 
 test "index materialization accounts changed revisions without repeating a consumed cut" {
@@ -1007,7 +1020,10 @@ test "index materialization accounts changed revisions without repeating a consu
     defer last.deinit();
     try std.testing.expectEqual(1, last.value.facts.items.len);
     try std.testing.expectEqualDeep(second.input.task, last.value.facts.items[0].reference.task);
-    try std.testing.expectEqual(@as(?t.RevisionReference, null), last.value.facts.items[0].previous_reference);
+    try std.testing.expectEqual(
+        @as(?t.RevisionReference, null),
+        last.value.facts.items[0].previous_reference,
+    );
 }
 
 test "index dispatch gate fences a selected step immediately after restrictive admission" {
@@ -1032,9 +1048,10 @@ test "index dispatch gate fences a selected step immediately after restrictive a
     var restricted = try idx.Index.init(Native, a, &.{ pending, live, initial }, &.{});
     defer restricted.deinit();
     try std.testing.expect(!try gate.permits(a, &restricted, request, 100));
-    try std.testing.expectEqual(t.Mode.active, restricted.head(
-        restricted.obligation(initial.input.task).?,
-    ).mode);
+    try std.testing.expectEqual(
+        t.Mode.active,
+        restricted.head(restricted.obligation(initial.input.task).?).mode,
+    );
     var unsupported = request;
     unsupported.kind = .placement_move;
     try std.testing.expect(!try gate.permits(a, &ordinary, unsupported, 100));
@@ -1047,7 +1064,12 @@ test "index replacement binds current cancelled admission and preserves predeces
     const initial = try genesis(a);
     const old_input = step(head(), ref(initial), "old-attempt");
     const old = try row(a, 2, .{ .step = old_input }, null);
-    const pending = try row(a, 3, .{ .directive = directive("pause-replace", 1, null, .{ .pause = {} }) }, null);
+    const pending = try row(
+        a,
+        3,
+        .{ .directive = directive("pause-replace", 1, null, .{ .pause = {} }) },
+        null,
+    );
     var index = try idx.Index.init(Native, a, &.{ pending, old, initial }, &.{});
     defer index.deinit();
     const materialize = @import("../native/materialize.zig");
@@ -1075,12 +1097,20 @@ test "index replacement binds current cancelled admission and preserves predeces
         .bytes = supersession.cancellation.bytes.bytes,
         .revision = old.input.revision,
     };
-    var rebuilt = try idx.Index.init(Native, a, &.{ admitted, old, pending, initial }, &.{cancellation});
+    var rebuilt = try idx.Index.init(
+        Native,
+        a,
+        &.{ admitted, old, pending, initial },
+        &.{cancellation},
+    );
     defer rebuilt.deinit();
     try std.testing.expect(rebuilt.record(old.input.task).?.superseded);
     try std.testing.expectEqual(0, rebuilt.obligation(@splat(1)).?.eligible.?);
     supersession.input.digest[0] ^= 1;
-    try std.testing.expectError(error.StaleSupersession, materialize.replacement(a, &index, @splat(1), 501, null, supersession));
+    try std.testing.expectError(
+        error.StaleSupersession,
+        materialize.replacement(a, &index, @splat(1), 501, null, supersession),
+    );
 }
 
 fn conversation(a: std.mem.Allocator, id: u8, ordinal: u64, text: []const u8) !idx.Row {
@@ -1093,7 +1123,12 @@ fn conversation(a: std.mem.Allocator, id: u8, ordinal: u64, text: []const u8) !i
         .context = .{ .bytes = "" },
         .context_references = .{ .items = &.{} },
         .attempt = 0,
-    } }, .{ .turn = .{ .reply = .{ .bytes = "unconfirmed assistant text" }, .proposals = .{ .items = &.{} } } });
+    } }, .{
+        .turn = .{
+            .reply = .{ .bytes = "unconfirmed assistant text" },
+            .proposals = .{ .items = &.{} },
+        },
+    });
 }
 
 test "index dialogue context orders admitted turns and owns its bounded provenance" {
@@ -1114,11 +1149,20 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     defer context.deinit();
     try std.testing.expectEqual(3, context.value.next_ordinal);
     try std.testing.expectEqual(2, context.value.references.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, context.value.text.bytes, "newer operator text") != null);
-    try std.testing.expect(std.mem.indexOf(u8, context.value.text.bytes, "older operator text") == null);
-    try std.testing.expect(std.mem.indexOf(u8, context.value.text.bytes, "\"reply_delivery_confirmed\":false") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, context.value.text.bytes, "newer operator text") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, context.value.text.bytes, "older operator text") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, context.value.text.bytes, "\"reply_delivery_confirmed\":false") != null,
+    );
     try std.testing.expectEqual(6, context.value.offers.items.len);
-    try std.testing.expectEqual(fixture.specification().revision, context.value.expected_revision.?);
+    try std.testing.expectEqual(
+        fixture.specification().revision,
+        context.value.expected_revision.?,
+    );
 }
 
 test "index dialogue context reports omitted whole records and rejects other destination" {
@@ -1137,10 +1181,19 @@ test "index dialogue context reports omitted whole records and rejects other des
     defer context.deinit();
     try std.testing.expect(context.value.text.bytes.len <= 256);
     try std.testing.expectEqual(0, context.value.references.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, context.value.text.bytes, "\"omitted_records\":1") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, context.value.text.bytes, "\"omitted_records\":1") != null,
+    );
     var other = fixture.specification().destination;
     other.channel.bytes = "DOTHER";
-    try std.testing.expectError(error.ConversationBindingMismatch, dialogue.materialize(std.testing.allocator, &index, .{ .destination = other, .target = @splat(1) }));
+    try std.testing.expectError(
+        error.ConversationBindingMismatch,
+        dialogue.materialize(
+            std.testing.allocator,
+            &index,
+            .{ .destination = other, .target = @splat(1) },
+        ),
+    );
 }
 
 test "index driver admits a clock regression before the stale due instant" {

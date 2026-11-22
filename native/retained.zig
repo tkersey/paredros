@@ -142,7 +142,13 @@ pub fn copyEvidence(a: std.mem.Allocator, evidence: Evidence) !Evidence {
         target.* = try copyAttempt(a, source);
         copied += 1;
     }
-    return .{ .status = evidence.status, .input = input, .result = result, .profile_bytes = profile, .attempts = attempts };
+    return .{
+        .status = evidence.status,
+        .input = input,
+        .result = result,
+        .profile_bytes = profile,
+        .attempts = attempts,
+    };
 }
 
 fn copyValue(a: std.mem.Allocator, value: index.Value) !index.Value {

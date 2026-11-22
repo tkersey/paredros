@@ -65,4 +65,8 @@ pub fn Reader(comptime contract: type, comptime Input: type, comptime Result: ty
 const DeliveryReader = Reader(@import("audit_contract.zig"), t.Audit, t.AuditResult);
 pub const Function = DeliveryReader.EntryFunction;
 pub const emit = DeliveryReader.emit;
-pub const Lineage = Reader(@import("lineage_audit_contract.zig"), t.LineageAudit, t.LineageAuditResult);
+pub const Lineage = Reader(
+    @import("lineage_audit_contract.zig"),
+    t.LineageAudit,
+    t.LineageAuditResult,
+);

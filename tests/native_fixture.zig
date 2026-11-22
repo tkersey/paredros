@@ -142,7 +142,10 @@ pub fn Fixture(comptime Types: type, comptime Application: type) type {
                 .application = Application,
             }));
             defer compiled.deinit();
-            if (declaration_count == 0) try std.testing.expectEqual(0, compiled.program.effects.len);
+            if (declaration_count == 0) try std.testing.expectEqual(
+                0,
+                compiled.program.effects.len,
+            );
             const image = try a.alloc(
                 u8,
                 try horos.data.program_image.encodedLength(compiled.program),

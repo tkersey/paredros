@@ -402,10 +402,14 @@ test "control socket response bounds preserve pending state and close an oversiz
     try std.testing.expectError(error.Disconnected, client.request("{}"));
 }
 
-test "control socket can enqueue a response within its write budget before the next owner operation" {
+test "control socket enqueues a response within its write budget before the next owner operation" {
     var directory = try Directory.init();
     defer directory.deinit();
-    var server = try transport.Server.init(a, directory.socket, .{ .operator_uid = transport.currentUid() });
+    var server = try transport.Server.init(
+        a,
+        directory.socket,
+        .{ .operator_uid = transport.currentUid() },
+    );
     defer server.deinit();
     var client = try transport.Client.init(a, directory.socket, .{});
     defer client.deinit();

@@ -8,7 +8,12 @@ const a = std.testing.allocator;
 fn intent() t.DeliveryIntent {
     return .{
         .destination = fixtures.specification().destination,
-        .key = .{ .lineage = @splat(1), .purpose = .digest, .identity = @splat(2), .generation = 1 },
+        .key = .{
+            .lineage = @splat(1),
+            .purpose = .digest,
+            .identity = @splat(2),
+            .generation = 1,
+        },
         .payload = .{
             .obligation = @splat(3),
             .specification_revision = 1,
@@ -39,10 +44,23 @@ fn materialization(allocator: std.mem.Allocator) !void {
         .digest = @splat(8),
     }, @splat(6), "B2");
     defer second.deinit();
-    try std.testing.expectEqualSlices(u8, first.value.payload.wire_json.bytes, second.value.payload.wire_json.bytes);
-    try std.testing.expectEqual(first.value.envelope.stable_request, second.value.envelope.stable_request);
-    try std.testing.expectEqualStrings(first.value.envelope.operation.bytes, second.value.envelope.operation.bytes);
-    try std.testing.expect(!std.meta.eql(first.value.envelope.origin.derived.predecessor, second.value.envelope.origin.derived.predecessor));
+    try std.testing.expectEqualSlices(
+        u8,
+        first.value.payload.wire_json.bytes,
+        second.value.payload.wire_json.bytes,
+    );
+    try std.testing.expectEqual(
+        first.value.envelope.stable_request,
+        second.value.envelope.stable_request,
+    );
+    try std.testing.expectEqualStrings(
+        first.value.envelope.operation.bytes,
+        second.value.envelope.operation.bytes,
+    );
+    try std.testing.expect(!std.meta.eql(
+        first.value.envelope.origin.derived.predecessor,
+        second.value.envelope.origin.derived.predecessor,
+    ));
 }
 
 test "delivery preparation has stable wire identity independent of producer and current bot" {
@@ -79,7 +97,10 @@ test "delivery preparation checks seals operation and envelope before accepting 
 test "delivery preparation refuses inconsistent coverage and freezes route escaping" {
     var logical = intent();
     logical.payload.coverage.?.sequence = 4;
-    try std.testing.expectError(error.InvalidPayload, prepare.materialize(a, logical, .{ .task = @splat(4), .digest = @splat(5) }, @splat(6), ""));
+    try std.testing.expectError(
+        error.InvalidPayload,
+        prepare.materialize(a, logical, .{ .task = @splat(4), .digest = @splat(5) }, @splat(6), ""),
+    );
     logical = intent();
     logical.payload.comparison.?.repository.owner.bytes = "a/b";
     logical.payload.comparison.?.repository.name.bytes = "r?x";
@@ -89,5 +110,11 @@ test "delivery preparation refuses inconsistent coverage and freezes route escap
     }, @splat(6), "");
     defer frozen.deinit();
     try prepare.verifyStored(a, frozen.value);
-    try std.testing.expect(std.mem.indexOf(u8, frozen.value.payload.wire_json.bytes, "https://github.com/a%2Fb/r%3Fx/compare/") != null);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            frozen.value.payload.wire_json.bytes,
+            "https://github.com/a%2Fb/r%3Fx/compare/",
+        ) != null,
+    );
 }

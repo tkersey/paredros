@@ -49,7 +49,11 @@ pub fn admit(
         driver: @TypeOf(driver),
         value: Request,
 
-        pub fn materialize(self: @This(), frame: std.mem.Allocator, requested: admission.Request) !t.Input {
+        pub fn materialize(
+            self: @This(),
+            frame: std.mem.Allocator,
+            requested: admission.Request,
+        ) !t.Input {
             var index = try self.driver.rebuild(frame);
             defer index.deinit();
             try uniqueAttempt(&index, self.value.campaign, self.value.attempt);
@@ -133,7 +137,13 @@ pub fn authenticatePlan(
         },
         .compare => |value| {
             for (value.candidates.items) |candidate| {
-                var source = try methods.source(a, index, candidate.source.source, candidate.source.source_digest, candidate.source.contract_digest);
+                var source = try methods.source(
+                    a,
+                    index,
+                    candidate.source.source,
+                    candidate.source.source_digest,
+                    candidate.source.contract_digest,
+                );
                 defer source.deinit();
                 if (!try equal(a, t.RetainedMethodSource, candidate.source, source.value))
                     return error.MethodSourceMismatch;
@@ -157,7 +167,11 @@ fn authenticateCase(a: std.mem.Allocator, index: *const idx.Index, selected: e.C
     if (!try equal(a, t.Head, step.previous, selected.input.head))
         return error.ExperimentHeadMismatch;
     for (index.records) |record| {
-        if (record.input != .step or !std.mem.eql(u8, record.input.step.envelope.operation.bytes, step.envelope.operation.bytes)) continue;
+        if (record.input != .step or !std.mem.eql(
+            u8,
+            record.input.step.envelope.operation.bytes,
+            step.envelope.operation.bytes,
+        )) continue;
         if (!try equal(a, t.Step, record.input.step, step)) return error.ExperimentInputMismatch;
         return;
     }

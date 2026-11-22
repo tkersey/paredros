@@ -97,7 +97,14 @@ fn compose(
 
 fn controlBoundary(pending: []const t.DirectiveFact) bool {
     for (pending) |fact| switch (fact.value.body) {
-        .adopt, .revert, .@"resume", .recovery_hold, .recovery_release, .audit, .frontier_audit => return true,
+        .adopt,
+        .revert,
+        .@"resume",
+        .recovery_hold,
+        .recovery_release,
+        .audit,
+        .frontier_audit,
+        => return true,
         else => {},
     };
     return false;
@@ -135,7 +142,14 @@ fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
             target,
         ),
         .turn => |value| sameTarget(value.target, target),
-        .genesis, .directive, .experiment, .continuity_member, .continuity_cut, .restore, .lineage_audit => false,
+        .genesis,
+        .directive,
+        .experiment,
+        .continuity_member,
+        .continuity_cut,
+        .restore,
+        .lineage_audit,
+        => false,
     };
 }
 
@@ -269,7 +283,11 @@ pub const Backlog = struct {
     } = null,
 };
 
-pub fn backlog(a: std.mem.Allocator, index: *const idx.Index, obligation: *const idx.Obligation) !Backlog {
+pub fn backlog(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+) !Backlog {
     const head = index.head(obligation);
     const count = try std.math.sub(u64, head.observed.sequence, head.told.sequence);
     if (count == 0) return .{ .untold_batches = 0 };
@@ -279,7 +297,10 @@ pub fn backlog(a: std.mem.Allocator, index: *const idx.Index, obligation: *const
         if (output != .step) continue;
         const batch = output.step.batch orelse continue;
         if (batch.sequence == wanted)
-            return backlogWithEvidence(count, .{ .reference = index.reference(position), .value = batch });
+            return backlogWithEvidence(
+                count,
+                .{ .reference = index.reference(position), .value = batch },
+            );
     }
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

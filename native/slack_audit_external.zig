@@ -130,7 +130,11 @@ fn reject(
     return .{ .captured = encoded };
 }
 
-fn initialLineage(a: std.mem.Allocator, audit: t.LineageAudit, bot: []const u8) !slack.HistoryAudit {
+fn initialLineage(
+    a: std.mem.Allocator,
+    audit: t.LineageAudit,
+    bot: []const u8,
+) !slack.HistoryAudit {
     if (audit.page_limit == 0 or audit.destination.account.bytes.len == 0)
         return error.InvalidAudit;
     return slack.HistoryAudit.initLineage(
@@ -357,7 +361,9 @@ fn Handler(comptime lineage: bool) type {
                     .complete };
             } else {
                 return .{ .done = switch (history.finding()) {
-                    .present => |ts| .{ .found = .{ .timestamp = .{ .bytes = try a.dupe(u8, ts) } } },
+                    .present => |ts| .{
+                        .found = .{ .timestamp = .{ .bytes = try a.dupe(u8, ts) } },
+                    },
                     .not_observed => .{ .not_observed = .{
                         .oldest = request.audit.oldest,
                         .latest = request.audit.latest orelse return error.InvalidAuditFinding,

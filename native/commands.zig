@@ -54,7 +54,16 @@ pub fn genesis(
     specification: t.Specification,
 ) !t.Id {
     try authenticate(driver, origin);
-    return admitGenesis(driver, a, operation, origin, specification, try admission.stableDigest(a, specification), false, null);
+    return admitGenesis(
+        driver,
+        a,
+        operation,
+        origin,
+        specification,
+        try admission.stableDigest(a, specification),
+        false,
+        null,
+    );
 }
 
 pub fn monitor(
@@ -65,7 +74,16 @@ pub fn monitor(
     specification: t.Specification,
 ) !t.Id {
     try authenticate(driver, origin);
-    return admitGenesis(driver, a, operation, origin, specification, try admission.stableDigest(a, specification), true, null);
+    return admitGenesis(
+        driver,
+        a,
+        operation,
+        origin,
+        specification,
+        try admission.stableDigest(a, specification),
+        true,
+        null,
+    );
 }
 
 fn admitGenesis(
@@ -94,7 +112,11 @@ fn admitGenesis(
         specification: t.Specification,
         anchor_now: bool,
 
-        pub fn materialize(self: @This(), allocator: std.mem.Allocator, requested: admission.Request) !t.Input {
+        pub fn materialize(
+            self: @This(),
+            allocator: std.mem.Allocator,
+            requested: admission.Request,
+        ) !t.Input {
             const envelope: t.Envelope = .{
                 .operation = .{ .bytes = requested.operation },
                 .stable_request = requested.digest,
@@ -138,16 +160,23 @@ pub fn turn(
         .target = requested_turn.target,
         .origin = origin,
         .ingress = requested_turn.ingress,
-        .digest = try admission.stableDigest(scratch, @as(struct { operation: c.Utf8, request: TurnRequest }, .{
-            .operation = .{ .bytes = operation },
-            .request = requested_turn,
-        })),
+        .digest = try admission.stableDigest(
+            scratch,
+            @as(struct { operation: c.Utf8, request: TurnRequest }, .{
+                .operation = .{ .bytes = operation },
+                .request = requested_turn,
+            }),
+        ),
     };
     const Materializer = struct {
         driver: @TypeOf(driver),
         request: TurnRequest,
 
-        pub fn materialize(self: @This(), allocator: std.mem.Allocator, requested: admission.Request) !t.Input {
+        pub fn materialize(
+            self: @This(),
+            allocator: std.mem.Allocator,
+            requested: admission.Request,
+        ) !t.Input {
             var index = try self.driver.rebuild(allocator);
             defer index.deinit();
             var frozen = self.request;
@@ -249,14 +278,26 @@ pub fn confirmIngress(
     var index = try driver.rebuild(a);
     defer index.deinit();
     const selected = try proposal(&index, confirmation);
-    const identity: struct { confirmation: Confirmation, target: ?t.Id, body: @FieldType(t.Proposal, "body") } = .{
+    const identity: struct { confirmation: Confirmation, target: ?t.Id, body: @FieldType(
+        t.Proposal,
+        "body",
+    ) } = .{
         .confirmation = confirmation,
         .target = selected.target,
         .body = selected.body,
     };
     const digest = try admission.stableDigest(a, identity);
     return switch (selected.body) {
-        .genesis => |specification| try admitGenesis(driver, a, operation, origin, specification, digest, false, ingress),
+        .genesis => |specification| try admitGenesis(
+            driver,
+            a,
+            operation,
+            origin,
+            specification,
+            digest,
+            false,
+            ingress,
+        ),
         .directive => |body| try driver.directiveIngress(
             a,
             operation,

@@ -113,7 +113,10 @@ fn nativeTests(
         if (filter != null)
             std.debug.panic("native-partition cannot be combined with test-filter", .{});
         if (selected == null or (selected.? != .continuity and selected.? != .transitions))
-            std.debug.panic("native-partition requires continuity or transitions native-group", .{});
+            std.debug.panic(
+                "native-partition requires continuity or transitions native-group",
+                .{},
+            );
     }
     const execute = b.step("test-native", "Run every selected native owner group");
     const compile = b.step("build-native-tests", "Build every selected native owner group");
@@ -340,7 +343,11 @@ const ProductAssets = struct {
 
 // WriteFiles names its output directory by content but can replace identical
 // files there. Cache the copy by that directory so Zig sees stable link inputs.
-fn stableFile(b: *std.Build, content_directory: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+fn stableFile(
+    b: *std.Build,
+    content_directory: std.Build.LazyPath,
+    name: []const u8,
+) std.Build.LazyPath {
     const copy = b.addSystemCommand(&.{ "cp", name });
     copy.setCwd(content_directory);
     return copy.addOutputFileArg2(name, .{ .make_absolute = true });
@@ -349,12 +356,20 @@ fn stableFile(b: *std.Build, content_directory: std.Build.LazyPath, name: []cons
 fn stabilizeClangObjects(b: *std.Build, dependency: *std.Build.Dependency) void {
     const inputs = dependency.namedLazyPath("native-clang-inputs");
     for (dependency.module("protean_native").link_objects.items) |linked| {
-        if (linked != .other_step or !std.mem.eql(u8, linked.other_step.name, "protean-native-c")) continue;
+        if (linked != .other_step or !std.mem.eql(
+            u8,
+            linked.other_step.name,
+            "protean-native-c",
+        )) continue;
         for (linked.other_step.root_module.link_objects.items) |*object| {
             if (object.* != .static_path or object.static_path != .generated) continue;
             const path = object.static_path.generated;
             if (path.index != inputs.generated.index or path.up != 0) continue;
-            if (std.mem.eql(u8, path.sub_path, "sqlite3.o") or std.mem.eql(u8, path.sub_path, "native_c.o")) {
+            if (std.mem.eql(
+                u8,
+                path.sub_path,
+                "sqlite3.o",
+            ) or std.mem.eql(u8, path.sub_path, "native_c.o")) {
                 object.static_path = stableFile(b, inputs, path.sub_path);
             }
         }

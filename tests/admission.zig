@@ -38,13 +38,23 @@ const Store = struct {
         return null;
     }
 
-    pub fn applicationValue(self: *Store, a: std.mem.Allocator, task: t.Id, _: enum { input }) !?Input {
+    pub fn applicationValue(
+        self: *Store,
+        a: std.mem.Allocator,
+        task: t.Id,
+        _: enum { input },
+    ) !?Input {
         if (!std.meta.eql(task, self.task)) return error.InvalidTask;
         const bytes = self.bytes orelse return null;
         return .{ .a = a, .bytes = try a.dupe(u8, bytes) };
     }
 
-    pub fn submit(self: *Store, a: std.mem.Allocator, operation: []const u8, value: t.Input) !struct {
+    pub fn submit(
+        self: *Store,
+        a: std.mem.Allocator,
+        operation: []const u8,
+        value: t.Input,
+    ) !struct {
         task: t.Id,
         replayed: bool,
     } {
@@ -68,7 +78,11 @@ const Materializer = struct {
     calls: u32 = 0,
     clock_ms: i64 = 100,
 
-    pub fn materialize(self: *Materializer, _: std.mem.Allocator, requested: admission.Request) !t.Input {
+    pub fn materialize(
+        self: *Materializer,
+        _: std.mem.Allocator,
+        requested: admission.Request,
+    ) !t.Input {
         self.calls += 1;
         var value = fixture.genesis();
         value.clock_ms = self.clock_ms;

@@ -29,7 +29,12 @@ const marker: slack.Marker = .{
 };
 const history_limits: slack.HistoryLimits = .{ .pages = 4, .messages = 20, .page_bytes = 65536 };
 
-fn envelope(allocator: std.mem.Allocator, id: []const u8, event: []const u8, body: []const u8) ![]u8 {
+fn envelope(
+    allocator: std.mem.Allocator,
+    id: []const u8,
+    event: []const u8,
+    body: []const u8,
+) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, .{
         .envelope_id = id,
         .type = "events_api",
@@ -38,12 +43,24 @@ fn envelope(allocator: std.mem.Allocator, id: []const u8, event: []const u8, bod
             .team_id = "T1",
             .type = "event_callback",
             .event_id = event,
-            .event = .{ .type = "message", .user = "U1", .channel = "D1", .channel_type = "im", .ts = "1730000000.000001", .text = body },
+            .event = .{
+                .type = "message",
+                .user = "U1",
+                .channel = "D1",
+                .channel_type = "im",
+                .ts = "1730000000.000001",
+                .text = body,
+            },
         },
     }, .{});
 }
 
-fn modified(allocator: std.mem.Allocator, bytes: []const u8, path: []const []const u8, value: std.json.Value) ![]u8 {
+fn modified(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    path: []const []const u8,
+    value: std.json.Value,
+) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     var cursor = &parsed.value;
@@ -64,14 +81,37 @@ fn interaction(allocator: std.mem.Allocator, prepared: slack.Prepared, id: []con
             .team = .{ .id = "T1" },
             .user = .{ .id = "U1" },
             .channel = .{ .id = "D1" },
-            .container = .{ .type = "message", .channel_id = "D1", .message_ts = "1730000000.000003" },
-            .message = .{ .app_id = "A1", .bot_id = "B1", .team = "T1", .ts = "1730000000.000003", .text = "Slack rendered this differently", .blocks = parsed.value.object.get("blocks").?, .metadata = parsed.value.object.get("metadata").? },
-            .actions = .{.{ .type = "button", .block_id = button.block_id, .action_id = button.action_id, .value = button.value, .action_ts = "1730000000.000004" }},
+            .container = .{
+                .type = "message",
+                .channel_id = "D1",
+                .message_ts = "1730000000.000003",
+            },
+            .message = .{
+                .app_id = "A1",
+                .bot_id = "B1",
+                .team = "T1",
+                .ts = "1730000000.000003",
+                .text = "Slack rendered this differently",
+                .blocks = parsed.value.object.get("blocks").?,
+                .metadata = parsed.value.object.get("metadata").?,
+            },
+            .actions = .{.{
+                .type = "button",
+                .block_id = button.block_id,
+                .action_id = button.action_id,
+                .value = button.value,
+                .action_ts = "1730000000.000004",
+            }},
         },
     }, .{});
 }
 
-fn historyMessage(allocator: std.mem.Allocator, prepared: slack.Prepared, ts: []const u8, app: []const u8) ![]u8 {
+fn historyMessage(
+    allocator: std.mem.Allocator,
+    prepared: slack.Prepared,
+    ts: []const u8,
+    app: []const u8,
+) ![]u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, prepared.body, .{});
     defer parsed.deinit();
     return std.json.Stringify.valueAlloc(allocator, .{
@@ -85,7 +125,12 @@ fn historyMessage(allocator: std.mem.Allocator, prepared: slack.Prepared, ts: []
     }, .{});
 }
 
-fn historyPage(allocator: std.mem.Allocator, messages: []const []const u8, cursor: []const u8, more: bool) ![]u8 {
+fn historyPage(
+    allocator: std.mem.Allocator,
+    messages: []const []const u8,
+    cursor: []const u8,
+    more: bool,
+) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -106,7 +151,10 @@ test "Slack timestamp comparisons retain precision beyond floating point and tra
     const first = try slack.Timestamp.parse("9007199254740993.000001");
     const second = try slack.Timestamp.parse("9007199254740993.000002");
     try std.testing.expectEqual(.lt, first.order(second));
-    try std.testing.expectEqual(.eq, (try slack.Timestamp.parse("1.10")).order(try slack.Timestamp.parse("1.1")));
+    try std.testing.expectEqual(
+        .eq,
+        (try slack.Timestamp.parse("1.10")).order(try slack.Timestamp.parse("1.1")),
+    );
     for ([_][]const u8{ "1", "1.", ".1", "01.1", "1e3.1", "1.1.1", "-1.0" }) |bad|
         try std.testing.expectError(error.InvalidTimestamp, slack.Timestamp.parse(bad));
 }
@@ -124,18 +172,40 @@ test "Slack event identity survives envelope changes while conflicting stable co
     defer second.deinit();
     var third = try slack.parseEnvelope(a, binding, changed, .{});
     defer third.deinit();
-    try std.testing.expectEqual(first.disposition.text.operation, second.disposition.text.operation);
-    try std.testing.expectEqual(first.disposition.text.stable_request, second.disposition.text.stable_request);
+    try std.testing.expectEqual(
+        first.disposition.text.operation,
+        second.disposition.text.operation,
+    );
+    try std.testing.expectEqual(
+        first.disposition.text.stable_request,
+        second.disposition.text.stable_request,
+    );
     try std.testing.expectEqual(first.disposition.text.operation, third.disposition.text.operation);
-    try std.testing.expect(!std.meta.eql(first.disposition.text.stable_request, third.disposition.text.stable_request));
+    try std.testing.expect(
+        !std.meta.eql(first.disposition.text.stable_request, third.disposition.text.stable_request),
+    );
     try std.testing.expectEqualStrings("yes", first.disposition.text.text);
 }
 
-test "Slack ingress rejects forged origins unsupported messages duplicate keys and oversized input" {
+test "Slack ingress rejects forged origins unsupported messages duplicate keys and oversize input" {
     const original = try envelope(a, "envelope", "event", "ordinary text");
     defer a.free(original);
-    for ([_][]const u8{ "user", "channel", "channel_type", "subtype", "thread_ts", "bot_id", "files", "edited" }) |field| {
-        const changed = try modified(a, original, &.{ "payload", "event", field }, .{ .string = "other" });
+    for ([_][]const u8{
+        "user",
+        "channel",
+        "channel_type",
+        "subtype",
+        "thread_ts",
+        "bot_id",
+        "files",
+        "edited",
+    }) |field| {
+        const changed = try modified(
+            a,
+            original,
+            &.{ "payload", "event", field },
+            .{ .string = "other" },
+        );
         defer a.free(changed);
         var result = try slack.parseEnvelope(a, binding, changed, .{});
         defer result.deinit();
@@ -148,7 +218,12 @@ test "Slack ingress rejects forged origins unsupported messages duplicate keys a
         defer result.deinit();
         try std.testing.expectEqual(.wrong_origin, result.disposition.ignored);
     }
-    var duplicate = try slack.parseEnvelope(a, binding, "{\"envelope_id\":\"a\",\"envelope_id\":\"b\"}", .{});
+    var duplicate = try slack.parseEnvelope(
+        a,
+        binding,
+        "{\"envelope_id\":\"a\",\"envelope_id\":\"b\"}",
+        .{},
+    );
     defer duplicate.deinit();
     try std.testing.expectEqual(.malformed, duplicate.disposition.ignored);
     var oversized = try slack.parseEnvelope(a, binding, original, .{ .envelope_bytes = 4 });
@@ -177,19 +252,60 @@ test "Slack button identity is envelope independent and requires retained exact 
     defer first.deinit();
     var second = try slack.parseEnvelope(a, binding, retry, .{});
     defer second.deinit();
-    try std.testing.expectEqual(first.disposition.interaction.operation, second.disposition.interaction.operation);
+    try std.testing.expectEqual(
+        first.disposition.interaction.operation,
+        second.disposition.interaction.operation,
+    );
     try slack.bindInteraction(a, first.disposition.interaction, prepared, button, null);
-    try slack.bindInteraction(a, first.disposition.interaction, prepared, button, "1730000000.000003");
-    try std.testing.expectError(error.UnboundInteraction, slack.bindInteraction(a, first.disposition.interaction, prepared, button, "1730000000.000002"));
+    try slack.bindInteraction(
+        a,
+        first.disposition.interaction,
+        prepared,
+        button,
+        "1730000000.000003",
+    );
+    try std.testing.expectError(
+        error.UnboundInteraction,
+        slack.bindInteraction(
+            a,
+            first.disposition.interaction,
+            prepared,
+            button,
+            "1730000000.000002",
+        ),
+    );
     var other = button;
     other.value = "other digest";
-    try std.testing.expectError(error.UnboundInteraction, slack.bindInteraction(a, first.disposition.interaction, prepared, other, null));
+    try std.testing.expectError(
+        error.UnboundInteraction,
+        slack.bindInteraction(a, first.disposition.interaction, prepared, other, null),
+    );
     var wrong_binding = binding;
     wrong_binding.channel_id = "D2";
-    var wrong_destination = try slack.prepare(a, wrong_binding, "Pause watch at revision 2", &.{button}, marker);
+    var wrong_destination = try slack.prepare(
+        a,
+        wrong_binding,
+        "Pause watch at revision 2",
+        &.{button},
+        marker,
+    );
     defer wrong_destination.deinit();
-    try std.testing.expectError(error.UnboundInteraction, slack.bindInteraction(a, first.disposition.interaction, wrong_destination, button, "1730000000.000003"));
-    const wrong_app = try modified(a, bytes, &.{ "payload", "message", "app_id" }, .{ .string = "A2" });
+    try std.testing.expectError(
+        error.UnboundInteraction,
+        slack.bindInteraction(
+            a,
+            first.disposition.interaction,
+            wrong_destination,
+            button,
+            "1730000000.000003",
+        ),
+    );
+    const wrong_app = try modified(
+        a,
+        bytes,
+        &.{ "payload", "message", "app_id" },
+        .{ .string = "A2" },
+    );
     defer a.free(wrong_app);
     var refused = try slack.parseEnvelope(a, binding, wrong_app, .{});
     defer refused.deinit();
@@ -197,7 +313,13 @@ test "Slack button identity is envelope independent and requires retained exact 
 }
 
 test "Slack output disables parsing escapes mentions and bounds rendered fields" {
-    var prepared = try slack.prepare(a, binding, "<& @here <@U2> https://example.com", &.{button}, marker);
+    var prepared = try slack.prepare(
+        a,
+        binding,
+        "<& @here <@U2> https://example.com",
+        &.{button},
+        marker,
+    );
     defer prepared.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, a, prepared.body, .{});
     defer parsed.deinit();
@@ -205,12 +327,21 @@ test "Slack output disables parsing escapes mentions and bounds rendered fields"
     try std.testing.expectEqualStrings("none", fields.get("parse").?.string);
     for ([_][]const u8{ "mrkdwn", "link_names", "unfurl_links", "unfurl_media" }) |field|
         try std.testing.expect(!fields.get(field).?.bool);
-    try std.testing.expectEqualStrings("&lt;&amp; @here &lt;@U2&gt; https://example.com", fields.get("text").?.string);
+    try std.testing.expectEqualStrings(
+        "&lt;&amp; @here &lt;@U2&gt; https://example.com",
+        fields.get("text").?.string,
+    );
     const section = fields.get("blocks").?.array.items[0].object.get("text").?;
     try std.testing.expectEqualStrings("plain_text", section.object.get("type").?.string);
     var next_marker = marker;
     next_marker.generation = std.math.maxInt(u64);
-    var retry = try slack.prepare(a, binding, "<& @here <@U2> https://example.com", &.{button}, next_marker);
+    var retry = try slack.prepare(
+        a,
+        binding,
+        "<& @here <@U2> https://example.com",
+        &.{button},
+        next_marker,
+    );
     defer retry.deinit();
     try std.testing.expectEqual(prepared.marker.content, retry.marker.content);
     const too_long = try a.alloc(u8, 4001);
@@ -228,7 +359,10 @@ test "Slack comparison blocks preserve long Unicode text and escaped entities ac
     for (0..2998) |_| try body.appendSlice(a, "é");
     try body.append(a, '&');
     for (0..500) |_| try body.appendSlice(a, "日");
-    const link: slack.Link = .{ .label = "Comparison", .url = "https://github.com/o/r/compare/a...b" };
+    const link: slack.Link = .{
+        .label = "Comparison",
+        .url = "https://github.com/o/r/compare/a...b",
+    };
     var prepared = try slack.prepareLinked(a, binding, body.items, &.{button}, &.{link}, marker);
     defer prepared.deinit();
     try std.testing.expectEqual(4, prepared.blocks.array.items.len);
@@ -242,11 +376,20 @@ test "Slack comparison blocks preserve long Unicode text and escaped entities ac
     try std.testing.expectEqualStrings(body.items[0..5996], text.items[0..5996]);
     try std.testing.expectEqualStrings("&amp;", text.items[5996..6001]);
     try std.testing.expectEqualStrings(body.items[5997..], text.items[6001..]);
-    try std.testing.expectEqualStrings(body.items[0..5996], prepared.blocks.array.items[0].object.get("text").?.object.get("text").?.string);
+    try std.testing.expectEqualStrings(
+        body.items[0..5996],
+        prepared.blocks.array.items[0].object.get("text").?.object.get("text").?.string,
+    );
     var duplicate = button;
     duplicate.block_id = "paredros_verified_comparison";
-    try std.testing.expectError(error.DuplicateBlock, slack.prepareLinked(a, binding, body.items, &.{duplicate}, &.{link}, marker));
-    try std.testing.expectError(error.Oversized, slack.prepareLinked(a, binding, body.items, &.{}, &.{ link, link }, marker));
+    try std.testing.expectError(
+        error.DuplicateBlock,
+        slack.prepareLinked(a, binding, body.items, &.{duplicate}, &.{link}, marker),
+    );
+    try std.testing.expectError(
+        error.Oversized,
+        slack.prepareLinked(a, binding, body.items, &.{}, &.{ link, link }, marker),
+    );
 }
 
 test "Slack history positive match authenticates marker without comparing rewritten prose" {
@@ -256,7 +399,15 @@ test "Slack history positive match authenticates marker without comparing rewrit
     defer a.free(message);
     const page = try historyPage(a, &.{message}, "", false);
     defer a.free(page);
-    var audit = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var audit = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer audit.deinit();
     try audit.ingest(audit.request(), .{ .status = 200, .body = page });
     try std.testing.expectEqualStrings("1730000000.000003", audit.finding().present);
@@ -265,13 +416,21 @@ test "Slack history positive match authenticates marker without comparing rewrit
     defer a.free(other);
     const foreign = try historyPage(a, &.{other}, "", false);
     defer a.free(foreign);
-    var denied = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var denied = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer denied.deinit();
     try denied.ingest(denied.request(), .{ .status = 200, .body = foreign });
     try std.testing.expectEqual(.no_canary, denied.finding().inconclusive);
 }
 
-test "Slack negative history requires canary and cursor exhaustion despite a short has_more false page" {
+test "Slack negative history requires canary and cursor exhaustion despite short has_more false" {
     var prepared = try slack.prepare(a, binding, "wanted", &.{}, marker);
     defer prepared.deinit();
     var canary_marker = marker;
@@ -284,7 +443,15 @@ test "Slack negative history requires canary and cursor exhaustion despite a sho
     defer a.free(first);
     const last = try historyPage(a, &.{}, "", false);
     defer a.free(last);
-    var audit = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", .{ .timestamp = "1730000000.000001", .marker = canary.marker }, history_limits);
+    var audit = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        .{ .timestamp = "1730000000.000001", .marker = canary.marker },
+        history_limits,
+    );
     defer audit.deinit();
     try std.testing.expect(audit.request().inclusive and audit.request().include_all_metadata);
     try audit.ingest(audit.request(), .{ .status = 200, .body = first });
@@ -294,7 +461,7 @@ test "Slack negative history requires canary and cursor exhaustion despite a sho
     try std.testing.expect(audit.finding() == .not_observed);
 }
 
-test "Slack history conflicting matches unmarked app messages cursor cycles and budgets remain inconclusive" {
+test "Slack history conflicts unmarked app messages cursor cycles and budgets remain inconclusive" {
     var prepared = try slack.prepare(a, binding, "wanted", &.{}, marker);
     defer prepared.deinit();
     const first = try historyMessage(a, prepared, "1730000000.000003", "A1");
@@ -303,7 +470,15 @@ test "Slack history conflicting matches unmarked app messages cursor cycles and 
     defer a.free(second);
     const duplicate = try historyPage(a, &.{ first, second }, "", false);
     defer a.free(duplicate);
-    var audit = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var audit = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer audit.deinit();
     try audit.ingest(audit.request(), .{ .status = 200, .body = duplicate });
     try std.testing.expectEqual(.conflict, audit.finding().inconclusive);
@@ -311,70 +486,174 @@ test "Slack history conflicting matches unmarked app messages cursor cycles and 
     defer a.free(missing);
     const unmarked = try historyPage(a, &.{missing}, "", false);
     defer a.free(unmarked);
-    var unclear = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var unclear = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer unclear.deinit();
     try unclear.ingest(unclear.request(), .{ .status = 200, .body = unmarked });
     try std.testing.expectEqual(.metadata, unclear.finding().inconclusive);
     const repeated = try historyPage(a, &.{}, "cycle", false);
     defer a.free(repeated);
-    var cycle = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var cycle = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer cycle.deinit();
     try cycle.ingest(cycle.request(), .{ .status = 200, .body = repeated });
     try cycle.ingest(cycle.request(), .{ .status = 200, .body = repeated });
     try std.testing.expectEqual(.cursor, cycle.finding().inconclusive);
-    var limited = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, .{ .pages = 0, .messages = 1, .page_bytes = 65536 });
+    var limited = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        .{ .pages = 0, .messages = 1, .page_bytes = 65536 },
+    );
     defer limited.deinit();
     try limited.ingest(limited.request(), .{ .status = 200, .body = duplicate });
     try std.testing.expectEqual(.budget, limited.finding().inconclusive);
 }
 
-test "Slack delivery classifies only reviewed pre-effect failures and retains confirmed degraded markers" {
-    for ([_][]const u8{ "fatal_error", "internal_error", "unknown_error", "duplicate_message" }) |failure| {
-        const body = try std.json.Stringify.valueAlloc(a, .{ .ok = false, .@"error" = failure }, .{});
+test "Slack delivery classifies only reviewed pre-effect failures and keeps confirmed degradation" {
+    for ([_][]const u8{
+        "fatal_error",
+        "internal_error",
+        "unknown_error",
+        "duplicate_message",
+    }) |failure| {
+        const body = try std.json.Stringify.valueAlloc(
+            a,
+            .{ .ok = false, .@"error" = failure },
+            .{},
+        );
         defer a.free(body);
-        var result = try slack.interpretDelivery(a, binding, marker, .{ .status = 200, .body = body }, 65536);
+        var result = try slack.interpretDelivery(
+            a,
+            binding,
+            marker,
+            .{ .status = 200, .body = body },
+            65536,
+        );
         defer result.deinit();
         try std.testing.expect(result.outcome == .indeterminate);
     }
-    var rejected = try slack.interpretDelivery(a, binding, marker, .{ .status = 200, .body = "{\"ok\":false,\"error\":\"invalid_auth\"}" }, 65536);
+    var rejected = try slack.interpretDelivery(
+        a,
+        binding,
+        marker,
+        .{ .status = 200, .body = "{\"ok\":false,\"error\":\"invalid_auth\"}" },
+        65536,
+    );
     defer rejected.deinit();
     try std.testing.expect(!rejected.outcome.rejected.retryable);
-    var limited = try slack.interpretDelivery(a, binding, marker, .{ .status = 429, .body = "{\"ok\":false,\"error\":\"ratelimited\"}" }, 65536);
+    var limited = try slack.interpretDelivery(
+        a,
+        binding,
+        marker,
+        .{ .status = 429, .body = "{\"ok\":false,\"error\":\"ratelimited\"}" },
+        65536,
+    );
     defer limited.deinit();
     try std.testing.expect(limited.outcome.rejected.retryable);
-    var confirmed = try slack.interpretDelivery(a, binding, marker, .{ .status = 200, .body = "{\"ok\":true,\"channel\":\"D1\",\"ts\":\"1730000000.000003\",\"response_metadata\":{\"warnings\":[\"message_truncated\"]}}" }, 65536);
+    var confirmed = try slack.interpretDelivery(
+        a,
+        binding,
+        marker,
+        .{
+            .status = 200,
+            .body = "{\"ok\":true,\"channel\":\"D1\",\"ts\":\"1730000000.000003\"," ++
+                "\"response_metadata\":{\"warnings\":[\"message_truncated\"]}}",
+        },
+        65536,
+    );
     defer confirmed.deinit();
     try std.testing.expect(confirmed.outcome.confirmed.metadata_degraded);
     try std.testing.expect(confirmed.outcome.confirmed.rendering_fault);
-    var malformed = try slack.interpretDelivery(a, binding, marker, .{ .status = 200, .body = "{" }, 65536);
+    var malformed = try slack.interpretDelivery(
+        a,
+        binding,
+        marker,
+        .{ .status = 200, .body = "{" },
+        65536,
+    );
     defer malformed.deinit();
     try std.testing.expect(malformed.outcome == .indeterminate);
 }
 
-test "Slack history rejects wrong destinations metadata conflicts incomplete windows and invalid markers" {
+test "Slack history rejects wrong destinations metadata conflicts partial windows bad markers" {
     var prepared = try slack.prepare(a, binding, "wanted", &.{}, marker);
     defer prepared.deinit();
     const message = try historyMessage(a, prepared, "1730000000.000003", "A1");
     defer a.free(message);
-    const corrupted = try modified(a, message, &.{ "metadata", "event_payload", "covered_observation" }, .{ .string = "5" });
+    const corrupted = try modified(
+        a,
+        message,
+        &.{ "metadata", "event_payload", "covered_observation" },
+        .{ .string = "5" },
+    );
     defer a.free(corrupted);
     const page = try historyPage(a, &.{corrupted}, "", false);
     defer a.free(page);
-    var conflict = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var conflict = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer conflict.deinit();
     try conflict.ingest(conflict.request(), .{ .status = 200, .body = page });
     try std.testing.expectEqual(.conflict, conflict.finding().inconclusive);
-    var wrong = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var wrong = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer wrong.deinit();
     var request = wrong.request();
     request.channel = "D2";
-    try std.testing.expectError(error.InvalidHistoryRequest, wrong.ingest(request, .{ .status = 200, .body = page }));
+    try std.testing.expectError(
+        error.InvalidHistoryRequest,
+        wrong.ingest(request, .{ .status = 200, .body = page }),
+    );
     try std.testing.expectEqual(.incomplete, wrong.finding().inconclusive);
-    const malformed = try modified(a, message, &.{ "metadata", "event_payload", "generation" }, .{ .integer = 1 });
+    const malformed = try modified(
+        a,
+        message,
+        &.{ "metadata", "event_payload", "generation" },
+        .{ .integer = 1 },
+    );
     defer a.free(malformed);
     const invalid_page = try historyPage(a, &.{malformed}, "", false);
     defer a.free(invalid_page);
-    var invalid = try slack.HistoryAudit.init(a, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var invalid = try slack.HistoryAudit.init(
+        a,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer invalid.deinit();
     try invalid.ingest(invalid.request(), .{ .status = 200, .body = invalid_page });
     try std.testing.expectEqual(.metadata, invalid.finding().inconclusive);
@@ -387,10 +666,30 @@ fn allocationWitness(allocator: std.mem.Allocator) !void {
     defer ingress.deinit();
     var prepared = try slack.prepare(allocator, binding, "request", &.{button}, marker);
     defer prepared.deinit();
-    var audit = try slack.HistoryAudit.init(allocator, binding, prepared.marker, "1730000000.000001", "1730000000.000009", null, history_limits);
+    var audit = try slack.HistoryAudit.init(
+        allocator,
+        binding,
+        prepared.marker,
+        "1730000000.000001",
+        "1730000000.000009",
+        null,
+        history_limits,
+    );
     defer audit.deinit();
-    try audit.ingest(audit.request(), .{ .status = 200, .body = "{\"ok\":true,\"messages\":[],\"response_metadata\":{\"next_cursor\":\"\"}}" });
-    var result = try slack.interpretDelivery(allocator, binding, marker, .{ .status = 200, .body = "{\"ok\":true,\"channel\":\"D1\",\"ts\":\"1730000000.000003\"}" }, 65536);
+    try audit.ingest(
+        audit.request(),
+        .{
+            .status = 200,
+            .body = "{\"ok\":true,\"messages\":[],\"response_metadata\":{\"next_cursor\":\"\"}}",
+        },
+    );
+    var result = try slack.interpretDelivery(
+        allocator,
+        binding,
+        marker,
+        .{ .status = 200, .body = "{\"ok\":true,\"channel\":\"D1\",\"ts\":\"1730000000.000003\"}" },
+        65536,
+    );
     defer result.deinit();
 }
 

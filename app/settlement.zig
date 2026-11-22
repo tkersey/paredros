@@ -107,7 +107,11 @@ fn deliveryKind(c: protean.Context, b: anytype, fact: a.Value(t.Settlement)) !a.
     const delivery = try b.equal(kind, try b.enumTag(try c.literal(Kind, .delivery)));
     const audit = try b.equal(kind, try b.enumTag(try c.literal(Kind, .audit)));
     const interaction = try b.equal(kind, try b.enumTag(try c.literal(Kind, .interaction)));
-    return b.select(delivery, try b.constant(bool, true), try b.select(audit, try b.constant(bool, true), interaction));
+    return b.select(
+        delivery,
+        try b.constant(bool, true),
+        try b.select(audit, try b.constant(bool, true), interaction),
+    );
 }
 
 fn accounting(

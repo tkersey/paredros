@@ -766,7 +766,13 @@ pub fn committedBundle(
 fn privateDescriptor(fd: std.c.fd_t) !void {
     if (@import("builtin").os.tag == .linux) {
         var status: std.os.linux.Statx = undefined;
-        if (std.c.statx(fd, "", std.c.AT.EMPTY_PATH, .{ .UID = true, .MODE = true }, &status) != 0) return error.TransferPathUnavailable;
+        if (std.c.statx(
+            fd,
+            "",
+            std.c.AT.EMPTY_PATH,
+            .{ .UID = true, .MODE = true },
+            &status,
+        ) != 0) return error.TransferPathUnavailable;
         if (!status.mask.UID or !status.mask.MODE) return error.TransferPathUnavailable;
         if (status.uid != std.c.geteuid() or status.mode & 0o077 != 0)
             return error.UnsafeTransferPath;

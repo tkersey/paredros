@@ -495,7 +495,10 @@ fn scanHistory(f: *Fixture, driver: *Driver, target: t.Id) !HistoryWitness {
     try std.testing.expectEqual(.active, previous.mode);
     try std.testing.expect(previous.next_due_ms <= 500);
     if (f.profile.authority.grants.len != 1) return error.UnexpectedHistoryAuthority;
-    try std.testing.expectEqualStrings(lineage_contract.identity, f.profile.authority.grants[0].identity);
+    try std.testing.expectEqualStrings(
+        lineage_contract.identity,
+        f.profile.authority.grants[0].identity,
+    );
     const scans = try driver.audits(a, target);
     defer a.free(scans);
     if (scans.len != 1) return error.LineageScanMissing;

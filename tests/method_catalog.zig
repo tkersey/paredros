@@ -179,18 +179,28 @@ test "method catalog binds retained bytes to registration and independent qualif
     try std.testing.expectEqualStrings("retained source bytes", source.value.bytes.bytes);
     var wrong = fixture.selected;
     wrong.source_digest[0] ^= 1;
-    try std.testing.expectError(error.UnqualifiedMethod, catalog.qualified(a, &fixture.index, wrong));
+    try std.testing.expectError(
+        error.UnqualifiedMethod,
+        catalog.qualified(a, &fixture.index, wrong),
+    );
     wrong = fixture.selected;
     wrong.report.digest[0] ^= 1;
-    try std.testing.expectError(error.InvalidExperiment, catalog.qualified(a, &fixture.index, wrong));
+    try std.testing.expectError(
+        error.InvalidExperiment,
+        catalog.qualified(a, &fixture.index, wrong),
+    );
     wrong = fixture.selected;
     wrong.applicability[0] ^= 1;
-    try std.testing.expectError(error.InvalidMethodQualification, catalog.qualified(a, &fixture.index, wrong));
+    try std.testing.expectError(
+        error.InvalidMethodQualification,
+        catalog.qualified(a, &fixture.index, wrong),
+    );
     wrong = fixture.selected;
     wrong.state.bytes = "unqualified cache";
-    try std.testing.expectError(error.InvalidInitialMethodState, catalog.adoption(a, &fixture.index, .{
-        .retained = wrong,
-    }));
+    try std.testing.expectError(
+        error.InvalidInitialMethodState,
+        catalog.adoption(a, &fixture.index, .{ .retained = wrong }),
+    );
 }
 
 test "method catalog rejects absent runs despite a claimed qualification count" {
@@ -202,7 +212,10 @@ test "method catalog rejects absent runs despite a claimed qualification count" 
     decoded.value.runs.items = &.{};
     fixture.index.records[1] = try record(frame, 3, "comparison plan", decoded.value);
     fixture.selected.report = fixture.index.reference(1);
-    try std.testing.expectError(error.UnqualifiedMethod, catalog.qualified(a, &fixture.index, fixture.selected));
+    try std.testing.expectError(
+        error.UnqualifiedMethod,
+        catalog.qualified(a, &fixture.index, fixture.selected),
+    );
 }
 
 test "method catalog preserves returned source after releasing the retained index" {

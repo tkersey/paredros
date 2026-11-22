@@ -81,16 +81,33 @@ fn verify(
         .channel_id = actor.channel.bytes,
         .bot_id = proof.bot_id.bytes,
     };
-    const identity = slack.interactionDigest(binding, proof.message_timestamp.bytes, ingress.timestamp.bytes, proof.block_id.bytes, proof.action_id.bytes, proof.value.bytes);
+    const identity = slack.interactionDigest(
+        binding,
+        proof.message_timestamp.bytes,
+        ingress.timestamp.bytes,
+        proof.block_id.bytes,
+        proof.action_id.bytes,
+        proof.value.bytes,
+    );
     if (!std.meta.eql(identity, ingress.stable_request)) return error.InvalidInteractionIdentity;
     const operation = try std.fmt.allocPrint(a, "slack:{s}", .{
         std.fmt.bytesToHex(identity, .lower),
     });
     defer a.free(operation);
-    if (!std.mem.eql(u8, operation, envelope.operation.bytes)) return error.InvalidInteractionIdentity;
+    if (!std.mem.eql(
+        u8,
+        operation,
+        envelope.operation.bytes,
+    )) return error.InvalidInteractionIdentity;
     var message = try std.json.parseFromSlice(std.json.Value, a, proof.message.bytes, .{});
     defer message.deinit();
-    var prepared = try preparation.verify(a, delivery.destination, delivery.key, delivery.payload, proof.bot_id.bytes);
+    var prepared = try preparation.verify(
+        a,
+        delivery.destination,
+        delivery.key,
+        delivery.payload,
+        proof.bot_id.bytes,
+    );
     defer prepared.deinit();
     const timestamp = try knownTimestamp(a, source);
     const button = try selectedButton(delivery, proof);

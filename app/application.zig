@@ -45,7 +45,13 @@ pub const Application = struct {
         );
         const lineage_reader = try audit.Lineage.emit(c);
         const lineage_contract = @import("lineage_audit_contract.zig");
-        const lineage_read = try operation(c, lineage_reader, lineage_contract.Request, lineage_contract.Reply, lineage_contract.identity);
+        const lineage_read = try operation(
+            c,
+            lineage_reader,
+            lineage_contract.Request,
+            lineage_contract.Reply,
+            lineage_contract.identity,
+        );
         const method_ops = try method.declare(c);
         const render_effects = .{ inference, method_ops.workspace, method_ops.codec };
         const retained = try method.emit(c, method_ops, completion, render_effects);
@@ -66,11 +72,17 @@ pub const Application = struct {
             .turn = try turn.emit(c, completion, .{inference}),
             .audit = history_reader,
             .lineage_audit = lineage_reader,
-            .experiment = try experiment.emit(c, experiment_ops, method_ops, completion, experiment_effects),
+            .experiment = try experiment.emit(
+                c,
+                experiment_ops,
+                method_ops,
+                completion,
+                experiment_effects,
+            ),
         };
         const ordinary = try dispatch(c, functions, .{
-            github_read,          inference,            history_read, method_ops.workspace, method_ops.codec,
-            experiment_ops.codec, experiment_ops.clock, lineage_read,
+            github_read,      inference,            history_read,         method_ops.workspace,
+            method_ops.codec, experiment_ops.codec, experiment_ops.clock, lineage_read,
         });
         const published = try c.author.module(ordinary, try c.schema(t.Failure));
         const prefix = protean.notification.identity_prefix;

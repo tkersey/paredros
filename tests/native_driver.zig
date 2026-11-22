@@ -57,8 +57,14 @@ test "native driver admits controls once and reconstructs its pause fence after 
     try std.testing.expectEqual(t.Mode.paused, after.head(after.obligation(target).?).mode);
     try std.testing.expectEqual(1, after.head(after.obligation(target).?).folded_directive_ordinal);
     after.deinit();
-    try std.testing.expectEqualDeep(control, try driver.directive(a, "driver-pause", origin, target, .{ .pause = {} }));
-    try std.testing.expectError(error.OperationConflict, driver.directive(a, "driver-pause", origin, target, .{ .@"resume" = {} }));
+    try std.testing.expectEqualDeep(
+        control,
+        try driver.directive(a, "driver-pause", origin, target, .{ .pause = {} }),
+    );
+    try std.testing.expectError(
+        error.OperationConflict,
+        driver.directive(a, "driver-pause", origin, target, .{ .@"resume" = {} }),
+    );
     driver.detach();
     try fixture.close();
     try fixture.open();
@@ -69,7 +75,10 @@ test "native driver admits controls once and reconstructs its pause fence after 
     defer reopened.deinit();
     try std.testing.expectEqual(t.Mode.paused, reopened.head(reopened.obligation(target).?).mode);
     try std.testing.expectEqual(@as(?t.Id, null), try driver.nextStep(a, target));
-    try std.testing.expectEqualDeep(control, try driver.directive(a, "driver-pause", origin, target, .{ .pause = {} }));
+    try std.testing.expectEqualDeep(
+        control,
+        try driver.directive(a, "driver-pause", origin, target, .{ .pause = {} }),
+    );
 }
 
 test {
@@ -91,7 +100,13 @@ test "native driver replaces a fenced live step with a receipt bound fold" {
     try driver.attach(a);
     defer driver.detach();
     const old = (try driver.nextStep(a, target)).?;
-    _ = try driver.directive(a, "pause-live-step", .{ .local = .{ .uid = 501 } }, target, .{ .pause = {} });
+    _ = try driver.directive(
+        a,
+        "pause-live-step",
+        .{ .local = .{ .uid = 501 } },
+        target,
+        .{ .pause = {} },
+    );
     const replacement = (try driver.nextStep(a, target)).?;
     try std.testing.expect(!std.meta.eql(old, replacement));
     var before = try driver.rebuild(a);
@@ -99,7 +114,10 @@ test "native driver replaces a fenced live step with a receipt bound fold" {
     try std.testing.expect(successor.fold_only);
     try std.testing.expectEqual(1, successor.attempt);
     try std.testing.expectEqualDeep(old, successor.supersession.?.input.task);
-    try std.testing.expectEqualDeep(before.record(old).?.input.step.predecessor, successor.predecessor);
+    try std.testing.expectEqualDeep(
+        before.record(old).?.input.step.predecessor,
+        successor.predecessor,
+    );
     before.deinit();
     try finish(&fixture, replacement);
     var after = try driver.rebuild(a);
@@ -139,7 +157,10 @@ test "native driver freezes turn context on first admission and rejects changed 
     try std.testing.expectEqualDeep(turn, try driver.turn(a, "driver-turn", origin, request));
     var changed = request;
     changed.text.bytes = "different";
-    try std.testing.expectError(error.OperationConflict, driver.turn(a, "driver-turn", origin, changed));
+    try std.testing.expectError(
+        error.OperationConflict,
+        driver.turn(a, "driver-turn", origin, changed),
+    );
     var index = try driver.rebuild(a);
     defer index.deinit();
     const record = index.record(turn).?;
@@ -174,7 +195,10 @@ test "native driver bounds turn replacement and preserves its original context t
     try fixture.init();
     const a = fixture.arena.allocator();
     var clock: Clock = .{};
-    var driver: Driver = .{ .service = &fixture.service.?, .clock = .{ .context = &clock, .now = Clock.now } };
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
     try driver.attach(a);
     defer driver.detach();
     const initial = try driver.turn(a, "turn-cancelled", .{ .local = .{ .uid = 501 } }, .{
@@ -203,10 +227,21 @@ test "native driver bounds turn replacement and preserves its original context t
     try std.testing.expect(index.record(first[0]).?.superseded);
     try std.testing.expect(!after.superseded);
     try std.testing.expectEqual(2, after.input.turn.attempt);
-    try std.testing.expectEqualStrings(before.input.turn.context.bytes, after.input.turn.context.bytes);
-    try std.testing.expectEqualDeep(before.input.turn.context_references, after.input.turn.context_references);
-    try std.testing.expectEqualDeep(before.input.turn.envelope.stable_request, after.input.turn.envelope.stable_request);
-    try std.testing.expect(std.mem.find(u8, after.result.?.turn.reply.bytes, "could not complete") != null);
+    try std.testing.expectEqualStrings(
+        before.input.turn.context.bytes,
+        after.input.turn.context.bytes,
+    );
+    try std.testing.expectEqualDeep(
+        before.input.turn.context_references,
+        after.input.turn.context_references,
+    );
+    try std.testing.expectEqualDeep(
+        before.input.turn.envelope.stable_request,
+        after.input.turn.envelope.stable_request,
+    );
+    try std.testing.expect(
+        std.mem.find(u8, after.result.?.turn.reply.bytes, "could not complete") != null,
+    );
     try std.testing.expectEqual(0, (try driver.recoverTurns(a, 8)).len);
 }
 
@@ -217,7 +252,10 @@ test "native driver replaces parked incompatible folds and retains pending contr
         try fixture.init();
         const a = fixture.arena.allocator();
         const initial = fixture_values.genesis();
-        const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+        const target = try fixture.execute(
+            initial.envelope.operation.bytes,
+            .{ .genesis = initial },
+        );
         var clock: Clock = .{};
         var driver: Driver = .{
             .service = &fixture.service.?,
@@ -225,7 +263,13 @@ test "native driver replaces parked incompatible folds and retains pending contr
         };
         try driver.attach(a);
         defer driver.detach();
-        const directive = try driver.directive(a, "upgrade-pause", .{ .local = .{ .uid = 501 } }, target, .{ .pause = {} });
+        const directive = try driver.directive(
+            a,
+            "upgrade-pause",
+            .{ .local = .{ .uid = 501 } },
+            target,
+            .{ .pause = {} },
+        );
         const ordinary = (try driver.nextStep(a, target)).?;
         const old = (try driver.nextStep(a, target)).?;
         try std.testing.expect(!std.meta.eql(ordinary, old));
@@ -260,7 +304,10 @@ test "native driver replaces parked incompatible folds and retains pending contr
         var after = try driver.rebuild(a);
         defer after.deinit();
         try std.testing.expectEqual(.paused, after.head(after.obligation(target).?).mode);
-        try std.testing.expectEqual(1, after.head(after.obligation(target).?).folded_directive_ordinal);
+        try std.testing.expectEqual(
+            1,
+            after.head(after.obligation(target).?).folded_directive_ordinal,
+        );
         try std.testing.expectEqual(@as(?t.Id, null), try driver.nextStep(a, target));
     }
 }
@@ -296,8 +343,14 @@ test "native driver replaces a parked turn under changed runtime with frozen con
     try std.testing.expect(original.superseded);
     try std.testing.expectEqual(1, successor.input.turn.attempt);
     try std.testing.expectEqualDeep(old, successor.input.turn.replacement.?.input.task);
-    try std.testing.expectEqualStrings(original.input.turn.context.bytes, successor.input.turn.context.bytes);
-    try std.testing.expectEqualDeep(original.input.turn.context_references, successor.input.turn.context_references);
+    try std.testing.expectEqualStrings(
+        original.input.turn.context.bytes,
+        successor.input.turn.context.bytes,
+    );
+    try std.testing.expectEqualDeep(
+        original.input.turn.context_references,
+        successor.input.turn.context_references,
+    );
     index.deinit();
     try finish(&fixture, next);
     try std.testing.expectEqual(0, (try driver.recoverTurns(a, 8)).len);

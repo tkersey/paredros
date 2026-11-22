@@ -9,7 +9,11 @@ pub fn attempted(record: anytype) !t.Phase {
     for (snapshot.attempts.items) |attempt| {
         const next: t.Phase = if (std.mem.eql(u8, attempt.capability.bytes, github.identity))
             .check
-        else if (attempt.inference or std.mem.eql(u8, attempt.capability.bytes, method.workspace_identity))
+        else if (attempt.inference or std.mem.eql(
+            u8,
+            attempt.capability.bytes,
+            method.workspace_identity,
+        ))
             .render
         else
             continue;

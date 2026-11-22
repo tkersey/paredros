@@ -131,15 +131,26 @@ pub fn wire(
     };
     var links: []const slack.Link = &.{};
     if (intent.payload.comparison) |comparison| {
-        const url = try std.fmt.allocPrint(scratch, "https://github.com/{s}/{s}/compare/{s}...{s}", .{
-            try route(scratch, comparison.repository.owner.bytes),
-            try route(scratch, comparison.repository.name.bytes),
-            comparison.base,
-            comparison.tip,
-        });
+        const url = try std.fmt.allocPrint(
+            scratch,
+            "https://github.com/{s}/{s}/compare/{s}...{s}",
+            .{
+                try route(scratch, comparison.repository.owner.bytes),
+                try route(scratch, comparison.repository.name.bytes),
+                comparison.base,
+                comparison.tip,
+            },
+        );
         links = try scratch.dupe(slack.Link, &.{.{ .label = "Comparison", .url = url }});
     }
-    return slack.prepareLinked(a, binding(intent.destination, bot_id), intent.payload.frozen_text.bytes, buttons, links, try marker(scratch, intent, evidence));
+    return slack.prepareLinked(
+        a,
+        binding(intent.destination, bot_id),
+        intent.payload.frozen_text.bytes,
+        buttons,
+        links,
+        try marker(scratch, intent, evidence),
+    );
 }
 
 pub fn verify(

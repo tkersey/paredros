@@ -20,7 +20,10 @@ pub fn Operation(comptime Input: type, comptime Output: type) type {
 }
 
 pub fn failure(c: protean.Context, code: []const u8) !*const a.FailureLiteral(a.Shape(t.Failure)) {
-    return a.interop.literalFailure(c.author, try c.literal(t.Failure, .{ .code = .{ .bytes = code } }));
+    return a.interop.literalFailure(
+        c.author,
+        try c.literal(t.Failure, .{ .code = .{ .bytes = code } }),
+    );
 }
 
 pub fn replace(
@@ -39,6 +42,9 @@ pub fn require(c: protean.Context, b: anytype, condition: Value(bool), code: []c
     _ = try b.conditional(
         condition,
         try accepted.ret(try accepted.constant(void, {})),
-        try rejected.fail(try c.schema(void), try c.literal(t.Failure, .{ .code = .{ .bytes = code } })),
+        try rejected.fail(
+            try c.schema(void),
+            try c.literal(t.Failure, .{ .code = .{ .bytes = code } }),
+        ),
     );
 }

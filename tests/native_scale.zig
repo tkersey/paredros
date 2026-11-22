@@ -53,11 +53,17 @@ fn previous(service: *native.tasks.Service(t), ordinal: u64) !?t.InputReference 
     defer arena.deinit();
     const a = arena.allocator();
     const operation = try std.fmt.allocPrint(a, "scale-directive:{d}", .{ordinal - 1});
-    var receipt = (try service.operationLookup(a, operation)) orelse return error.MissingPredecessor;
+    var receipt = (try service.operationLookup(
+        a,
+        operation,
+    )) orelse return error.MissingPredecessor;
     defer receipt.deinit();
     var input = (try service.applicationValue(a, receipt.value.task, .input)).?;
     defer input.deinit();
-    return .{ .task = receipt.value.task, .digest = @import("../native/index.zig").digest(input.bytes) };
+    return .{
+        .task = receipt.value.task,
+        .digest = @import("../native/index.zig").digest(input.bytes),
+    };
 }
 
 fn seed(f: *Fixture, first: u64, last: u64) !void {
@@ -147,8 +153,16 @@ test "native scale measurement" {
     if (launch) |value| f.profile = value.profile;
     try f.open();
     if (std.mem.eql(u8, mode, "seed")) {
-        const first = try std.fmt.parseInt(u64, env.getPosix("PAREDROS_SCALE_FIRST") orelse return error.InvalidArguments, 10);
-        const last = try std.fmt.parseInt(u64, env.getPosix("PAREDROS_SCALE_LAST") orelse return error.InvalidArguments, 10);
+        const first = try std.fmt.parseInt(
+            u64,
+            env.getPosix("PAREDROS_SCALE_FIRST") orelse return error.InvalidArguments,
+            10,
+        );
+        const last = try std.fmt.parseInt(
+            u64,
+            env.getPosix("PAREDROS_SCALE_LAST") orelse return error.InvalidArguments,
+            10,
+        );
         if (first == 0 or first > last or last > 100000) return error.InvalidArguments;
         try seed(&f, first, last);
     } else if (std.mem.eql(u8, mode, "measure")) {

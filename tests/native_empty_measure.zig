@@ -29,7 +29,10 @@ fn clock(_: *anyopaque) !i64 {
 fn acquire(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
     var request = try c.decodeOwned(contract.Request, ctx.allocator, bytes);
     defer request.deinit();
-    var prepared = try @import("../native/github_adapter.zig").prepare(ctx.allocator, request.value);
+    var prepared = try @import("../native/github_adapter.zig").prepare(
+        ctx.allocator,
+        request.value,
+    );
     defer prepared.deinit();
     const body = switch (request.value.phase) {
         .repository_before, .repository_after => "{\"id\":123}",
@@ -112,7 +115,10 @@ pub fn run(path: []const u8) !void {
     const initial = examples.genesis();
     const target = try f.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
     var context: u8 = 0;
-    var driver: Driver = .{ .service = &f.service.?, .clock = .{ .context = &context, .now = clock } };
+    var driver: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = &context, .now = clock },
+    };
     try driver.attach(f.arena.allocator());
     defer driver.detach();
     var session = try native.Session(t).init(&f.service.?);

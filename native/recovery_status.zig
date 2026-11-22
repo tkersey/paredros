@@ -57,7 +57,10 @@ pub fn resumeSelected(
     const operation = switch (action) {
         .resume_captured => try std.fmt.allocPrint(a, "capture-resume:{s}:{s}", .{
             std.fmt.bytesToHex(task, .lower),
-            std.fmt.bytesToHex(current_occurrence orelse return error.MissingCapturedOccurrence, .lower),
+            std.fmt.bytesToHex(
+                current_occurrence orelse return error.MissingCapturedOccurrence,
+                .lower,
+            ),
         }),
         .resume_parked => try std.fmt.allocPrint(a, "resume:{s}:{d}", .{
             std.fmt.bytesToHex(task, .lower), revision,

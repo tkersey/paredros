@@ -34,12 +34,22 @@ pub fn emit(c: protean.Context) !Function {
         "some",
         bounds,
     );
-    try a.require(c, active, try active.less(try active.constant(u8, 0), digit), "render_invalid_oid");
+    try a.require(
+        c,
+        active,
+        try active.less(try active.constant(u8, 0), digit),
+        "render_invalid_oid",
+    );
     const scalar = try active.convertInteger(try c.schema(u32), digit, .{});
     const character = try active.textScalar(scalar, bounds);
     const next = try active.call(function, .{
         .oid = oid,
-        .index = try active.checked(.add, index, try active.constant(u64, 1), .{ .overflow = bounds }),
+        .index = try active.checked(
+            .add,
+            index,
+            try active.constant(u64, 1),
+            .{ .overflow = bounds },
+        ),
         .text = try active.blobConcat(try c.schema(cts.Utf8), text, character, bounds),
     });
     try c.author.define(function, try b.ret(try b.conditional(
@@ -58,6 +68,10 @@ pub fn format(
 ) !a.Value(cts.Utf8) {
     return b.call(
         function,
-        .{ .oid = oid, .index = try b.constant(u64, 0), .text = try c.literal(cts.Utf8, .{ .bytes = "" }) },
+        .{
+            .oid = oid,
+            .index = try b.constant(u64, 0),
+            .text = try c.literal(cts.Utf8, .{ .bytes = "" }),
+        },
     );
 }

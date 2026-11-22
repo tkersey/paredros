@@ -25,10 +25,23 @@ pub fn emit(c: protean.Context, comptime length: usize) !a.Function(Parameters(l
     const next = try equal.call(function, .{
         .left = left,
         .right = right,
-        .index = try equal.checked(.add, index, try equal.constant(u64, 1), .{ .overflow = failure }),
+        .index = try equal.checked(
+            .add,
+            index,
+            try equal.constant(u64, 1),
+            .{ .overflow = failure },
+        ),
     });
-    const compared = try active.conditional(try active.equal(x, y), try equal.ret(next), try different.ret(try different.constant(bool, false)));
-    const result = try b.conditional(try b.less(index, try b.constant(u64, length)), try active.ret(compared), try ended.ret(try ended.constant(bool, true)));
+    const compared = try active.conditional(
+        try active.equal(x, y),
+        try equal.ret(next),
+        try different.ret(try different.constant(bool, false)),
+    );
+    const result = try b.conditional(
+        try b.less(index, try b.constant(u64, length)),
+        try active.ret(compared),
+        try ended.ret(try ended.constant(bool, true)),
+    );
     try c.author.define(function, try b.ret(result));
     return function;
 }

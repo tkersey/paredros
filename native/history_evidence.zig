@@ -72,7 +72,11 @@ pub fn sourceInput(a: std.mem.Allocator, value: continuity.Value) !t.Input {
         return error.UnsupportedContinuityInput;
     return switch (value.encoding) {
         .contract => (try c.decodeOwned(t.Input, a, value.bytes.bytes)).value,
-        .json => try native.values.fromJson(t.Input, a, (try native.json.parseAsset(a, value.bytes.bytes, value.bytes.bytes.len)).value),
+        .json => try native.values.fromJson(
+            t.Input,
+            a,
+            (try native.json.parseAsset(a, value.bytes.bytes, value.bytes.bytes.len)).value,
+        ),
     };
 }
 
@@ -135,13 +139,22 @@ fn imported(collector: *Collector) !void {
             const source = try continuity.decode(.settlement, scratch, member.data);
             const input = try sourceInput(scratch, source.value.input);
             if (input != .audit and input != .lineage_audit) continue;
-            const attempts = try scratch.alloc(retained.AttemptEvidence, source.value.attempts.items.len);
+            const attempts = try scratch.alloc(
+                retained.AttemptEvidence,
+                source.value.attempts.items.len,
+            );
             for (attempts, source.value.attempts.items) |*dest, saved| dest.* = .{
                 .id = saved.id,
                 .response = if (saved.response) |value| value.bytes else null,
                 .reply = if (saved.reply) |value| value.bytes else null,
             };
-            try collect(collector, member.data.source.namespace, input, source.value.snapshot, attempts);
+            try collect(
+                collector,
+                member.data.source.namespace,
+                input,
+                source.value.snapshot,
+                attempts,
+            );
         }
     }
 }
@@ -182,7 +195,10 @@ fn walk(
     snapshot: retained.Snapshot,
     attempts: []const retained.AttemptEvidence,
 ) !bool {
-    const Contract = if (lineage_only) @import("../app/lineage_audit_contract.zig") else @import("../app/audit_contract.zig");
+    const Contract = if (lineage_only)
+        @import("../app/lineage_audit_contract.zig")
+    else
+        @import("../app/audit_contract.zig");
     var arena = std.heap.ArenaAllocator.init(collector.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -201,7 +217,12 @@ fn walk(
         else
             try external.replayDelivery(a, request, next.bot_id.bytes);
         const offset = history.?.observations.items.len;
-        if (lineage_only) try external.ingestLineage(a, &history.?, request, next) else try external.ingestDelivery(a, &history.?, request, next);
+        if (lineage_only) try external.ingestLineage(
+            a,
+            &history.?,
+            request,
+            next,
+        ) else try external.ingestDelivery(a, &history.?, request, next);
         for (history.?.observations.items[offset..]) |value| try collector.observation(
             namespace,
             snapshot,
@@ -247,7 +268,10 @@ fn captured(
             };
             if (!std.meta.eql(request_digest, digest)) return error.InvalidHistoryCapture;
             if (found) |prior| {
-                if (!std.meta.eql(prior.digest, reference.digest)) return error.AmbiguousHistoryCapture;
+                if (!std.meta.eql(
+                    prior.digest,
+                    reference.digest,
+                )) return error.AmbiguousHistoryCapture;
             } else found = .{ .value = decoded.value, .digest = reference.digest };
         }
     }
@@ -256,7 +280,11 @@ fn captured(
 
 fn retainedIntent(a: std.mem.Allocator, index: *const idx.Index, metadata: std.json.Value) !bool {
     for (index.records) |record| {
-        if (record.input == .delivery and try matches(a, record.input.delivery, metadata)) return true;
+        if (record.input == .delivery and try matches(
+            a,
+            record.input.delivery,
+            metadata,
+        )) return true;
     }
     for (index.imports) |entry| for (entry.bundle.members.items) |member| {
         if (member.data.kind != .delivery) continue;
@@ -268,7 +296,12 @@ fn retainedIntent(a: std.mem.Allocator, index: *const idx.Index, metadata: std.j
 }
 
 fn matches(a: std.mem.Allocator, delivery: t.Delivery, metadata: std.json.Value) !bool {
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, delivery.payload.wire_json.bytes, .{});
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        a,
+        delivery.payload.wire_json.bytes,
+        .{},
+    );
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidPayload;
     const expected = parsed.value.object.get("metadata") orelse return error.InvalidPayload;

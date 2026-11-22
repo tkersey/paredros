@@ -38,15 +38,26 @@ fn modePolicy(c: protean.Context) !chain.Apply {
     var allowed = try b.constant(bool, false);
     var selected = try c.literal(mode.Control, .pause);
     inline for (.{ "pause", "resume", "cancel", "transfer" }) |name| {
-        const is_control = try b.equal(try b.variantTag(body), try b.variantTag(try c.literal(t.DirectiveBody, @unionInit(t.DirectiveBody, name, {}))));
+        const is_control = try b.equal(
+            try b.variantTag(body),
+            try b.variantTag(try c.literal(t.DirectiveBody, @unionInit(t.DirectiveBody, name, {}))),
+        );
         allowed = try b.select(is_control, try b.constant(bool, true), allowed);
-        selected = try b.select(is_control, try c.literal(mode.Control, @field(mode.Control, name)), selected);
+        selected = try b.select(
+            is_control,
+            try c.literal(mode.Control, @field(mode.Control, name)),
+            selected,
+        );
     }
     const next = try b.call(transition, .{ .input = try b.product(try c.schema(mode.Input), .{
         .head = head,
         .control = selected,
     }) });
-    const outcome = try b.select(allowed, try c.literal(chain.Outcome, .{ .applied = {} }), try c.literal(chain.Outcome, .{ .rejected = .{ .bytes = "test_policy_refusal" } }));
+    const outcome = try b.select(
+        allowed,
+        try c.literal(chain.Outcome, .{ .applied = {} }),
+        try c.literal(chain.Outcome, .{ .rejected = .{ .bytes = "test_policy_refusal" } }),
+    );
     const result = try b.product(try c.schema(chain.Applied), .{
         .head = try b.select(allowed, next, head),
         .outcome = outcome,

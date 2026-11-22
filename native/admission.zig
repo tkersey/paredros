@@ -27,7 +27,9 @@ pub fn admit(
     a: std.mem.Allocator,
     request: Request,
     materializer: anytype,
-) !@typeInfo(@TypeOf(service.submit(a, request.operation, @as(t.Input, undefined)))).error_union.payload {
+) !@typeInfo(
+    @TypeOf(service.submit(a, request.operation, @as(t.Input, undefined))),
+).error_union.payload {
     if (try service.operationLookup(a, request.operation)) |saved| {
         var receipt = saved;
         defer receipt.deinit();

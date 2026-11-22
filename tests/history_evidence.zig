@@ -229,7 +229,11 @@ test "captured later marker is an external candidate without changing retained f
     try std.testing.expect(!page.candidates.items[0].matched_admitted_delivery);
     try std.testing.expect(page.candidates.items[0].requires_owner_disposition);
     try std.testing.expectEqualStrings("150.0", page.candidates.items[0].timestamp.bytes);
-    try std.testing.expectEqualSlices(u8, &fixture.audit.lineage, &page.candidates.items[0].lineage);
+    try std.testing.expectEqualSlices(
+        u8,
+        &fixture.audit.lineage,
+        &page.candidates.items[0].lineage,
+    );
     try std.testing.expectEqualDeep(before, fixture.index.head(&fixture.index.obligations[0]));
     try std.testing.expect(fixture.index.recovery_hold);
     const after = try evidence.page(allocator, &fixture.index, null, 1, 16);
@@ -348,10 +352,22 @@ test "encoded continuity source evidence preserves external candidate provenance
     const after = try evidence.page(allocator, &fixture.index, @splat(1), null, 16);
     try std.testing.expectEqual(1, after.total);
     try std.testing.expectEqual(0, after.incomplete_scans);
-    try std.testing.expectEqualDeep(before.candidates.items[0].source, after.candidates.items[0].source);
-    try std.testing.expectEqualDeep(before.candidates.items[0].capture, after.candidates.items[0].capture);
-    try std.testing.expectEqualStrings(before.candidates.items[0].metadata.bytes, after.candidates.items[0].metadata.bytes);
-    try std.testing.expectEqualDeep(@as(t.Digest, @splat(12)), after.candidates.items[0].source_namespace.?);
+    try std.testing.expectEqualDeep(
+        before.candidates.items[0].source,
+        after.candidates.items[0].source,
+    );
+    try std.testing.expectEqualDeep(
+        before.candidates.items[0].capture,
+        after.candidates.items[0].capture,
+    );
+    try std.testing.expectEqualStrings(
+        before.candidates.items[0].metadata.bytes,
+        after.candidates.items[0].metadata.bytes,
+    );
+    try std.testing.expectEqualDeep(
+        @as(t.Digest, @splat(12)),
+        after.candidates.items[0].source_namespace.?,
+    );
     try std.testing.expect(after.candidates.items[0].requires_owner_disposition);
     try std.testing.expect(fixture.index.recovery_hold);
 }

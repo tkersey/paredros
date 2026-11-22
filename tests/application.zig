@@ -16,13 +16,39 @@ const Expected = struct {
 const expected = [_]Expected{
     .{ .identity = github.identity, .role = .read, .resource = "read", .capture = true },
     .{ .identity = history.identity, .role = .read, .resource = "read", .capture = true },
-    .{ .identity = @import("../app/lineage_audit_contract.zig").identity, .role = .read, .resource = "read", .capture = true },
+    .{
+        .identity = @import("../app/lineage_audit_contract.zig").identity,
+        .role = .read,
+        .resource = "read",
+        .capture = true,
+    },
     .{ .identity = model.P.identity, .role = .model, .resource = "inference", .capture = true },
-    .{ .identity = application.notification_identity, .role = .write, .resource = "write", .capture = true },
-    .{ .identity = @import("../app/method_contract.zig").workspace_identity, .role = .read, .resource = "workspace" },
-    .{ .identity = @import("../app/method_contract.zig").codec_identity, .role = .read, .resource = "frozen" },
-    .{ .identity = @import("../app/experiment_contract.zig").codec_identity, .role = .read, .resource = "frozen" },
-    .{ .identity = @import("../app/experiment_contract.zig").clock_identity, .role = .read, .resource = "measurement" },
+    .{
+        .identity = application.notification_identity,
+        .role = .write,
+        .resource = "write",
+        .capture = true,
+    },
+    .{
+        .identity = @import("../app/method_contract.zig").workspace_identity,
+        .role = .read,
+        .resource = "workspace",
+    },
+    .{
+        .identity = @import("../app/method_contract.zig").codec_identity,
+        .role = .read,
+        .resource = "frozen",
+    },
+    .{
+        .identity = @import("../app/experiment_contract.zig").codec_identity,
+        .role = .read,
+        .resource = "frozen",
+    },
+    .{
+        .identity = @import("../app/experiment_contract.zig").clock_identity,
+        .role = .read,
+        .resource = "measurement",
+    },
 };
 
 const ObservedApplication = struct {
@@ -134,7 +160,10 @@ pub fn NativeTests(comptime native: type) type {
                     if (!std.mem.eql(u8, wanted.identity, entry.declaration.identity)) continue;
                     count += 1;
                     if (wanted.capture) try std.testing.expect(entry.declaration.capture != null);
-                    try std.testing.expectEqualStrings(wanted.resource, entry.declaration.resource_role);
+                    try std.testing.expectEqualStrings(
+                        wanted.resource,
+                        entry.declaration.resource_role,
+                    );
                 }
                 try std.testing.expectEqual(1, count);
             }

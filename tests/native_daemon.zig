@@ -385,11 +385,17 @@ test "native daemon attachment handles one queued mutation before an ordinary pa
     defer reading.deinit();
     try send(&reading, "sta");
 
-    setup.daemon = try Daemon.init(setup.fixture.arena.allocator(), &setup.driver, &setup.server.?, .{
-        .context = &setup.control,
-        .call = Control.call,
-        .observation = .{ .enabled = Observing.enabled, .call = Observing.call },
-    }, .{});
+    setup.daemon = try Daemon.init(
+        setup.fixture.arena.allocator(),
+        &setup.driver,
+        &setup.server.?,
+        .{
+            .context = &setup.control,
+            .call = Control.call,
+            .observation = .{ .enabled = Observing.enabled, .call = Observing.call },
+        },
+        .{},
+    );
     try std.testing.expectEqual(1, setup.control.count);
     try std.testing.expect(setup.control.durable_before_ack);
     try send(&reading, "tus\n");
@@ -420,13 +426,20 @@ test "native daemon scheduled observation preserves queued mutation order and ad
             try std.testing.expectEqual(socket.currentUid(), uid);
             try std.testing.expectEqualStrings("view", bytes);
             target.count += 1;
-            return if (index.obligation(target.target).?.ordinaryDispatch()) "observed-active" else "observed-fenced";
+            return if (index.obligation(target.target).?.ordinaryDispatch())
+                "observed-active"
+            else
+                "observed-fenced";
         }
     };
     var setup: Setup = .{};
     defer setup.deinit();
     try setup.init();
-    setup.daemon.?.control.observation = .{ .enabled = Observer.enabled, .read_only = Observer.reads, .call = Observer.inspect };
+    setup.daemon.?.control.observation = .{
+        .enabled = Observer.enabled,
+        .read_only = Observer.reads,
+        .call = Observer.inspect,
+    };
     var first = try socket.Client.init(a, setup.server.?.path, .{});
     defer first.deinit();
     var mutating = try socket.Client.init(a, setup.server.?.path, .{});
