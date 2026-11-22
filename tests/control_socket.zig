@@ -209,6 +209,55 @@ test "control socket enforces mode and refuses existing files and sockets" {
     ));
 }
 
+fn bound(path: [:0]const u8, mode: c.mode_t, listening: bool) !c_int {
+    var address: c.sockaddr.un = std.mem.zeroes(c.sockaddr.un);
+    address.family = c.AF.UNIX;
+    @memcpy(address.path[0..path.len], path);
+    const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+    if (fd < 0) return error.TestSocketFailed;
+    errdefer std.Io.Threaded.closeFd(fd);
+    if (c.bind(fd, @ptrCast(&address), @sizeOf(c.sockaddr.un)) != 0 or
+        c.chmod(path, mode) != 0) return error.TestSocketFailed;
+    if (listening and c.listen(fd, 1) != 0) return error.TestSocketFailed;
+    return fd;
+}
+
+fn kind(path: [:0]const u8) !std.Io.File.Kind {
+    const status = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{
+        .follow_symlinks = false,
+    });
+    return status.kind;
+}
+
+test "control socket reclaims only a dead owner-only socket left by a killed daemon" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    const config: transport.Config = .{ .operator_uid = transport.currentUid() };
+    const live = try bound(directory.socket, 0o600, true);
+    try std.testing.expectError(
+        error.PathOccupied,
+        transport.Server.init(a, directory.socket, config),
+    );
+    try std.testing.expectEqual(.unix_domain_socket, try kind(directory.socket));
+    std.Io.Threaded.closeFd(live);
+    try std.testing.expectEqual(0, c.chmod(directory.socket, 0o666));
+    try std.testing.expectError(
+        error.PathOccupied,
+        transport.Server.init(a, directory.socket, config),
+    );
+    try std.testing.expectEqual(.unix_domain_socket, try kind(directory.socket));
+    try std.testing.expectEqual(0, c.unlink(directory.socket));
+    std.Io.Threaded.closeFd(try bound(directory.socket, 0o600, false));
+    var server = try transport.Server.init(a, directory.socket, config);
+    defer server.deinit();
+    var client = try transport.Client.init(a, directory.socket, .{});
+    defer client.deinit();
+    try send(client.fd, "{}\n");
+    var request = try next(&server);
+    defer request.deinit();
+    try std.testing.expectEqualStrings("{}", request.bytes);
+}
+
 test "control socket cleanup preserves a replacement regular file or another socket" {
     var directory = try Directory.init();
     defer directory.deinit();

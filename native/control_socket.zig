@@ -34,6 +34,7 @@ const Connection = struct {
     written: usize = 0,
 };
 const Identity = struct { device: u64, inode: u64 };
+const Status = struct { identity: Identity, uid: u32, mode: u32 };
 
 pub const Selection = struct {
     allocator: std.mem.Allocator,
@@ -58,7 +59,7 @@ pub const Server = struct {
         const address = try socketAddress(path);
         const owned_path = try a.dupeSentinel(u8, path, 0);
         errdefer a.free(owned_path);
-        if (try pathIdentity(owned_path)) |_| return error.PathOccupied;
+        if (try pathStatus(owned_path)) |status| try reclaimStale(owned_path, &address, status);
         const connections = try a.alloc(Connection, config.max_clients);
         errdefer a.free(connections);
         @memset(connections, .{});
@@ -430,28 +431,60 @@ fn peerUid(fd: c_int) !u32 {
 }
 
 fn pathIdentity(path: [:0]const u8) !?Identity {
+    const status = (try pathStatus(path)) orelse return null;
+    return status.identity;
+}
+
+fn pathStatus(path: [:0]const u8) !?Status {
     if (builtin.os.tag == .linux) {
         var stat: std.os.linux.Statx = undefined;
         const result = c.statx(
             c.AT.FDCWD,
             path,
             c.AT.SYMLINK_NOFOLLOW,
-            .{ .TYPE = true, .INO = true },
+            .{ .TYPE = true, .MODE = true, .UID = true, .INO = true },
             &stat,
         );
         if (result != 0) return pathError();
-        if (!stat.mask.TYPE or !stat.mask.INO) return error.PathUnavailable;
+        if (!stat.mask.TYPE or !stat.mask.MODE or !stat.mask.UID or !stat.mask.INO)
+            return error.PathUnavailable;
         if (stat.mode & c.S.IFMT != c.S.IFSOCK) return error.PathOccupied;
-        return .{ .device = (@as(u64, stat.dev_major) << 32) | stat.dev_minor, .inode = stat.ino };
+        return .{
+            .identity = .{
+                .device = (@as(u64, stat.dev_major) << 32) | stat.dev_minor,
+                .inode = stat.ino,
+            },
+            .uid = stat.uid,
+            .mode = stat.mode & 0o7777,
+        };
     } else {
         var stat: c.Stat = undefined;
         if (c.fstatat(c.AT.FDCWD, path, &stat, c.AT.SYMLINK_NOFOLLOW) != 0) return pathError();
         if (stat.mode & c.S.IFMT != c.S.IFSOCK) return error.PathOccupied;
-        return .{ .device = @as(u32, @bitCast(stat.dev)), .inode = stat.ino };
+        return .{
+            .identity = .{ .device = @as(u32, @bitCast(stat.dev)), .inode = stat.ino },
+            .uid = stat.uid,
+            .mode = stat.mode & 0o7777,
+        };
     }
 }
 
-fn pathError() !?Identity {
+fn reclaimStale(path: [:0]const u8, address: *const c.sockaddr.un, stale: Status) !void {
+    if (stale.uid != currentUid() or stale.mode != 0o600) return error.PathOccupied;
+    if (!try refused(address, path)) return error.PathOccupied;
+    const current = (try pathStatus(path)) orelse return;
+    if (!std.meta.eql(current, stale)) return error.PathOccupied;
+    if (c.unlink(path) != 0 and std.posix.errno(-1) != .NOENT) return error.PathUnavailable;
+}
+
+fn refused(address: *const c.sockaddr.un, path: []const u8) !bool {
+    const fd = try openSocket();
+    defer closeFd(fd);
+    const connected = c.connect(fd, @ptrCast(address), addressLength(path));
+    return connected != 0 and std.posix.errno(connected) == .CONNREFUSED;
+}
+
+fn pathError() !?Status {
     return switch (std.posix.errno(-1)) {
         .NOENT => null,
         else => error.PathUnavailable,

@@ -469,6 +469,8 @@ fn serve(
         launch.profile,
     );
     defer service.close(a) catch |err| fatal(err);
+    var signals = Signals.install();
+    defer signals.restore();
     var server = try socket.Server.init(a, config.control_socket_path, .{
         .operator_uid = config.current_uid,
         .max_frame_bytes = control.frame_bytes_max,
@@ -479,8 +481,6 @@ fn serve(
         .clock = .{ .context = &io, .now = wallTime },
         .model = if (launch.model_binding) |binding| binding.value else null,
     };
-    var signals = Signals.install();
-    defer signals.restore();
     var runtime_context: Runtime = .{
         .config = &launch.config,
         .continuity = try continuityEnvironment(io, &namespace, &admitted, runtime),
