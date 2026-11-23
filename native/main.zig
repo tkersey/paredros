@@ -137,7 +137,30 @@ fn awaitTransfer(
         response = next;
     }
     try output(init.io, response);
+    try resumeHint(init, response);
     return 75;
+}
+
+fn resumeHint(init: std.process.Init, bytes: []const u8) !void {
+    var parsed = try native.json.parse(init.gpa, bytes, .{ .bytes = control.frame_bytes_max });
+    defer parsed.deinit();
+    const data = native.json.get(parsed.value, "data") orelse return error.InvalidResponse;
+    const message = if (native.json.get(data, "name")) |name| try std.fmt.allocPrint(
+        init.gpa,
+        "paredros: export {s} is still in progress; resume it with " ++
+            "`transfer export {s}` plus the same flags and --operation {s}\n",
+        .{
+            try native.json.text(name),
+            try native.json.text(name),
+            try native.json.text(native.json.get(data, "operation") orelse
+                return error.InvalidResponse),
+        },
+    ) else try init.gpa.dupe(
+        u8,
+        "paredros: the daemon continues this import; repeat the command to observe it\n",
+    );
+    defer init.gpa.free(message);
+    try std.Io.File.stderr().writeStreamingAll(init.io, message);
 }
 
 fn transferFinished(a: std.mem.Allocator, bytes: []const u8) !bool {
@@ -473,6 +496,7 @@ fn serve(
         .service = &service,
         .clock = .{ .context = &io, .now = wallTime },
         .model = if (launch.model_binding) |binding| binding.value else null,
+        .bindings = configuration.bindings(launch.config),
     };
     var runtime_context: Runtime = .{
         .config = &launch.config,

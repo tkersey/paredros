@@ -1,6 +1,8 @@
 const std = @import("std");
 const c = @import("protean_contracts");
+const native = @import("protean_native");
 const t = @import("application_types");
+const idx = @import("index.zig");
 const admission = @import("admission.zig");
 const configuration = @import("configuration.zig");
 const continuity = @import("continuity.zig");
@@ -15,6 +17,7 @@ pub const Import = struct {
 };
 pub const ExportProgress = struct {
     phase: enum { finalizing, cut_pending, written },
+    operation: t.OperationId,
     cut: ?t.Id = null,
     digest: ?t.Digest = null,
     name: t.Name,
@@ -30,52 +33,89 @@ pub fn exportBundle(
     request: Export,
 ) !ExportProgress {
     const directory = config.backup_directory orelse return error.MissingBackupDirectory;
-    if (try operationAdmitted(driver, a, operation))
-        try transfer.validateExportDestination(environment.io, directory, request.name.bytes)
-    else
-        try transfer.validateExportName(environment.io, directory, request.name.bytes);
     const stable = try admission.stableDigest(a, .{
         .request = request,
         .directory = c.Text(4096){ .bytes = directory },
     });
-    const cut_operation = if (request.snapshot) operation else try derivedOperation(
-        a,
-        "export-cut",
-        operation,
-    );
-    if (!request.snapshot and !try finalize(driver, a, operation, origin, stable))
-        return .{ .phase = .finalizing, .name = request.name };
-    const admitted = try admission.admit(driver.service, a, .{
-        .operation = cut_operation,
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    if (transfer.importPending(&index)) return error.ContinuityImportPending;
+    const selected = try a.dupe(u8, exportOperation(&index, operation, request.snapshot, stable));
+    if (index.operations.contains(selected))
+        try transfer.validateExportDestination(environment.io, directory, request.name.bytes)
+    else
+        try transfer.validateExportName(environment.io, directory, request.name.bytes);
+    var progress: ExportProgress = .{
+        .phase = .finalizing,
+        .operation = .{ .bytes = selected },
+        .name = request.name,
+    };
+    if (!request.snapshot and !try finalize(driver, a, &index, selected, origin, stable))
+        return progress;
+    progress.cut = try exportCut(driver, a, &index, environment.source, .{
+        .operation = selected,
         .kind = .continuity_cut,
         .target = null,
         .origin = origin,
         .digest = stable,
-    }, ExportMaterializer(@TypeOf(driver)){
-        .driver = driver,
-        .source = environment.source,
-        .mode = if (request.snapshot) .snapshot else .transfer,
-    });
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const cut_task = admitted.receipt.task;
-    if (index.record(cut_task).?.result == null)
-        return .{ .phase = .cut_pending, .cut = cut_task, .name = request.name };
-    const digest = try transfer.writeCommitted(
+    }, request.snapshot);
+    var committed = try driver.rebuild(a);
+    defer committed.deinit();
+    progress.phase = .cut_pending;
+    if (committed.record(progress.cut.?).?.result == null) return progress;
+    progress.digest = try transfer.writeCommitted(
         a,
         environment.io,
         directory,
         request.name.bytes,
-        &index,
-        cut_task,
+        &committed,
+        progress.cut.?,
     );
-    return .{ .phase = .written, .cut = cut_task, .digest = digest, .name = request.name };
+    progress.phase = .written;
+    return progress;
 }
 
-fn operationAdmitted(driver: anytype, a: std.mem.Allocator, operation: []const u8) !bool {
-    var receipt = try driver.service.operationLookup(a, operation) orelse return false;
-    receipt.deinit();
-    return true;
+fn exportOperation(
+    index: *const idx.Index,
+    operation: []const u8,
+    snapshot: bool,
+    stable: t.Digest,
+) []const u8 {
+    if (!snapshot) {
+        if (index.recovery_purpose != .transfer) return operation;
+        return index.record(index.recovery.?.task).?.input.restore.envelope.operation.bytes;
+    }
+    if (index.operations.contains(operation)) return operation;
+    for (index.records) |record| {
+        if (record.input != .continuity_cut or record.result != null) continue;
+        const envelope = record.input.continuity_cut.envelope;
+        if (std.meta.eql(envelope.stable_request, stable)) return envelope.operation.bytes;
+    }
+    return operation;
+}
+
+fn exportCut(
+    driver: anytype,
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    source: transfer.Source,
+    request: admission.Request,
+    snapshot: bool,
+) !t.Id {
+    var selected = request;
+    if (!snapshot) {
+        selected.operation = try derivedOperation(a, "export-cut", request.operation);
+        if (index.operations.get(selected.operation)) |position|
+            return index.records[position].task;
+    }
+    const admitted = try admission.admit(driver.service, a, selected, ExportMaterializer(
+        @TypeOf(driver),
+    ){
+        .driver = driver,
+        .source = source,
+        .mode = if (snapshot) .snapshot else .transfer,
+    });
+    return admitted.receipt.task;
 }
 
 fn derivedOperation(a: std.mem.Allocator, prefix: []const u8, operation: []const u8) ![]const u8 {
@@ -86,11 +126,15 @@ fn derivedOperation(a: std.mem.Allocator, prefix: []const u8, operation: []const
 fn finalize(
     driver: anytype,
     a: std.mem.Allocator,
+    fenced: *const idx.Index,
     operation: []const u8,
     origin: t.Origin,
     digest: t.Digest,
 ) !bool {
-    const marker = try restore.beginTransfer(driver, a, operation, origin, digest);
+    const marker = if (fenced.recovery_purpose == .transfer)
+        try restore.resumeTransfer(driver, a, origin)
+    else
+        try restore.beginTransfer(driver, a, operation, origin, digest);
     var index = try driver.rebuild(a);
     defer index.deinit();
     var finished = true;
@@ -150,61 +194,81 @@ pub fn importBundle(
     origin: t.Origin,
     request: Import,
 ) !transfer.ImportProgress {
-    const stable = try admission.stableDigest(a, .{
-        .request = request,
-        .repository = config.repository.value(),
-        .destination = config.slack.destination(),
-    });
+    if (!driver.attached or origin != .local) return error.TransferLocalOnly;
     const admitted_request: admission.Request = .{
         .operation = operation,
         .kind = .continuity_cut,
         .target = null,
         .origin = origin,
-        .digest = stable,
+        .digest = try admission.stableDigest(a, .{
+            .request = request,
+            .repository = config.repository.value(),
+            .destination = config.slack.destination(),
+        }),
     };
-    const manifest = if (try operationAdmitted(driver, a, operation))
-        (try admission.admit(driver.service, a, admitted_request, Frozen{})).receipt.task
+    const maximum: ?usize = if (request.bytes_max) |value|
+        std.math.cast(usize, value) orelse return error.Capacity
     else
-        try beginImport(driver, a, config, environment, admitted_request, request);
+        null;
+    const bytes = try native.configuration.readFile(
+        a,
+        environment.io,
+        request.path.bytes,
+        maximum,
+        true,
+    );
+    defer a.free(bytes);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    const record = index.record(manifest).?;
-    if (record.result == null) return .{
-        .phase = .manifest_pending,
-        .manifest = record.task,
-        .members = 0,
-        .obligations = try a.alloc(t.Id, 0),
-    };
-    var bundle = try transfer.committedBundle(a, &index, record.task);
+    if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
+    const identity = continuity.hash(bytes);
+    if (index.operations.get(operation)) |position| {
+        const record = index.records[position];
+        if (record.input != .continuity_cut or
+            !std.meta.eql(record.input.continuity_cut.bundle_digest, identity))
+            return error.OperationConflict;
+    }
+    const admitted = if (index.continuity_import) |view|
+        std.meta.eql(view.digest, identity)
+    else
+        false;
+    if (admitted)
+        try resumeImport(driver, a, config, &index, admitted_request, bytes)
+    else
+        try beginImport(driver, a, config, &index, admitted_request, bytes);
+    return transfer.importProgress(driver, a);
+}
+
+fn resumeImport(
+    driver: anytype,
+    a: std.mem.Allocator,
+    config: configuration.Config,
+    index: *const idx.Index,
+    request: admission.Request,
+    bytes: []const u8,
+) !void {
+    var bundle = try c.decodeBorrowed(transfer.Bundle, a, bytes);
     defer bundle.deinit();
-    return transfer.importBundle(driver, a, config, origin, bundle.value);
+    try transfer.validateDestination(a, bundle.value, configuration.bindings(config));
+    if (index.operations.contains(request.operation))
+        _ = try admission.admit(driver.service, a, request, Frozen{});
 }
 
 fn beginImport(
     driver: anytype,
     a: std.mem.Allocator,
     config: configuration.Config,
-    environment: Environment,
-    admitted_request: admission.Request,
-    request: Import,
-) !t.Id {
-    const maximum: ?usize = if (request.bytes_max) |value|
-        std.math.cast(usize, value) orelse return error.Capacity
-    else
-        null;
-    var bundle = try transfer.readBundle(a, environment.io, request.path.bytes, maximum);
+    index: *const idx.Index,
+    request: admission.Request,
+    bytes: []const u8,
+) !void {
+    var bundle = try c.decodeOwned(transfer.Bundle, a, bytes);
     defer bundle.deinit();
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
     const namespace = driver.service.namespace.identity;
-    if (try transfer.validateImport(a, &index, config, namespace, bundle.value)) |task|
-        return task;
-    const input = try cut(admitted_request, a, bundle.value);
-    const result = try admission.admit(driver.service, a, admitted_request, Frozen{
-        .input = input,
-    });
-    return result.receipt.task;
+    if (try transfer.validateImport(a, index, config, namespace, bundle.value) != null)
+        return error.ContinuityImportConflict;
+    const input = try cut(request, a, bundle.value);
+    _ = try admission.admit(driver.service, a, request, Frozen{ .input = input });
 }
 
 const Frozen = struct {

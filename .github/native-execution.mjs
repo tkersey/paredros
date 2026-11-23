@@ -52,7 +52,7 @@ const suites = {
   },
   'continuity-first': 7,
   'continuity-second': 22,
-  'continuity-third': 18,
+  'continuity-third': 26,
   product: 5,
   crash: 12,
 };

@@ -210,19 +210,32 @@ paredros --config /new/config.json transfer import /backup/handoff.paredros
 Exports write only into the configured protected `backup_directory`. Snapshot
 export captures an immutable cut while the original responsibility continues.
 Transfer export durably fences the source namespace, folds the transferred
-disposition, and keeps source output disabled. Repeating the same transfer export
-or import command uses the same default operation identity, including after a
-client restart. Each snapshot export run takes a new cut. Responses also expose
-the operation identity, and an explicit `--operation` overrides it. Export refuses
-a filename that already exists before it takes a cut or fences the source; existing
-files are never overwritten.
+disposition, and keeps source output disabled. A bundle carries the live
+application closure and the imported members it still depends on, once; it never
+contains an earlier bundle, so repeated snapshots and transfer chains do not grow
+with prior cuts. Export refuses a namespace whose own import is incomplete, and
+refuses a filename that already exists before it takes a cut or fences the source;
+existing files are never overwritten.
+
+Each snapshot export run takes a new cut, except that a run for a NAME whose cut
+is still pending resumes that cut. A namespace has one transfer: after the first
+transfer export fences it, any later transfer export resumes that transfer and
+writes its committed cut under the requested NAME. Every export response reports
+`data.operation`, the operation that owns the cut. When a command exits 75 before
+the file is written, it prints that operation; rerun the same export command with
+`--operation OPERATION` to finish writing exactly that cut.
 
 Import requires a fresh target namespace and matching configured resource
-bindings. It preserves portable observations, pending controls, method source,
-and unresolved delivery evidence. Imported output remains held. Establish that
-the original source cannot run again, then declare exclusive ownership when
-releasing: run `recovery begin`, take TASK and DIGEST from `recovery status`, and
-run `recovery release TASK DIGEST --exclusive-owner`.
+bindings, checked on every import command. The first command admits the bundle's
+manifest; the daemon then materializes its members and lineages in bounded steps,
+including across a restart, while other control and Slack ingress waits. Repeat
+`transfer import PATH` to observe progress; exit 75 means the daemon is still
+materializing. Reusing an import operation for a different file is refused as an
+operation conflict. Import preserves portable observations, pending controls,
+method source, and unresolved delivery evidence. Imported output remains held.
+Establish that the original source cannot run again, then declare exclusive
+ownership when releasing: run `recovery begin`, take TASK and DIGEST from
+`recovery status`, and run `recovery release TASK DIGEST --exclusive-owner`.
 
 After a known filesystem rollback, start with `serve --recover`. Inspect
 `recovery status`, perform read-only `delivery audit KEY_JSON` operations, and

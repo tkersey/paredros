@@ -84,6 +84,7 @@ const Builder = struct {
     allocator: std.mem.Allocator,
     source: Source,
     members: std.ArrayList(continuity.Member) = .empty,
+    seen: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
 
     fn add(
         self: *Builder,
@@ -127,11 +128,13 @@ const Builder = struct {
 
     fn addData(self: *Builder, current: t.Reference, data: t.ContinuityData) !t.Digest {
         const identity = try continuity.digest(self.allocator, t.ContinuityData, data);
-        for (self.members.items) |old| {
-            if (!std.meta.eql(old.identity, identity)) continue;
+        const entry = try self.seen.getOrPut(self.allocator, identity);
+        if (entry.found_existing) {
+            const old = self.members.items[entry.value_ptr.*];
             if (!std.meta.eql(old.current, current)) return error.AmbiguousContinuityProducer;
             return identity;
         }
+        entry.value_ptr.* = self.members.items.len;
         try self.members.append(self.allocator, .{
             .identity = identity,
             .current = current,
@@ -141,6 +144,14 @@ const Builder = struct {
     }
 
     fn appendRecord(self: *Builder, index: *const idx.Index, value: idx.Record) !void {
+        switch (value.input) {
+            .continuity_cut => return,
+            .continuity_member => |input| {
+                _ = try self.addData(try rowReference(value, true), input.data);
+                return;
+            },
+            else => {},
+        }
         _ = try self.add(
             .settlement,
             global(),
@@ -199,32 +210,30 @@ const Builder = struct {
                     .result = output.experiment,
                 });
             },
-            .continuity_member => |input| {
-                _ = try self.addData(try rowReference(value, value.result != null), input.data);
-            },
-            .genesis, .continuity_cut, .restore, .lineage_audit => {},
+            .genesis, .continuity_member, .continuity_cut, .restore, .lineage_audit => {},
         }
     }
 };
 
 fn cutRows(a: std.mem.Allocator, index: *const idx.Index) ![]continuity.CutRow {
-    const rows = try a.alloc(continuity.CutRow, index.records.len);
-    for (rows, index.records) |*row, record| {
+    var rows: std.ArrayList(continuity.CutRow) = .empty;
+    for (index.records) |record| {
+        if (record.input == .continuity_cut) continue;
         const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
-        row.* = .{
+        try rows.append(a, .{
             .task = record.task,
             .revision = record.revision,
             .input = record.input_digest,
             .result = record.result_digest,
             .event_cut = snapshot.event_cut,
-        };
+        });
     }
-    std.mem.sort(continuity.CutRow, rows, {}, struct {
+    std.mem.sort(continuity.CutRow, rows.items, {}, struct {
         fn less(_: void, left: continuity.CutRow, right: continuity.CutRow) bool {
             return std.mem.order(u8, &left.task, &right.task) == .lt;
         }
     }.less);
-    return rows;
+    return rows.toOwnedSlice(a);
 }
 
 fn addRoots(
@@ -299,6 +308,7 @@ pub fn prepare(
     source: Source,
     mode: Mode,
 ) !OwnedBundle {
+    if (importPending(index)) return error.ContinuityImportPending;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -358,7 +368,7 @@ pub fn admitCut(
 }
 
 pub const ImportProgress = struct {
-    phase: enum { manifest_pending, members_pending, genesis_pending, materialized },
+    phase: continuity.ImportPhase,
     manifest: t.Id,
     members: u64,
     obligations: []const t.Id,
@@ -368,51 +378,15 @@ pub const ImportProgress = struct {
         self.* = undefined;
     }
 };
+pub const members_per_step = 64;
+pub const mappedOperation = continuity.mappedOperation;
 
-pub fn mappedOperation(
+pub fn validateDestination(
     a: std.mem.Allocator,
-    kind: enum { member, genesis, directive, turn },
-    bundle: t.Digest,
-    identity: t.Digest,
-) ![]u8 {
-    const key = try continuity.digest(a, struct { bundle: t.Digest, identity: t.Digest }, .{
-        .bundle = bundle,
-        .identity = identity,
-    });
-    return std.fmt.allocPrint(a, "continuity-{s}:{s}", .{
-        @tagName(kind), std.fmt.bytesToHex(key, .lower),
-    });
-}
-
-fn byOperation(index: *const idx.Index, name: []const u8) ?*const idx.Record {
-    for (index.records) |*record| {
-        const envelope = switch (record.input) {
-            inline else => |value| value.envelope,
-        };
-        if (std.mem.eql(u8, envelope.operation.bytes, name)) return record;
-    }
-    return null;
-}
-
-fn existingLineage(
-    index: *const idx.Index,
-    identity: t.Digest,
-    bundle: t.Digest,
-) !?*const idx.Record {
-    for (index.records) |*record| {
-        if (record.input != .genesis or !std.meta.eql(record.input.genesis.lineage, identity))
-            continue;
-        const imported = record.input.genesis.imported orelse
-            return error.ContinuityLineageConflict;
-        const metadata = imported.continuity orelse return error.ContinuityLineageConflict;
-        if (!std.meta.eql(metadata.bundle, bundle)) return error.ContinuityLineageConflict;
-        return record;
-    }
-    return null;
-}
-
-fn validateDestination(a: std.mem.Allocator, bundle: Bundle, config: configuration.Config) !void {
-    try validateGlobalTurns(a, bundle, config);
+    bundle: Bundle,
+    bindings: configuration.Bindings,
+) !void {
+    try validateGlobalTurns(a, bundle, bindings);
     for (bundle.lineages.items) |root| {
         var head = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
         defer head.deinit();
@@ -420,18 +394,22 @@ fn validateDestination(a: std.mem.Allocator, bundle: Bundle, config: configurati
             a,
             t.Repository,
             head.value.specification.repository,
-            config.repository.value(),
+            bindings.repository,
         ) or
             !try continuity.equal(
                 a,
                 t.Destination,
                 head.value.specification.destination,
-                config.slack.destination(),
+                bindings.destination,
             )) return error.ContinuityResourceMismatch;
     }
 }
 
-fn validateGlobalTurns(a: std.mem.Allocator, bundle: Bundle, config: configuration.Config) !void {
+fn validateGlobalTurns(
+    a: std.mem.Allocator,
+    bundle: Bundle,
+    bindings: configuration.Bindings,
+) !void {
     for (bundle.members.items) |item| {
         if (item.data.kind != .turn or !std.meta.eql(item.data.lineage, global())) continue;
         var value = try continuity.decode(.turn, a, item.data);
@@ -440,7 +418,7 @@ fn validateGlobalTurns(a: std.mem.Allocator, bundle: Bundle, config: configurati
             a,
             t.Destination,
             value.value.input.destination,
-            config.slack.destination(),
+            bindings.destination,
         )) return error.ContinuityResourceMismatch;
     }
 }
@@ -463,19 +441,17 @@ fn validateFresh(index: *const idx.Index, identity: t.Digest) !void {
     };
 }
 
-fn admittedManifest(
+fn validateTarget(
     index: *const idx.Index,
     namespace: t.Digest,
     bundle: Bundle,
     identity: t.Digest,
-) !?*const idx.Record {
+) !void {
     if (std.meta.eql(bundle.source.namespace, namespace)) return error.ImportTargetNotFresh;
-    for (bundle.lineages.items) |root| _ = try existingLineage(index, root.identity, identity);
-    for (index.records) |*record| {
-        if (record.input == .continuity_cut and
-            std.meta.eql(record.input.continuity_cut.bundle_digest, identity)) return record;
-    }
-    return null;
+    for (bundle.lineages.items) |root|
+        _ = try continuity.importedLineage(index, root.identity, identity);
+    const view = index.continuity_import orelse return validateFresh(index, identity);
+    if (!std.meta.eql(view.digest, identity)) return error.ContinuityImportConflict;
 }
 
 pub fn validateImport(
@@ -487,10 +463,10 @@ pub fn validateImport(
 ) !?t.Id {
     try continuity.validate(a, bundle);
     const identity = try continuity.digest(a, Bundle, bundle);
-    if (try admittedManifest(index, namespace, bundle, identity)) |record| return record.task;
-    try validateDestination(a, bundle, config);
-    try validateFresh(index, identity);
-    return null;
+    try validateTarget(index, namespace, bundle, identity);
+    try validateDestination(a, bundle, configuration.bindings(config));
+    const view = index.continuity_import orelse return null;
+    return index.records[view.position].task;
 }
 
 fn completedCut(a: std.mem.Allocator, record: idx.Record, identity: t.Digest) !?t.Reference {
@@ -506,38 +482,6 @@ fn completedCut(a: std.mem.Allocator, record: idx.Record, identity: t.Digest) !?
             result.continuity_cut,
         )) return error.InvalidContinuityManifest;
     return .{ .task = record.task, .digest = record.result_digest.? };
-}
-
-fn memberBindings(
-    a: std.mem.Allocator,
-    data: t.ContinuityData,
-    mappings: []const t.ContinuityBinding,
-) ![]const t.ContinuityBinding {
-    const bindings = try a.alloc(t.ContinuityBinding, data.dependencies.items.len);
-    for (bindings, data.dependencies.items) |*target, identity| target.* = .{
-        .member = identity,
-        .local = try continuity.binding(mappings, identity),
-    };
-    return bindings;
-}
-
-fn memberInput(
-    a: std.mem.Allocator,
-    origin: t.Origin,
-    bundle: t.Digest,
-    member: continuity.Member,
-    mappings: []const t.ContinuityBinding,
-) !t.ContinuityMember {
-    return .{
-        .envelope = .{
-            .operation = .{ .bytes = try mappedOperation(a, .member, bundle, member.identity) },
-            .stable_request = member.identity,
-            .origin = origin,
-        },
-        .bundle = bundle,
-        .data = member.data,
-        .bindings = .{ .items = try memberBindings(a, member.data, mappings) },
-    };
 }
 
 fn genesisInput(
@@ -586,152 +530,121 @@ pub fn importBundle(
     origin: t.Origin,
     bundle: Bundle,
 ) !ImportProgress {
+    if (!driver.attached or origin != .local) return error.TransferLocalOnly;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var result = try importWithArena(
-        driver,
-        arena.allocator(),
-        config,
-        origin,
-        bundle,
-    );
-    result.obligations = try a.dupe(t.Id, result.obligations);
+    const scratch = arena.allocator();
+    var index = try driver.rebuild(scratch);
+    defer index.deinit();
+    const namespace = driver.service.namespace.identity;
+    if (try validateImport(scratch, &index, config, namespace, bundle) == null)
+        _ = try admitCut(driver.service, scratch, origin, bundle);
+    return importProgress(driver, a);
+}
+
+pub fn importProgress(driver: anytype, a: std.mem.Allocator) !ImportProgress {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var index = try driver.rebuild(arena.allocator());
+    defer index.deinit();
+    const view = index.continuity_import orelse return error.MissingContinuityManifest;
+    var obligations: std.ArrayList(t.Id) = .empty;
+    errdefer obligations.deinit(a);
+    if (view.bundle) |bundle| for (bundle.lineages.items) |root| {
+        const position = try continuity.importedLineage(&index, root.identity, view.digest) orelse
+            continue;
+        try obligations.append(a, index.records[position].task);
+    };
+    return .{
+        .phase = view.phase,
+        .manifest = index.records[view.position].task,
+        .members = view.members,
+        .obligations = try obligations.toOwnedSlice(a),
+    };
+}
+
+pub fn advanceImport(driver: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
+    if (!driver.attached) return error.DriverDetached;
+    const view = index.continuity_import orelse return false;
+    if (view.phase == .manifest_pending or view.phase == .materialized) return false;
+    const bindings = driver.bindings orelse return error.MissingResourceBindings;
+    validateDestination(a, view.bundle.?, bindings) catch |err| switch (err) {
+        error.ContinuityResourceMismatch => return false,
+        else => return err,
+    };
+    const origin = index.records[view.position].input.continuity_cut.envelope.origin;
+    if (view.phase == .members_pending) return submitMembers(driver, a, index, &view, origin);
+    return submitRoots(driver, a, index, &view, origin);
+}
+
+fn submitMembers(
+    driver: anytype,
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    view: *const continuity.ImportView,
+    origin: t.Origin,
+) !bool {
+    var submitted: usize = 0;
+    for (view.bundle.?.members.items, view.local) |item, local| {
+        if (submitted == members_per_step) break;
+        if (local != null) continue;
+        const bindings = try readyBindings(a, index, view, item) orelse continue;
+        const operation = try mappedOperation(a, .member, view.digest, item.identity);
+        _ = try driver.service.submit(a, operation, .{ .continuity_member = .{
+            .envelope = .{
+                .operation = .{ .bytes = operation },
+                .stable_request = item.identity,
+                .origin = origin,
+            },
+            .bundle = view.digest,
+            .data = item.data,
+            .bindings = .{ .items = bindings },
+        } });
+        submitted += 1;
+    }
+    return submitted != 0;
+}
+
+fn readyBindings(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    view: *const continuity.ImportView,
+    item: continuity.Member,
+) !?[]const t.ContinuityBinding {
+    const result = try a.alloc(t.ContinuityBinding, item.data.dependencies.items.len);
+    for (result, item.data.dependencies.items) |*target, dependency| target.* = .{
+        .member = dependency,
+        .local = view.reference(index, dependency) orelse return null,
+    };
     return result;
 }
 
-fn importWithArena(
-    driver: anytype,
-    a: std.mem.Allocator,
-    config: configuration.Config,
-    origin: t.Origin,
-    bundle: Bundle,
-) !ImportProgress {
-    if (!driver.attached or origin != .local) return error.TransferLocalOnly;
-    try continuity.validate(a, bundle);
-    const identity = try continuity.digest(a, Bundle, bundle);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const namespace = driver.service.namespace.identity;
-    const cut_record = try admittedManifest(&index, namespace, bundle, identity) orelse {
-        try validateDestination(a, bundle, config);
-        try validateFresh(&index, identity);
-        return .{
-            .phase = .manifest_pending,
-            .manifest = try admitCut(driver.service, a, origin, bundle),
-            .members = 0,
-            .obligations = &.{},
-        };
-    };
-    const manifest = (try completedCut(a, cut_record.*, identity)) orelse return .{
-        .phase = .manifest_pending,
-        .manifest = cut_record.task,
-        .members = 0,
-        .obligations = &.{},
-    };
-    return importMembers(driver, a, &index, origin, bundle, identity, manifest);
-}
-
-fn importMembers(
+fn submitRoots(
     driver: anytype,
     a: std.mem.Allocator,
     index: *const idx.Index,
+    view: *const continuity.ImportView,
     origin: t.Origin,
-    bundle: Bundle,
-    identity: t.Digest,
-    manifest: t.Reference,
-) !ImportProgress {
-    var mappings: std.ArrayList(t.ContinuityBinding) = .empty;
-    for (bundle.members.items) |member| {
-        const input = try memberInput(a, origin, identity, member, mappings.items);
-        const record = byOperation(index, input.envelope.operation.bytes);
-        if (record == null) {
-            _ = try driver.service.submit(
-                a,
-                input.envelope.operation.bytes,
-                .{ .continuity_member = input },
-            );
-        } else if (record.?.result) |result| {
-            if (record.?.input != .continuity_member or result != .continuity_member or
-                !try continuity.equal(
-                    a,
-                    t.ContinuityMember,
-                    record.?.input.continuity_member,
-                    input,
-                ) or
-                !try continuity.equal(a, t.ContinuityMember, result.continuity_member, input))
-                return error.InvalidContinuityMember;
-            try mappings.append(a, .{
-                .member = member.identity,
-                .local = .{ .task = record.?.task, .digest = record.?.result_digest.? },
-            });
-            continue;
-        }
-        return .{
-            .phase = .members_pending,
-            .manifest = manifest.task,
-            .members = mappings.items.len,
-            .obligations = &.{},
-        };
-    }
-    return importRoots(
-        driver,
-        a,
-        index,
-        origin,
-        bundle,
-        identity,
-        manifest,
-        mappings.items,
-    );
-}
-
-fn importRoots(
-    driver: anytype,
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-    origin: t.Origin,
-    bundle: Bundle,
-    identity: t.Digest,
-    manifest: t.Reference,
-    mappings: []const t.ContinuityBinding,
-) !ImportProgress {
-    var obligations: std.ArrayList(t.Id) = .empty;
-    var pending = false;
+) !bool {
+    const bundle = view.bundle.?;
+    const clock_ms = try driver.clock.now(driver.clock.context);
+    var submitted = false;
     for (bundle.lineages.items) |root| {
-        if (try existingLineage(index, root.identity, identity)) |record| {
-            try obligations.append(a, record.task);
-            if (record.result == null) pending = true;
-            continue;
-        }
+        if (try continuity.importedLineage(index, root.identity, view.digest) != null) continue;
         const input = try genesisInput(
             a,
             origin,
             bundle,
-            identity,
-            manifest,
-            mappings,
+            view.digest,
+            view.manifest.?,
+            view.metadata.?.members.items,
             root,
-            try driver.clock.now(driver.clock.context),
+            clock_ms,
         );
-        const admitted = try driver.service.submit(
-            a,
-            input.envelope.operation.bytes,
-            .{ .genesis = input },
-        );
-        try obligations.append(a, admitted.receipt.task);
-        return .{
-            .phase = .genesis_pending,
-            .manifest = manifest.task,
-            .members = mappings.len,
-            .obligations = try obligations.toOwnedSlice(a),
-        };
+        _ = try driver.service.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
+        submitted = true;
     }
-    return .{
-        .phase = if (pending) .genesis_pending else .materialized,
-        .manifest = manifest.task,
-        .members = mappings.len,
-        .obligations = try obligations.toOwnedSlice(a),
-    };
+    return submitted;
 }
 
 pub fn committedBundle(
@@ -974,29 +887,9 @@ pub fn pendingControlsAdmitted(a: std.mem.Allocator, index: *const idx.Index, ta
     return continuity.controlsComplete(a, index, target, null);
 }
 
-pub fn importPending(a: std.mem.Allocator, index: *const idx.Index, namespace: t.Digest) !bool {
-    for (index.records) |record| {
-        if (record.input != .continuity_cut) continue;
-        const cut = record.input.continuity_cut;
-        if (!std.meta.eql(continuity.hash(cut.bytes.bytes), cut.bundle_digest))
-            return error.ContinuityDigestMismatch;
-        var bundle = try c.decodeOwned(Bundle, a, cut.bytes.bytes);
-        defer bundle.deinit();
-        try continuity.validate(a, bundle.value);
-        if (std.meta.eql(bundle.value.source.namespace, namespace)) continue;
-        for (bundle.value.members.items) |item| {
-            const operation = try mappedOperation(a, .member, cut.bundle_digest, item.identity);
-            defer a.free(operation);
-            const admitted = byOperation(index, operation) orelse return true;
-            if (admitted.result == null) return true;
-        }
-        for (bundle.value.lineages.items) |root| {
-            const existing = try existingLineage(index, root.identity, cut.bundle_digest) orelse
-                return true;
-            if (existing.result == null) return true;
-        }
-    }
-    return false;
+pub fn importPending(index: anytype) bool {
+    const view = index.continuity_import orelse return false;
+    return view.phase != .materialized;
 }
 
 pub fn validateExportDestination(io: std.Io, directory: []const u8, name: []const u8) !void {

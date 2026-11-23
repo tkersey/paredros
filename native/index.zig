@@ -59,6 +59,10 @@ pub const Index = struct {
     storage: std.ArrayList(Record) = .empty,
     obligations: []Obligation,
     tasks: std.AutoHashMapUnmanaged(t.Id, usize),
+    namespace: ?t.Digest = null,
+    operations: std.StringHashMapUnmanaged(usize) = .empty,
+    lineages: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
+    continuity_import: ?continuity.ImportView = null,
     imports: []const continuity.Imported = &.{},
     portable: []const continuity.Portable = &.{},
     recovery: ?t.InputReference = null,
@@ -146,6 +150,7 @@ pub const Index = struct {
         self.recovery_hold = recovery_view.recovery_hold;
         self.recovery_purpose = recovery_view.recovery_purpose;
         self.restore_cut = recovery_view.restore_cut;
+        self.continuity_import = try continuity.prepareImport(scratch, self);
         self.imports = try continuity.prepareImports(scratch, self);
         self.portable = try continuity.preparePortable(scratch, self);
         try validateTurns(self, cancellations);
@@ -204,6 +209,7 @@ pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
             after = next;
         } else exhausted = true;
     }
+    index.namespace = service.namespace.identity;
     try index.finish(cancellations.items);
     return index;
 }
@@ -275,9 +281,7 @@ fn decodeRow(
 }
 
 fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
-    var operations: std.StringHashMapUnmanaged(void) = .empty;
-    var lineages: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
-    for (self.records) |item| {
+    for (self.records, 0..) |item, position| {
         switch (item.input) {
             .delivery => |delivery| try preparation.verifyStored(a, delivery),
             .audit => |audit| try preparation.verifyStored(a, audit.delivery),
@@ -294,11 +298,13 @@ fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
         };
         if (envelope.version != 1 or envelope.operation.bytes.len == 0)
             return error.UnsupportedEnvelope;
-        const entry = try operations.getOrPut(a, envelope.operation.bytes);
+        const entry = try self.operations.getOrPut(a, envelope.operation.bytes);
         if (entry.found_existing) return error.OperationConflict;
+        entry.value_ptr.* = position;
         if (item.input == .genesis) {
-            const lineage = try lineages.getOrPut(a, item.input.genesis.lineage);
+            const lineage = try self.lineages.getOrPut(a, item.input.genesis.lineage);
             if (lineage.found_existing) return error.DuplicateLineage;
+            lineage.value_ptr.* = position;
         }
     }
 }

@@ -88,6 +88,11 @@ pub const Config = struct {
     slack_app_credential_file: ?[]const u8 = null,
 };
 pub const OwnedConfig = std.json.Parsed(Config);
+pub const Bindings = struct { repository: t.Repository, destination: t.Destination };
+
+pub fn bindings(config: Config) Bindings {
+    return .{ .repository = config.repository.value(), .destination = config.slack.destination() };
+}
 pub const Build = struct { runtime_identity: t.Digest, image_identity: t.Digest };
 
 fn visible(bytes: []const u8, maximum: usize) !void {

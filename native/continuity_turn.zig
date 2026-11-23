@@ -23,20 +23,19 @@ pub fn sourceFact(
 fn historicalMember(
     a: std.mem.Allocator,
     bundle: continuity.Bundle,
-    namespace: t.Digest,
-    reference: t.Reference,
+    imported: t.TurnContinuity,
 ) !continuity.Member {
     for (bundle.members.items) |source| {
-        if (source.data.kind != .settlement or
-            !std.meta.eql(source.data.source.namespace, namespace) or
-            !std.meta.eql(source.data.source.task, reference.task)) continue;
-        const fact = try continuity.decode(.settlement, a, source.data);
-        const result = fact.value.snapshot.result orelse continue;
-        if (!std.meta.eql(result.reference.digest, reference.digest)) continue;
-        const input = try c.decodeOwned(t.Input, a, fact.value.input.bytes.bytes);
-        if (input.value != .continuity_member) return error.InvalidContinuityAncestry;
-        const key = try continuity.digest(a, t.ContinuityData, input.value.continuity_member.data);
-        return continuity.member(bundle, key) orelse return error.MissingContinuityMember;
+        if (source.data.kind != .turn or
+            !std.meta.eql(source.data.source.namespace, imported.source_namespace) or
+            !std.meta.eql(source.data.source.task, imported.original.task) or
+            source.data.source.revision != imported.original.revision) continue;
+        const fact = try sourceFact(a, bundle, source);
+        if (!std.meta.eql(
+            try continuity.digest(a, retained.Snapshot, fact.snapshot),
+            imported.original.digest,
+        )) return error.InvalidContinuityAncestry;
+        return source;
     }
     return error.MissingContinuityAncestry;
 }
@@ -60,7 +59,7 @@ fn previousTurn(
         return error.MissingContinuityAncestry;
     }
     const imported = value.value.input.continuity orelse return null;
-    return try historicalMember(a, bundle, item.data.source.namespace, imported.member);
+    return try historicalMember(a, bundle, imported);
 }
 
 fn originalEnvelope(
@@ -106,13 +105,7 @@ fn operation(a: std.mem.Allocator, bundle: t.Digest, identity: t.Digest) ![]u8 {
 }
 
 fn byOperation(index: *const idx.Index, name: []const u8) ?*const idx.Record {
-    for (index.records) |*record| {
-        const envelope = switch (record.input) {
-            inline else => |value| value.envelope,
-        };
-        if (std.mem.eql(u8, envelope.operation.bytes, name)) return record;
-    }
-    return null;
+    return &index.records[index.operations.get(name) orelse return null];
 }
 
 fn nextOrdinal(index: *const idx.Index) !u64 {

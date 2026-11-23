@@ -85,8 +85,9 @@ fn importDone(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
         if (progress.phase == .materialized) return;
         var index = try driver.rebuild(a);
         defer index.deinit();
-        try std.testing.expect(try transfer.importPending(a, &index, source(f).namespace));
+        try std.testing.expect(transfer.importPending(&index));
         try completeAdmissions(f, driver);
+        _ = try driver.importStep(a);
     }
     return error.ImportDidNotComplete;
 }
@@ -103,7 +104,7 @@ fn verifyImported(f: *Fixture, driver: *Driver, target: t.Id) !void {
     var before = try driver.rebuild(a);
     try std.testing.expect(before.obligation(target).?.recovery_hold);
     try std.testing.expect(!try transfer.pendingControlsAdmitted(a, &before, target));
-    try std.testing.expect(!try transfer.importPending(a, &before, source(f).namespace));
+    try std.testing.expect(!transfer.importPending(&before));
     before.deinit();
     const first = try transfer.admitPendingControls(driver, a, target, origin);
     try std.testing.expectEqual(1, first.remaining);
@@ -170,6 +171,7 @@ test "native continuity import maps pending controls once and resume retains rec
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -185,6 +187,7 @@ test "native continuity import maps pending controls once and resume retains rec
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -333,6 +336,7 @@ test "native continuity global turns preserve frozen context and ingress identit
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -349,6 +353,7 @@ test "native continuity global turns preserve frozen context and ingress identit
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -593,6 +598,7 @@ test "native continuity transfers captured external lineage marker across import
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -611,6 +617,7 @@ test "native continuity transfers captured external lineage marker across import
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer if (destination.attached) destination.detach();
@@ -639,6 +646,8 @@ fn importInterleaved(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !voi
         defer progress.deinit(a);
         if (progress.phase == .materialized) return;
         try completeAdmissions(f, driver);
+        _ = try driver.importStep(a);
+        try completeAdmissions(f, driver);
         var index = try driver.rebuild(a);
         defer index.deinit();
         for (index.obligations) |obligation| {
@@ -666,6 +675,7 @@ test "native continuity import completes every lineage while imported obligation
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -680,6 +690,7 @@ test "native continuity import completes every lineage while imported obligation
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -687,7 +698,7 @@ test "native continuity import completes every lineage while imported obligation
     var index = try destination.rebuild(a);
     defer index.deinit();
     try std.testing.expectEqual(2, index.obligations.len);
-    try std.testing.expect(!try transfer.importPending(a, &index, bundle.value.source.namespace));
+    try std.testing.expect(!transfer.importPending(&index));
 }
 
 fn cancelledWithLateControl(f: *Fixture, driver: *Driver) !t.Id {
@@ -716,6 +727,7 @@ test "native continuity import keeps controls under a cancelled head historical"
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     defer if (original.attached) original.detach();
     _ = try cancelledWithLateControl(&from, &original);
@@ -728,6 +740,7 @@ test "native continuity import keeps controls under a cancelled head historical"
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -773,6 +786,7 @@ test "native continuity control import commits one manifest for one bundle" {
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -789,6 +803,7 @@ test "native continuity control import commits one manifest for one bundle" {
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -825,6 +840,7 @@ fn controlImport(f: *Fixture, driver: *Driver, file: []const u8) !t.Id {
         manifest = progress.manifest;
         if (progress.phase == .materialized) return progress.manifest;
         try completeAdmissions(f, driver);
+        _ = try driver.importStep(a);
     }
     return error.ImportDidNotComplete;
 }
@@ -840,6 +856,7 @@ test "native continuity export refuses an occupied name before fencing the sourc
     var driver: Driver = .{
         .service = &f.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try driver.attach(a);
     defer driver.detach();
@@ -932,6 +949,7 @@ test "native continuity completed audit of an imported delivery triggers a step"
     var original: Driver = .{
         .service = &from.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try original.attach(a);
     defer if (original.attached) original.detach();
@@ -945,6 +963,7 @@ test "native continuity completed audit of an imported delivery triggers a step"
     var destination: Driver = .{
         .service = &to.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
@@ -955,4 +974,587 @@ test "native continuity completed audit of an imported delivery triggers a step"
     try std.testing.expect(index.record(audit).?.result != null);
     index.deinit();
     try std.testing.expect(try destination.nextStep(a, imported) != null);
+}
+
+fn exportWritten(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    operation: []const u8,
+    name: []const u8,
+) !continuity_control.ExportProgress {
+    const a = f.arena.allocator();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(f),
+    };
+    for (0..16) |_| {
+        const progress = try continuity_control.exportBundle(
+            driver,
+            a,
+            settings,
+            environment,
+            operation,
+            origin,
+            .{ .name = .{ .bytes = name }, .snapshot = true },
+        );
+        if (progress.phase == .written) return progress;
+        try completeAdmissions(f, driver);
+    }
+    return error.ExportDidNotComplete;
+}
+
+test "native continuity repeated snapshot exports do not embed earlier cuts" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var driver: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    var sizes: [3]u64 = undefined;
+    for (&sizes, [_][]const u8{ "nightly-1", "nightly-2", "nightly-3" }) |*size, name| {
+        _ = try exportWritten(&f, &driver, settings, name, name);
+        size.* = (try backup.temporary.dir.statFile(std.testing.io, name, .{})).size;
+    }
+    try std.testing.expectEqual(sizes[0], sizes[1]);
+    try std.testing.expectEqual(sizes[0], sizes[2]);
+}
+
+fn verifyCarried(driver: *Driver, a: std.mem.Allocator, bundle: transfer.Bundle) !void {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const manifest = index.records[index.continuity_import.?.position].task;
+    for (bundle.cut.items) |row| try std.testing.expect(!std.meta.eql(row.task, manifest));
+    var carried: usize = 0;
+    for (bundle.members.items) |item| {
+        if (item.data.kind == .settlement) if (index.record(item.data.source.task)) |record| {
+            try std.testing.expect(record.input != .continuity_cut);
+            try std.testing.expect(record.input != .continuity_member);
+        };
+        const producer = index.record(item.current.task).?;
+        if (producer.input == .continuity_member) carried += 1;
+    }
+    try std.testing.expectEqual(index.continuity_import.?.members, carried);
+}
+
+fn importTurnChain(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
+    const a = f.arena.allocator();
+    try importDone(f, driver, bundle);
+    const mapped = try transfer.admitPendingTurns(driver, a, origin);
+    try finish(f, mapped.admitted.?);
+}
+
+test "native continuity re-export carries imported members once without earlier bundles" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var third: Fixture = .{};
+    defer third.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    _ = try original.directive(a, "chain-pause", origin, target, .{ .pause = {} });
+    _ = try frozenTurn(&from, &original);
+    var first = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer first.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var middle: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try middle.attach(to.arena.allocator());
+    try importTurnChain(&to, &middle, first.value);
+    var second = try transfer.capture(&middle, a, source(&to), .snapshot);
+    defer second.deinit();
+    const first_bytes = try c.encodeOwned(transfer.Bundle, a, first.value);
+    const second_bytes = try c.encodeOwned(transfer.Bundle, a, second.value);
+    try std.testing.expect(second_bytes.len < 3 * first_bytes.len);
+    try verifyCarried(&middle, a, second.value);
+    middle.detach();
+    try to.close();
+    try third.init();
+    var last: Driver = .{
+        .service = &third.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try last.attach(third.arena.allocator());
+    defer last.detach();
+    const imported = try importAll(&third, &last, second.value);
+    var index = try last.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(1, index.obligations.len);
+    try std.testing.expectEqualDeep(imported, index.obligations[0].task);
+    try std.testing.expect(!transfer.importPending(&index));
+}
+
+const daemon_module = @import("../native/daemon.zig");
+const Daemon = daemon_module.Daemon(app.Types);
+const socket = @import("../native/control_socket.zig");
+
+const NoControl = struct {
+    fn call(
+        _: *anyopaque,
+        _: std.mem.Allocator,
+        _: *Driver,
+        _: u32,
+        _: []const u8,
+    ) ![]const u8 {
+        return error.UnexpectedControl;
+    }
+};
+
+fn importView(driver: *Driver) !?continuity.ImportView {
+    var index = try driver.rebuild(std.testing.allocator);
+    defer index.deinit();
+    const view = index.continuity_import orelse return null;
+    return .{
+        .position = view.position,
+        .digest = view.digest,
+        .phase = view.phase,
+        .members = view.members,
+    };
+}
+
+fn daemonImport(f: *Fixture, driver: *Driver, partial: bool) !continuity.ImportPhase {
+    const path = try std.fs.path.join(f.arena.allocator(), &.{
+        std.testing.TmpDir.parent_dir_path, &f.temporary.?.sub_path, "control",
+    });
+    var server = try socket.Server.init(std.testing.allocator, path, .{
+        .operator_uid = socket.currentUid(),
+    });
+    defer server.deinit();
+    var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer frame.deinit();
+    var context: u8 = 0;
+    var daemon = try Daemon.init(frame.allocator(), driver, &server, .{
+        .context = &context,
+        .call = NoControl.call,
+    }, .{});
+    var phase: continuity.ImportPhase = .manifest_pending;
+    for (0..20_000) |_| {
+        _ = frame.reset(.retain_capacity);
+        _ = try daemon.poll(frame.allocator(), 0);
+        const view = (try importView(driver)).?;
+        phase = view.phase;
+        if (phase == .materialized) break;
+        if (partial and phase == .members_pending and view.members != 0) break;
+    }
+    daemon.beginStop(0);
+    for (0..10_000) |_| {
+        _ = frame.reset(.retain_capacity);
+        const result = try daemon.poll(frame.allocator(), 0);
+        if (result == .stopped or result == .stopped_unclean) break;
+    } else return error.DaemonDidNotStop;
+    try daemon.deinit();
+    return phase;
+}
+
+test "native continuity daemon materializes an admitted import across restart" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const first = contracts.genesis();
+    const second = secondGenesis();
+    const targets = [_]t.Id{
+        try from.execute(first.envelope.operation.bytes, .{ .genesis = first }),
+        try from.execute(second.envelope.operation.bytes, .{ .genesis = second }),
+    };
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    _ = try original.directive(a, "daemon-pause-first", origin, targets[0], .{ .pause = {} });
+    _ = try original.directive(a, "daemon-pause-second", origin, targets[1], .{ .pause = {} });
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(to.arena.allocator());
+    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    admitted.deinit(a);
+    destination.detach();
+    try std.testing.expectEqual(.members_pending, try daemonImport(&to, &destination, true));
+    try to.close();
+    try to.open();
+    destination.service = &to.service.?;
+    try std.testing.expectEqual(.materialized, try daemonImport(&to, &destination, false));
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(2, index.obligations.len);
+    try std.testing.expectEqual(2, index.imports.len);
+    try std.testing.expect(!transfer.importPending(&index));
+}
+
+test "native continuity export refuses while an import is incomplete" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    admitted.deinit(a);
+    try completeAdmissions(&to, &destination);
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(&to),
+    };
+    for ([_]bool{ false, true }) |snapshot| {
+        try std.testing.expectError(error.ContinuityImportPending, continuity_control.exportBundle(
+            &destination,
+            a,
+            settings,
+            environment,
+            if (snapshot) "pending-snapshot" else "pending-transfer",
+            origin,
+            .{ .name = .{ .bytes = "early.paredros" }, .snapshot = snapshot },
+        ));
+    }
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(index.recovery_purpose == null);
+    try std.testing.expectError(error.FileNotFound, backup.temporary.dir.statFile(
+        std.testing.io,
+        "early.paredros",
+        .{},
+    ));
+}
+
+fn fileImport(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    operation: []const u8,
+    file: []const u8,
+) !transfer.ImportProgress {
+    return continuity_control.importBundle(
+        driver,
+        f.arena.allocator(),
+        settings,
+        .{ .io = std.testing.io, .source = source(f) },
+        operation,
+        origin,
+        .{ .path = .{ .bytes = file } },
+    );
+}
+
+fn importFixture(from: *Fixture, to: *Fixture, directory: []const u8) !transfer.OwnedBundle {
+    const a = from.arena.allocator();
+    try from.init();
+    const genesis = contracts.genesis();
+    _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    const bundle = try transfer.capture(&original, a, source(from), .snapshot);
+    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", bundle.value);
+    original.detach();
+    try from.close();
+    try to.init();
+    return bundle;
+}
+
+test "native continuity import operation conflicts when its file changes" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const directory = try backup.path();
+    var bundle = try importFixture(&from, &to, directory);
+    defer bundle.deinit();
+    const a = to.arena.allocator();
+    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
+    var clock: u8 = 0;
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    var progress = try fileImport(&to, &destination, config(), "same-import", file);
+    progress.deinit(a);
+    try completeAdmissions(&to, &destination);
+    try backup.temporary.dir.deleteFile(std.testing.io, "handoff.paredros");
+    var changed = bundle.value;
+    changed.source.clock_ms += 1;
+    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", changed);
+    try std.testing.expectError(
+        error.OperationConflict,
+        fileImport(&to, &destination, config(), "same-import", file),
+    );
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    var cuts: usize = 0;
+    for (index.records) |record| {
+        if (record.input == .continuity_cut) cuts += 1;
+    }
+    try std.testing.expectEqual(1, cuts);
+}
+
+test "native continuity import validates destination after manifest admission" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const directory = try backup.path();
+    var bundle = try importFixture(&from, &to, directory);
+    defer bundle.deinit();
+    const a = to.arena.allocator();
+    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
+    var clock: u8 = 0;
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    var progress = try fileImport(&to, &destination, config(), "bound-import", file);
+    progress.deinit(a);
+    try completeAdmissions(&to, &destination);
+    var moved = config();
+    moved.slack.channel = "D999";
+    for ([_][]const u8{ "bound-import", "rebound-import" }) |operation| {
+        try std.testing.expectError(
+            error.ContinuityResourceMismatch,
+            fileImport(&to, &destination, moved, operation, file),
+        );
+    }
+    destination.bindings = configuration.bindings(moved);
+    try std.testing.expect(!try destination.importStep(a));
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(0, index.continuity_import.?.members);
+    try std.testing.expectEqual(0, index.obligations.len);
+}
+
+const audit_control = @import("../native/audit_control.zig");
+
+fn pendingGenesis(f: *Fixture, driver: *Driver) !t.Id {
+    const a = f.arena.allocator();
+    for (0..64) |_| {
+        var index = try driver.rebuild(a);
+        defer index.deinit();
+        if (index.continuity_import.?.phase == .genesis_pending) break;
+        _ = try driver.importStep(a);
+        try completeAdmissions(f, driver);
+    } else return error.ImportDidNotAdvance;
+    try std.testing.expect(try driver.importStep(a));
+    for (0..4096) |_| {
+        var index = try driver.rebuild(std.testing.allocator);
+        defer index.deinit();
+        var pending: ?t.Id = null;
+        var completed: usize = 0;
+        for (index.records) |record| {
+            if (record.input != .genesis) continue;
+            if (record.result == null) pending = record.task else completed += 1;
+        }
+        if (completed == 2) return error.BothGenesesCompleted;
+        if (completed == 1) return pending orelse error.MissingPendingGenesis;
+        switch (try f.service.?.pump(a)) {
+            .work => |work| {
+                try f.service.?.notSent(a, work);
+                return error.UnexpectedExternalWork;
+            },
+            .idle, .waiting, .progressed => {},
+        }
+    }
+    return error.GenesisDidNotComplete;
+}
+
+test "native continuity delivery target ignores lineages whose genesis is pending" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const first = contracts.genesis();
+    const second = secondGenesis();
+    const targets = [_]t.Id{
+        try from.execute(first.envelope.operation.bytes, .{ .genesis = first }),
+        try from.execute(second.envelope.operation.bytes, .{ .genesis = second }),
+    };
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    for (targets) |target| try std.testing.expectEqual(1, (try original.deliveries(a, target)).len);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    admitted.deinit(a);
+    try completeAdmissions(&to, &destination);
+    const pending = try pendingGenesis(&to, &destination);
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(1, index.imports.len);
+    try std.testing.expectEqual(1, index.obligations.len);
+    const lineage = index.record(pending).?.input.genesis.lineage;
+    var checked: usize = 0;
+    for (bundle.value.members.items) |item| {
+        if (item.data.kind != .delivery or !std.meta.eql(item.data.lineage, lineage)) continue;
+        var delivery = try continuity.decode(.delivery, a, item.data);
+        defer delivery.deinit();
+        _ = audit_control.deliveryTarget(&index, delivery.value.input);
+        checked += 1;
+    }
+    try std.testing.expect(checked != 0);
+    _ = try destination.nextStep(a, index.obligations[0].task);
+}
+
+test "native continuity export retries resume the pending cut for one name" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var driver: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(&f),
+    };
+    const request: continuity_control.Export = .{
+        .name = .{ .bytes = "retry.paredros" },
+        .snapshot = true,
+    };
+    const started = try continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "snapshot-first",
+        origin,
+        request,
+    );
+    try std.testing.expectEqual(.cut_pending, started.phase);
+    const retried = try continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "snapshot-retry",
+        origin,
+        request,
+    );
+    try std.testing.expectEqualDeep(started.cut, retried.cut);
+    try std.testing.expectEqualStrings("snapshot-first", retried.operation.bytes);
+    try completeAdmissions(&f, &driver);
+    const written = try exportWritten(&f, &driver, settings, "snapshot-first", "retry.paredros");
+    try std.testing.expectEqualDeep(started.cut, written.cut);
+    try std.testing.expectError(error.TransferFileConflict, continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "snapshot-again",
+        origin,
+        request,
+    ));
+    const fenced = try continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "transfer-first",
+        origin,
+        .{ .name = .{ .bytes = "first.paredros" } },
+    );
+    try std.testing.expectEqual(.finalizing, fenced.phase);
+    const resumed = try continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "transfer-renamed",
+        origin,
+        .{ .name = .{ .bytes = "renamed.paredros" } },
+    );
+    try std.testing.expectEqualStrings("transfer-first", resumed.operation.bytes);
 }

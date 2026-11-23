@@ -10,6 +10,7 @@ const eligibility = @import("eligibility.zig");
 const recovery = @import("recovery.zig");
 const commands = @import("commands.zig");
 const outbound = @import("outbound.zig");
+const configuration = @import("configuration.zig");
 
 pub const Clock = struct {
     context: *anyopaque,
@@ -22,6 +23,7 @@ pub fn Driver(comptime Types: type) type {
         service: *native.tasks.Service(Types),
         clock: Clock,
         model: ?t.ModelBinding = null,
+        bindings: ?configuration.Bindings = null,
         page_limit: u32 = 128,
         attached: bool = false,
         after_rebuild: ?struct {
@@ -110,18 +112,20 @@ pub fn Driver(comptime Types: type) type {
             return @import("continuation_recovery.zig").advance(self, a, limit);
         }
 
+        pub fn importStep(self: *Self, a: std.mem.Allocator) !bool {
+            if (!self.attached) return error.DriverDetached;
+            var index = try self.rebuild(a);
+            defer index.deinit();
+            return @import("transfer.zig").advanceImport(self, a, &index);
+        }
+
         pub fn importedTurns(self: *Self, a: std.mem.Allocator) !bool {
             if (!self.attached) return error.DriverDetached;
             var index = try self.rebuild(a);
             defer index.deinit();
-            if (index.recovery_purpose == .transfer or index.portable.len == 0) return false;
             const transfer = @import("transfer.zig");
-            const importing = try transfer.importPending(
-                a,
-                &index,
-                self.service.namespace.identity,
-            );
-            if (importing) return false;
+            if (transfer.importPending(&index)) return transfer.advanceImport(self, a, &index);
+            if (index.recovery_purpose == .transfer or index.portable.len == 0) return false;
             const manifest = index.record(index.portable[0].metadata.manifest.task) orelse
                 return error.MissingContinuityManifest;
             if (manifest.input != .continuity_cut) return error.InvalidContinuityManifest;

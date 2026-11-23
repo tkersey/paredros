@@ -211,7 +211,7 @@ fn admissionOpen(a: std.mem.Allocator, driver: anytype, operation_id: []const u8
     }
     var index = try driver.rebuild(a);
     defer index.deinit();
-    try ingress_policy.validate(a, &index, driver.service.namespace.identity);
+    try ingress_policy.validate(&index);
 }
 
 fn admitCommand(

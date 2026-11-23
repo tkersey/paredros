@@ -119,7 +119,7 @@ fn admitText(
         authenticated,
         value.stable_request,
     )) |task| return task;
-    try ingress_policy.validate(a, &index, driver.service.namespace.identity);
+    try ingress_policy.validate(&index);
     return commands.turn(driver, a, name, authenticated, .{
         .destination = config.slack.destination(),
         .text = .{ .bytes = value.text },
@@ -213,7 +213,7 @@ fn admitInteraction(
         authenticated,
         click.stable_request,
     )) |task| return task;
-    try ingress_policy.validate(a, &index, driver.service.namespace.identity);
+    try ingress_policy.validate(&index);
     const selected = try bound(a, &index, config, click);
     const evidence = try ingress(a, click, selected);
     if (selected) |value| {

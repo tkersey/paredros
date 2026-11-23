@@ -183,6 +183,16 @@ pub fn beginTransfer(
     );
 }
 
+pub fn resumeTransfer(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !t.Id {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    if (index.recovery_purpose != .transfer) return error.MissingTransferBoundary;
+    const marker = index.record(index.recovery.?.task).?.input.restore.envelope;
+    const operation = try a.dupe(u8, marker.operation.bytes);
+    defer a.free(operation);
+    return admitBoundary(driver, a, operation, origin, .transfer, marker.stable_request);
+}
+
 fn admitBoundary(
     driver: anytype,
     a: std.mem.Allocator,
