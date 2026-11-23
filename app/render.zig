@@ -18,6 +18,8 @@ const Context = @FieldType(m.Input, "context");
 const Prefix = struct {
     count: u64 = 0,
     bytes: u64 = 0,
+    floor: u64 = 0,
+    state: u64 = 0,
     commits: frame.Commits = .{ .items = &.{} },
     base: t.Oid = @splat(0),
     tip: t.Oid = @splat(0),
@@ -26,6 +28,7 @@ const Prefix = struct {
     observed_ms: i64 = 0,
     gap: bool = false,
     oversized: bool = false,
+    crowded: bool = false,
 };
 const Selection = struct { input: step.RenderInput, prefix: Prefix };
 const Select = a.Function(struct { state: Selection }, Prefix);
@@ -90,7 +93,8 @@ pub fn emit(
         .{
             .input = input,
             .prefix = try b.update(try c.literal(Prefix, .{ .epoch = 0, .through = 0 }), .{
-                .bytes = try methodState(c, b, head),
+                .floor = try methodState(c, b, head, true),
+                .state = try methodState(c, b, head, false),
                 .epoch = try b.field(told, "epoch"),
                 .through = try b.field(told, "sequence"),
             }),
@@ -107,15 +111,23 @@ pub fn emit(
     return function;
 }
 
-fn methodState(c: protean.Context, b: anytype, head: a.Value(t.Head)) !a.Value(u64) {
+fn methodState(
+    c: protean.Context,
+    b: anytype,
+    head: a.Value(t.Head),
+    comptime empty: bool,
+) !a.Value(u64) {
     const selected = try b.field(head, "method");
     const ordinary = try b.caseOf(selected, "ordinary");
     const retained = try b.caseOf(selected, "retained");
     const rb = retained.body();
-    const state = try rb.field(retained.payload(), "state");
+    const state = if (empty)
+        try c.literal(mc.State, .{ .bytes = "" })
+    else
+        try rb.field(retained.payload(), "state");
     return b.match(selected, .{
         .ordinary = try ordinary.ret(try ordinary.body().constant(u64, 0)),
-        .retained = try retained.ret(try measure(c, rb, @FieldType(Retained, "state"), state)),
+        .retained = try retained.ret(try measure(c, rb, mc.State, state)),
     });
 }
 
@@ -246,7 +258,7 @@ fn selection(c: protean.Context) !Select {
         &.{
             try b.less(count, try b.sequenceLength(batches)),
             try b.booleanNot(try b.field(prefix, "gap")),
-            try b.booleanNot(try b.field(prefix, "oversized")),
+            try b.booleanNot(try b.field(prefix, "crowded")),
         },
     );
     try c.author.define(function, try b.ret(try b.conditional(
@@ -285,9 +297,15 @@ fn selectNext(
         try consider.field(try consider.field(input, "head"), "specification"),
         "policies",
     );
+    const bound = try consider.field(policies, "render_input_bytes");
+    const framed = try add(c, consider, size, try natural(consider, count));
     const oversized = try consider.less(
-        try consider.field(policies, "render_input_bytes"),
-        try add(c, consider, size, try natural(consider, count)),
+        bound,
+        try add(c, consider, framed, try consider.field(prefix, "floor")),
+    );
+    const crowded = try consider.less(
+        bound,
+        try add(c, consider, framed, try consider.field(prefix, "state")),
     );
     const accepted = try consider.branch();
     const refused = try consider.branch();
@@ -310,6 +328,7 @@ fn selectNext(
         .observed_ms = try accepted.field(batch, "acquired_ms"),
         .gap = gap,
         .oversized = oversized,
+        .crowded = crowded,
     });
     const next = try accepted.call(loop, .{ .state = try accepted.update(state, .{
         .prefix = revised,
@@ -317,7 +336,7 @@ fn selectNext(
     const fit = try consider.select(
         first,
         try consider.constant(bool, true),
-        try consider.booleanNot(oversized),
+        try consider.booleanNot(crowded),
     );
     const selected = try consider.conditional(fit, try accepted.ret(next), try refused.ret(prefix));
     return b.conditional(boundary, try stop.ret(prefix), try consider.ret(selected));
@@ -1059,7 +1078,11 @@ fn methodInput(
                 try b.field(admitted, "batches"),
                 try b.field(prefix, "count"),
             ),
-            .state = try b.field(retained, "state"),
+            .state = try b.select(
+                try b.field(prefix, "crowded"),
+                try c.literal(mc.State, .{ .bytes = "" }),
+                try b.field(retained, "state"),
+            ),
         }),
         .input_bytes_max = try b.field(policies, "render_input_bytes"),
         .model = try b.field(admitted, "model"),

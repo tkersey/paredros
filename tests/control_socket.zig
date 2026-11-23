@@ -3,12 +3,14 @@ const builtin = @import("builtin");
 const transport = @import("../native/control_socket.zig");
 const c = std.c;
 extern "c" fn mkdtemp([*:0]u8) ?[*:0]u8;
+extern "c" fn flock(c_int, c_int) c_int;
 
 const a = std.testing.allocator;
 
 const Directory = struct {
     path: [:0]u8,
     socket: [:0]u8,
+    lock: [:0]u8,
 
     fn init() !Directory {
         const path = try a.dupeSentinel(u8, "/tmp/paredros-control-XXXXXX", 0);
@@ -16,14 +18,18 @@ const Directory = struct {
         if (mkdtemp(path) == null) return error.TemporaryDirectoryFailed;
         errdefer _ = c.rmdir(path);
         const socket = try std.fmt.allocPrintSentinel(a, "{s}/control", .{path}, 0);
-        return .{ .path = path, .socket = socket };
+        errdefer a.free(socket);
+        const lock = try std.fmt.allocPrintSentinel(a, "{s}/control.lock", .{path}, 0);
+        return .{ .path = path, .socket = socket, .lock = lock };
     }
 
     fn deinit(self: *Directory) void {
         _ = c.unlink(self.socket);
+        _ = c.unlink(self.lock);
         _ = c.rmdir(self.path);
         a.free(self.path);
         a.free(self.socket);
+        a.free(self.lock);
     }
 };
 
@@ -229,7 +235,16 @@ fn kind(path: [:0]const u8) !std.Io.File.Kind {
     return status.kind;
 }
 
-test "control socket reclaims only a dead owner-only socket left by a killed daemon" {
+fn served(server: *transport.Server, path: [:0]const u8) !void {
+    var client = try transport.Client.init(a, path, .{});
+    defer client.deinit();
+    try send(client.fd, "{}\n");
+    var request = try next(server);
+    defer request.deinit();
+    try std.testing.expectEqualStrings("{}", request.bytes);
+}
+
+test "control socket reclaims only a dead operator socket of any mode left by a killed daemon" {
     var directory = try Directory.init();
     defer directory.deinit();
     const config: transport.Config = .{ .operator_uid = transport.currentUid() };
@@ -240,22 +255,35 @@ test "control socket reclaims only a dead owner-only socket left by a killed dae
     );
     try std.testing.expectEqual(.unix_domain_socket, try kind(directory.socket));
     std.Io.Threaded.closeFd(live);
-    try std.testing.expectEqual(0, c.chmod(directory.socket, 0o666));
+    try std.testing.expectEqual(0, c.chmod(directory.socket, 0o755));
+    var server = try transport.Server.init(a, directory.socket, config);
+    defer server.deinit();
+    try served(&server, directory.socket);
+}
+
+test "control socket path lock keeps a bound socket that is not yet listening" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    const config: transport.Config = .{ .operator_uid = transport.currentUid() };
+    const holder = c.open(
+        directory.lock,
+        .{ .CREAT = true, .EXCL = true, .ACCMODE = .RDONLY },
+        @as(c_uint, 0o600),
+    );
+    if (holder < 0) return error.TestFileFailed;
+    try std.testing.expectEqual(0, flock(holder, c.LOCK.EX | c.LOCK.NB));
+    const starting = try bound(directory.socket, 0o600, false);
     try std.testing.expectError(
         error.PathOccupied,
         transport.Server.init(a, directory.socket, config),
     );
     try std.testing.expectEqual(.unix_domain_socket, try kind(directory.socket));
-    try std.testing.expectEqual(0, c.unlink(directory.socket));
-    std.Io.Threaded.closeFd(try bound(directory.socket, 0o600, false));
+    std.Io.Threaded.closeFd(starting);
+    std.Io.Threaded.closeFd(holder);
     var server = try transport.Server.init(a, directory.socket, config);
-    defer server.deinit();
-    var client = try transport.Client.init(a, directory.socket, .{});
-    defer client.deinit();
-    try send(client.fd, "{}\n");
-    var request = try next(&server);
-    defer request.deinit();
-    try std.testing.expectEqualStrings("{}", request.bytes);
+    try served(&server, directory.socket);
+    server.deinit();
+    try std.testing.expectError(error.FileNotFound, kind(directory.lock));
 }
 
 test "control socket cleanup preserves a replacement regular file or another socket" {
@@ -272,22 +300,17 @@ test "control socket cleanup preserves a replacement regular file or another soc
     if (file < 0) return error.TestFileFailed;
     std.Io.Threaded.closeFd(file);
     first.deinit();
-    const status = try std.Io.Dir.cwd().statFile(std.testing.io, directory.socket, .{
-        .follow_symlinks = false,
-    });
-    try std.testing.expectEqual(.file, status.kind);
+    try std.testing.expectEqual(.file, try kind(directory.socket));
     try std.testing.expectEqual(0, c.unlink(directory.socket));
     var old = try transport.Server.init(a, directory.socket, config);
     try std.testing.expectEqual(0, c.unlink(directory.socket));
-    var replacement = try transport.Server.init(a, directory.socket, config);
-    defer replacement.deinit();
+    const replacement = try bound(directory.socket, 0o600, true);
     old.deinit();
-    var client = try transport.Client.init(a, directory.socket, .{});
-    defer client.deinit();
-    try send(client.fd, "{}\n");
-    var request = try next(&replacement);
-    defer request.deinit();
-    try std.testing.expectEqualStrings("{}", request.bytes);
+    try std.testing.expectEqual(.unix_domain_socket, try kind(directory.socket));
+    std.Io.Threaded.closeFd(replacement);
+    var server = try transport.Server.init(a, directory.socket, config);
+    defer server.deinit();
+    try served(&server, directory.socket);
 }
 
 test "control socket drops partial disconnects oversized frames and pipelined frames" {

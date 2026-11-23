@@ -282,9 +282,11 @@ fn selectPhase(
         try b.booleanNot(try b.less(now, try b.field(head, "render_not_before_ms"))),
         no,
     );
-    rendering = try b.select(rendering, try b.equal(
-        try b.field(try b.field(head, "told"), "sequence"),
-        try b.field(try b.field(try b.field(input, "previous"), "told"), "sequence"),
+    const told = try b.field(head, "told");
+    const anchor = try b.field(try b.field(input, "previous"), "told");
+    inline for (.{ "sequence", "epoch" }) |name| rendering = try b.select(rendering, try b.equal(
+        try b.field(told, name),
+        try b.field(anchor, name),
     ), no);
     const last_check = try isPhase(c, b, try b.field(head, "phase"), .check);
     const alternate = try b.select(last_check, try b.field(head, "previous_check_overran"), no);

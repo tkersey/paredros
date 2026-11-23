@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const c = std.c;
 extern "c" fn getpeereid(c_int, *c.uid_t, *c.gid_t) c_int;
 extern "c" fn getentropy(*anyopaque, usize) c_int;
+extern "c" fn flock(c_int, c_int) c_int;
 const Credentials = extern struct { pid: c.pid_t, uid: c.uid_t, gid: c.gid_t };
 
 pub const Config = struct {
@@ -35,6 +36,8 @@ const Connection = struct {
 };
 const Identity = struct { device: u64, inode: u64 };
 const Status = struct { identity: Identity, uid: u32, mode: u32 };
+const Entry = struct { status: Status, format: u32 };
+const Lock = struct { fd: c_int, path: [:0]u8, identity: Identity };
 
 pub const Selection = struct {
     allocator: std.mem.Allocator,
@@ -47,6 +50,7 @@ pub const Server = struct {
     config: Config,
     fd: c_int,
     identity: Identity,
+    lock: Lock,
     epoch: [16]u8,
     connections: []Connection,
     next_generation: u64 = 1,
@@ -59,6 +63,8 @@ pub const Server = struct {
         const address = try socketAddress(path);
         const owned_path = try a.dupeSentinel(u8, path, 0);
         errdefer a.free(owned_path);
+        const lock = try acquire(a, path);
+        errdefer release(a, lock);
         if (try pathStatus(owned_path)) |status| try reclaimStale(owned_path, &address, status);
         const connections = try a.alloc(Connection, config.max_clients);
         errdefer a.free(connections);
@@ -79,6 +85,7 @@ pub const Server = struct {
             .config = config,
             .fd = fd,
             .identity = identity,
+            .lock = lock,
             .epoch = epoch,
             .connections = connections,
         };
@@ -88,6 +95,7 @@ pub const Server = struct {
         closeFd(self.fd);
         for (self.connections) |*connection| self.drop(connection);
         removeOwned(self.path, self.identity);
+        release(self.allocator, self.lock);
         self.allocator.free(self.connections);
         self.allocator.free(self.path);
         self.* = undefined;
@@ -436,41 +444,97 @@ fn pathIdentity(path: [:0]const u8) !?Identity {
 }
 
 fn pathStatus(path: [:0]const u8) !?Status {
+    const found = (try entryStatus(c.AT.FDCWD, path, c.AT.SYMLINK_NOFOLLOW)) orelse return null;
+    if (found.format != c.S.IFSOCK) return error.PathOccupied;
+    return found.status;
+}
+
+fn descriptorStatus(fd: c_int) !Entry {
+    const flags: u32 = if (builtin.os.tag == .linux) c.AT.EMPTY_PATH else 0;
+    return (try entryStatus(fd, "", flags)) orelse error.PathUnavailable;
+}
+
+fn entryStatus(directory: c_int, path: [:0]const u8, flags: u32) !?Entry {
     if (builtin.os.tag == .linux) {
         var stat: std.os.linux.Statx = undefined;
-        const result = c.statx(
-            c.AT.FDCWD,
-            path,
-            c.AT.SYMLINK_NOFOLLOW,
-            .{ .TYPE = true, .MODE = true, .UID = true, .INO = true },
-            &stat,
-        );
-        if (result != 0) return pathError();
+        const mask: std.os.linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true, .INO = true };
+        if (c.statx(directory, path, flags, mask, &stat) != 0) return absent();
         if (!stat.mask.TYPE or !stat.mask.MODE or !stat.mask.UID or !stat.mask.INO)
             return error.PathUnavailable;
-        if (stat.mode & c.S.IFMT != c.S.IFSOCK) return error.PathOccupied;
-        return .{
+        return .{ .format = stat.mode & c.S.IFMT, .status = .{
             .identity = .{
                 .device = (@as(u64, stat.dev_major) << 32) | stat.dev_minor,
                 .inode = stat.ino,
             },
             .uid = stat.uid,
             .mode = stat.mode & 0o7777,
-        };
-    } else {
-        var stat: c.Stat = undefined;
-        if (c.fstatat(c.AT.FDCWD, path, &stat, c.AT.SYMLINK_NOFOLLOW) != 0) return pathError();
-        if (stat.mode & c.S.IFMT != c.S.IFSOCK) return error.PathOccupied;
-        return .{
-            .identity = .{ .device = @as(u32, @bitCast(stat.dev)), .inode = stat.ino },
-            .uid = stat.uid,
-            .mode = stat.mode & 0o7777,
+        } };
+    }
+    var stat: c.Stat = undefined;
+    const result = if (path.len == 0)
+        c.fstat(directory, &stat)
+    else
+        c.fstatat(directory, path, &stat, flags);
+    if (result != 0) return absent();
+    return .{ .format = stat.mode & c.S.IFMT, .status = .{
+        .identity = .{ .device = @as(u32, @bitCast(stat.dev)), .inode = stat.ino },
+        .uid = stat.uid,
+        .mode = stat.mode & 0o7777,
+    } };
+}
+
+fn absent() !?Entry {
+    return switch (std.posix.errno(-1)) {
+        .NOENT => null,
+        else => error.PathUnavailable,
+    };
+}
+
+fn acquire(a: std.mem.Allocator, path: []const u8) !Lock {
+    const lock_path = try std.fmt.allocPrintSentinel(a, "{s}.lock", .{path}, 0);
+    errdefer a.free(lock_path);
+    for (0..4) |_| {
+        if (try lockAt(lock_path)) |held| return .{
+            .fd = held.fd,
+            .path = lock_path,
+            .identity = held.identity,
         };
     }
+    return error.PathOccupied;
+}
+
+fn lockAt(path: [:0]const u8) !?struct { fd: c_int, identity: Identity } {
+    const flags: c.O = .{ .ACCMODE = .RDONLY, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true };
+    const fd = c.open(path, flags, @as(c_uint, 0o600));
+    if (fd < 0) return switch (std.posix.errno(fd)) {
+        .LOOP => error.PathOccupied,
+        else => error.PathUnavailable,
+    };
+    errdefer closeFd(fd);
+    const held = try descriptorStatus(fd);
+    if (held.format != c.S.IFREG or held.status.uid != currentUid()) return error.PathOccupied;
+    if (flock(fd, c.LOCK.EX | c.LOCK.NB) != 0) return switch (std.posix.errno(-1)) {
+        .AGAIN => error.PathOccupied,
+        else => error.PathUnavailable,
+    };
+    const current = try entryStatus(c.AT.FDCWD, path, c.AT.SYMLINK_NOFOLLOW);
+    if (current) |found| if (std.meta.eql(found.status.identity, held.status.identity))
+        return .{ .fd = fd, .identity = held.status.identity };
+    closeFd(fd);
+    return null;
+}
+
+fn release(a: std.mem.Allocator, lock: Lock) void {
+    const current = entryStatus(c.AT.FDCWD, lock.path, c.AT.SYMLINK_NOFOLLOW) catch null;
+    if (current) |found| {
+        if (std.meta.eql(found.status.identity, lock.identity)) _ = c.unlink(lock.path);
+    }
+    closeFd(lock.fd);
+    a.free(lock.path);
 }
 
 fn reclaimStale(path: [:0]const u8, address: *const c.sockaddr.un, stale: Status) !void {
-    if (stale.uid != currentUid() or stale.mode != 0o600) return error.PathOccupied;
+    if (stale.uid != currentUid()) return error.PathOccupied;
     if (!try refused(address, path)) return error.PathOccupied;
     const current = (try pathStatus(path)) orelse return;
     if (!std.meta.eql(current, stale)) return error.PathOccupied;
@@ -482,13 +546,6 @@ fn refused(address: *const c.sockaddr.un, path: []const u8) !bool {
     defer closeFd(fd);
     const connected = c.connect(fd, @ptrCast(address), addressLength(path));
     return connected != 0 and std.posix.errno(connected) == .CONNREFUSED;
-}
-
-fn pathError() !?Status {
-    return switch (std.posix.errno(-1)) {
-        .NOENT => null,
-        else => error.PathUnavailable,
-    };
 }
 
 fn removeOwned(path: [:0]const u8, identity: Identity) void {

@@ -266,6 +266,47 @@ pub fn confirm(
     return confirmIngress(driver, a, operation, origin, confirmation, null);
 }
 
+fn proposalDigest(
+    a: std.mem.Allocator,
+    confirmation: Confirmation,
+    selected: t.Proposal,
+) !t.Digest {
+    const identity: struct { confirmation: Confirmation, target: ?t.Id, body: @FieldType(
+        t.Proposal,
+        "body",
+    ) } = .{
+        .confirmation = confirmation,
+        .target = selected.target,
+        .body = selected.body,
+    };
+    return admission.stableDigest(a, identity);
+}
+
+pub fn confirmed(
+    driver: anytype,
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    operation: []const u8,
+    confirmation: Confirmation,
+) !?t.Id {
+    if (try driver.service.operationLookup(a, operation)) |saved| {
+        var receipt = saved;
+        receipt.deinit();
+        return null;
+    }
+    const digest = try proposalDigest(a, confirmation, try proposal(index, confirmation));
+    for (index.records) |record| switch (record.input) {
+        .genesis => |value| if (std.meta.eql(value.envelope.stable_request, digest))
+            return record.task,
+        .directive => |value| if (std.meta.eql(
+            value.envelope.stable_request,
+            try admission.directiveDigest(a, value.envelope.operation.bytes, digest),
+        )) return record.task,
+        else => {},
+    };
+    return null;
+}
+
 pub fn confirmIngress(
     driver: anytype,
     a: std.mem.Allocator,
@@ -277,16 +318,9 @@ pub fn confirmIngress(
     try authenticate(driver, origin);
     var index = try driver.rebuild(a);
     defer index.deinit();
+    if (try confirmed(driver, a, &index, operation, confirmation)) |task| return task;
     const selected = try proposal(&index, confirmation);
-    const identity: struct { confirmation: Confirmation, target: ?t.Id, body: @FieldType(
-        t.Proposal,
-        "body",
-    ) } = .{
-        .confirmation = confirmation,
-        .target = selected.target,
-        .body = selected.body,
-    };
-    const digest = try admission.stableDigest(a, identity);
+    const digest = try proposalDigest(a, confirmation, selected);
     return switch (selected.body) {
         .genesis => |specification| try admitGenesis(
             driver,

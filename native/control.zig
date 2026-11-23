@@ -368,6 +368,7 @@ fn confirmProposal(
     var index = try driver.rebuild(a);
     defer index.deinit();
     const confirmation = try commands.resolveProposal(&index, selector);
+    if (try commands.confirmed(driver, a, &index, operation_id, confirmation)) |prior| return prior;
     const selected = try commands.proposal(&index, confirmation);
     if (selected.body == .directive) try validateDirective(
         a,

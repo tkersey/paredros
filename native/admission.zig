@@ -22,6 +22,14 @@ pub fn stableDigest(a: std.mem.Allocator, value: anytype) !t.Digest {
     return digest;
 }
 
+pub fn directiveDigest(
+    a: std.mem.Allocator,
+    operation: []const u8,
+    request: t.Digest,
+) !t.Digest {
+    return stableDigest(a, .{ .operation = t.OperationId{ .bytes = operation }, .request = request });
+}
+
 pub fn admit(
     service: anytype,
     a: std.mem.Allocator,

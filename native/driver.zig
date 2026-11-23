@@ -237,10 +237,7 @@ pub fn Driver(comptime Types: type) type {
                 .kind = .directive,
                 .target = target,
                 .origin = origin,
-                .digest = try admission.stableDigest(a, .{
-                    .operation = t.OperationId{ .bytes = operation },
-                    .request = digest,
-                }),
+                .digest = try admission.directiveDigest(a, operation, digest),
                 .ingress = ingress,
             };
             const result = try admission.admit(

@@ -3,8 +3,9 @@ const group = (count, ...filters) => ({count, filters});
 const suites = {
   authority: {
     driver: group(20, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
-    proposal: group(1, 'control proposal consumer shows and confirms maximal retained body'),
-    controls: group(80, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
+    proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
+      'control proposal consumer confirms each proposal once'),
+    controls: group(81, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
@@ -38,8 +39,8 @@ const suites = {
     rejection: group(1, 'native ordinary render never retries'),
     faults: group(3, 'native retained render before-call fault', 'native retained render after-call fault',
       'native retained render source mismatch'),
-    retained: group(3, 'native retained render updates bounded state', 'native retained render preserves whole oversized',
-      'native retained render reserves method state'),
+    retained: group(4, 'native retained render updates bounded state', 'native retained render preserves whole oversized',
+      'native retained render reserves method state', 'native retained render discards crowding state'),
     conversation: group(21, 'native conversation turn binds', 'native conversation final failure',
       'native conversation refuses', 'tests.native_authoring.', 'tests.native_genesis.', 'tests.contracts.', 'tests.render.',
       'tests.native_method.', 'tests.method.', 'tests.step.', 'tests.check_publish.', 'tests.render_frame.'),

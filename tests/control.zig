@@ -477,7 +477,17 @@ fn consumerCall(
     verb: []const u8,
     token: []const u8,
 ) !native.json.Value {
-    const request = try cli.request(frame, &.{ "proposal", verb, token }, "consumer-confirm");
+    return consumerOperation(frame, driver, verb, token, "consumer-confirm");
+}
+
+fn consumerOperation(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    verb: []const u8,
+    token: []const u8,
+    operation: []const u8,
+) !native.json.Value {
+    const request = try cli.request(frame, &.{ "proposal", verb, token }, operation);
     return decode(frame, try control.dispatch(frame, driver, configuration(), 501, request));
 }
 
@@ -544,6 +554,54 @@ test "control proposal consumer shows and confirms maximal retained body by auth
     try std.testing.expectEqual(@as(?t.Text, null), shown.description);
     try consumerConfirmed(&fixture, &driver, token, shown);
     try consumerResolution(&driver, frame, turn_id, input, token);
+}
+
+test "control proposal consumer confirms each proposal once across operations" {
+    var fixture: ConsumerFixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    const target = try consumerExecute(&fixture, "genesis", .{
+        .genesis = @import("contracts.zig").genesis(),
+    });
+    var directive = consumerTurn(target);
+    directive.proposal_offers.items = &.{.{ .directive = .check }};
+    _ = try consumerExecute(&fixture, "directive-turn", .{ .turn = directive });
+    var genesis = consumerTurn(target);
+    genesis.envelope.operation.bytes = "genesis-turn";
+    genesis.envelope.stable_request = @splat(78);
+    genesis.target = null;
+    genesis.expected_revision = null;
+    genesis.proposal_offers.items = &.{.{ .genesis = @import("contracts.zig").specification() }};
+    _ = try consumerExecute(&fixture, "genesis-turn", .{ .turn = genesis });
+    var clock: Clock = .{};
+    var driver: Driver = .{ .service = &fixture.service.?, .clock = .{
+        .context = &clock,
+        .now = Clock.now,
+    } };
+    try driver.attach(frame);
+    defer driver.detach();
+    for ([_]t.Turn{ directive, genesis }) |offered| {
+        const request = std.fmt.bytesToHex(offered.envelope.stable_request, .lower);
+        const token = try std.fmt.allocPrint(frame, "{s}:0:0", .{&request});
+        var tasks: [2]t.Id = undefined;
+        for (&tasks, [_][]const u8{ "first", "again" }) |*task, name| {
+            const operation = try std.fmt.allocPrint(frame, "{s}-{s}", .{ name, &request });
+            task.* = try taskId(try consumerOperation(frame, &driver, "confirm", token, operation));
+        }
+        try std.testing.expectEqualDeep(tasks[0], tasks[1]);
+    }
+    var index = try driver.rebuild(frame);
+    defer index.deinit();
+    var geneses: usize = 0;
+    var directives: usize = 0;
+    for (index.records) |record| switch (record.input) {
+        .genesis => geneses += 1,
+        .directive => directives += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(2, geneses);
+    try std.testing.expectEqual(1, directives);
 }
 
 fn consumerResolution(

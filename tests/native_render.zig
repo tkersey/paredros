@@ -680,6 +680,39 @@ test "native retained render reserves method state within its whole batch bound"
     try std.testing.expectEqual(0, scenario.calls);
 }
 
+test "native retained render discards crowding state for a batch within its bound" {
+    var scenario: Scenario = .{};
+    var f: Fixture = .{};
+    defer f.deinit();
+    f.profile.environment = &scenario;
+    try f.initWithGrants(method_grants);
+    const values = try commits(f.arena.allocator(), 4);
+    const first = batch(1, 0, 4, values);
+    var value = try methodInput(&f, first, .{});
+    value.step.model = null;
+    const encoded = try cts.encodeOwned(Batches, f.arena.allocator(), .{ .items = &.{first} });
+    value.head.specification.policies.render_input_bytes = encoded.len + 1;
+    value.step.previous = value.head;
+    const result = try execute(&f, "retained-state-crowded", value);
+    const delivery = try methodFrame(value.head, result, first);
+    try std.testing.expect(result.method_disposition == null);
+    try std.testing.expectEqual(0, result.method.retained.consecutive_faults);
+    try std.testing.expectEqualStrings("", result.method.retained.state.bytes);
+    try contains(delivery.payload.frozen_text.bytes, "Retained method");
+    try std.testing.expect(std.mem.find(
+        u8,
+        delivery.payload.frozen_text.bytes,
+        "Large-batch fallback",
+    ) == null);
+    value.head.specification.policies.render_input_bytes = encoded.len;
+    value.step.previous = value.head;
+    const oversized = try execute(&f, "retained-batch-oversized", value);
+    const large = try assertFrame(value.head, oversized, first);
+    try contains(large.payload.frozen_text.bytes, "Large-batch fallback");
+    try std.testing.expectEqualStrings("retained state", oversized.method.retained.state.bytes);
+    try std.testing.expectEqual(0, scenario.calls);
+}
+
 test "native retained render before-call fault permits one ordinary completion" {
     var scenario: Scenario = .{};
     var f: Fixture = .{};

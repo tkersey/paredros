@@ -137,6 +137,8 @@ Start with [the offline configuration example](docs/config.example.json), changi
 the UID and absolute paths to match the account running the daemon. Create the
 namespace parent, control-socket parent, and backup directory with owner-only
 permissions. Offline mode reads no credentials and grants no provider access.
+`serve` holds an exclusive lock on the control socket path plus `.lock` while it
+runs, and reclaims a socket left by a killed daemon only while holding that lock.
 
 ```sh
 paredros --config /absolute/config.json serve
