@@ -389,15 +389,17 @@ fn expectMeasured(
     var guest = try measure.Prefix.init(.retained, previous.specification, "carried");
     const items = try a.alloc(@FieldType(method_contract.GuestInput, "batches").Child, facts.len);
     for (facts, expected, items, 1..) |fact, length, *item, count| {
-        try std.testing.expect(try prefix.fits(a, fact));
+        try prefix.add(a, fact);
+        try std.testing.expect(!try prefix.crowded());
         try std.testing.expectEqual(length, try prefix.total());
         item.* = .{ .reference = fact.reference, .value = fact.value };
-        _ = try guest.fits(a, fact);
+        try guest.add(a, fact);
         const encoded = try cts.encodeOwned(method_contract.GuestInput, a, .{
             .batches = .{ .items = items[0..count] },
             .state = .{ .bytes = "carried" },
         });
         try std.testing.expectEqual(encoded.len, try guest.total());
+        try std.testing.expectEqual(encoded.len - 8, try prefix.wireTotal());
     }
 }
 
@@ -426,6 +428,36 @@ test "native ordinary render bounds its prefix by the context bound it enforces"
     const wide = try execute(&f, "capacity-bound-prefix", input(previous, &facts));
     _ = try assertFrame(previous, wide, facts[1]);
     try std.testing.expectEqual(4, scenario.calls);
+}
+
+test "native ordinary render bounds its prefix by the step input wire size" {
+    var scenario: Scenario = .{};
+    var f: Fixture = .{};
+    defer f.deinit();
+    f.profile.environment = &scenario;
+    try f.initWithGrants(&.{model_identity});
+    const a = f.arena.allocator();
+    const values = try commits(a, 8);
+    const body: [8192]u8 = @splat('x');
+    const captures = [_]t.ReadEvidence{raw(&body)};
+    var facts = [_]Fact{ batch(1, 0, 4, values[0..4]), batch(2, 4, 8, values[4..8]) };
+    for (&facts) |*fact| fact.value.raw_evidence = .{ .items = &captures };
+    const one = try cts.encodeOwned(Batches, a, .{ .items = facts[0..1] });
+    var previous = head(2);
+    previous.specification.policies.render_input_bytes = one.len + 64;
+    var prefix = try measure.Prefix.forHead(previous);
+    try prefix.add(a, facts[0]);
+    try std.testing.expect(!try prefix.crowded());
+    try prefix.add(a, facts[1]);
+    try std.testing.expect(try prefix.crowded());
+    try std.testing.expect(!try prefix.oversized());
+    const value = try execute(&f, "wire-bound-prefix", input(previous, &facts));
+    _ = try assertFrame(previous, value, facts[0]);
+    try std.testing.expectEqual(1, scenario.calls);
+    previous.specification.policies.render_input_bytes = 2048;
+    const first = try execute(&f, "wire-bound-first", input(previous, &facts));
+    _ = try assertFrame(previous, first, facts[0]);
+    try std.testing.expectEqual(2, scenario.calls);
 }
 
 test "native ordinary render calls one model with complete provenance and validates highlights" {

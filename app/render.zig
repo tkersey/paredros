@@ -19,6 +19,7 @@ const Context = @FieldType(m.Input, "context");
 const Prefix = struct {
     count: u64 = 0,
     bytes: u64 = 0,
+    wire: u64 = 0,
     floor: u64 = 0,
     state: u64 = 0,
     commits: frame.Commits = .{ .items = &.{} },
@@ -152,6 +153,7 @@ fn batchBytes(
     projected: Projected,
     head: a.Value(t.Head),
     fact: a.Value(BatchFact),
+    wire: a.Value(u64),
 ) !a.Value(u64) {
     const selected = try b.field(head, "method");
     const ordinary = try b.caseOf(selected, "ordinary");
@@ -164,7 +166,7 @@ fn batchBytes(
     });
     return b.match(selected, .{
         .ordinary = try ordinary.ret(commits),
-        .retained = try retained.ret(try measure(c, retained.body(), BatchFact, fact)),
+        .retained = try retained.ret(wire),
     });
 }
 
@@ -363,21 +365,28 @@ fn selectNext(
     const stop = try b.branch();
     const consider = try b.branch();
     try validateBatch(c, consider, functions.oids, input, prefix, batch, gap, first);
+    const wire = try measure(c, consider, BatchFact, fact);
     const size = try add(
         c,
         consider,
         try b.field(prefix, "bytes"),
-        try batchBytes(c, consider, functions.projected, head, fact),
+        try batchBytes(c, consider, functions.projected, head, fact, wire),
     );
     const count = try add(c, consider, try b.field(prefix, "count"), try consider.constant(u64, 1));
+    const carried = try add(c, consider, try b.field(prefix, "wire"), wire);
     const framed = try add(c, consider, size, try framing(consider, head, count));
     const oversized = try exceeds(c, consider, input, prefix, framed, "floor");
-    const crowded = try exceeds(c, consider, input, prefix, framed, "state");
+    const crowded = try consider.select(
+        try exceeds(c, consider, input, prefix, framed, "state"),
+        try consider.constant(bool, true),
+        try spilled(c, consider, input, carried, count),
+    );
     const accepted = try consider.branch();
     const refused = try consider.branch();
     const revised = try accepted.update(prefix, .{
         .count = count,
         .bytes = size,
+        .wire = carried,
         .commits = try accepted.concat(
             try accepted.field(prefix, "commits"),
             try accepted.field(batch, "commits"),
@@ -419,6 +428,21 @@ fn exceeds(
     return b.less(
         try inputLimit(b, try b.field(input, "head")),
         try add(c, b, framed, try b.field(prefix, field)),
+    );
+}
+
+fn spilled(
+    c: protean.Context,
+    b: anytype,
+    input: a.Value(step.RenderInput),
+    carried: a.Value(u64),
+    count: a.Value(u64),
+) !a.Value(bool) {
+    const head = try b.field(input, "head");
+    const policies = try b.field(try b.field(head, "specification"), "policies");
+    return b.less(
+        try b.field(policies, "render_input_bytes"),
+        try add(c, b, carried, try natural(b, count)),
     );
 }
 

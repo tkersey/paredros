@@ -16,19 +16,24 @@ pub const Kind = enum { ordinary, retained };
 pub const Prefix = struct {
     kind: Kind,
     bound: u64,
+    wire_bound: u64,
     used: u64,
+    wire: u64 = 0,
     count: u64 = 0,
 
     pub fn init(kind: Kind, specification: t.Specification, state: []const u8) !Prefix {
+        const wire_bound = specification.policies.render_input_bytes;
         return switch (kind) {
             .ordinary => .{
                 .kind = kind,
                 .bound = contextLimit(specification.policies),
+                .wire_bound = wire_bound,
                 .used = try lead(specification),
             },
             .retained => .{
                 .kind = kind,
-                .bound = specification.policies.render_input_bytes,
+                .bound = wire_bound,
+                .wire_bound = wire_bound,
                 .used = try std.math.add(u64, natural(state.len), state.len),
             },
         };
@@ -41,18 +46,31 @@ pub const Prefix = struct {
         };
     }
 
-    pub fn fits(self: *Prefix, a: std.mem.Allocator, fact: BatchFact) !bool {
+    pub fn add(self: *Prefix, a: std.mem.Allocator, fact: BatchFact) !void {
+        const wire = try encoded(a, fact);
         self.count = try std.math.add(u64, self.count, 1);
+        self.wire = try std.math.add(u64, self.wire, wire);
         self.used = try std.math.add(u64, self.used, switch (self.kind) {
             .ordinary => try projected(fact),
-            .retained => try encoded(a, fact),
+            .retained => wire,
         });
-        return try self.total() <= self.bound;
     }
 
     pub fn total(self: Prefix) !u64 {
         const framing = if (self.kind == .retained) natural(self.count) else 0;
         return std.math.add(u64, self.used, framing);
+    }
+
+    pub fn wireTotal(self: Prefix) !u64 {
+        return std.math.add(u64, self.wire, natural(self.count));
+    }
+
+    pub fn oversized(self: Prefix) !bool {
+        return try self.total() > self.bound;
+    }
+
+    pub fn crowded(self: Prefix) !bool {
+        return try self.oversized() or try self.wireTotal() > self.wire_bound;
     }
 };
 

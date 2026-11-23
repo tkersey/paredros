@@ -283,8 +283,10 @@ fn firstOversized(a: std.mem.Allocator, input: step.RenderInput) !bool {
     const specification = input.head.specification;
     var ordinary = try measure.Prefix.init(.ordinary, specification, "");
     var retained = try measure.Prefix.init(.retained, specification, "");
-    const baseline = !try ordinary.fits(a, first);
-    const candidate = !try retained.fits(a, first);
+    try ordinary.add(a, first);
+    try retained.add(a, first);
+    const baseline = try ordinary.oversized();
+    const candidate = try retained.oversized();
     if (baseline != candidate) return error.ArmMeasuresDisagree;
     return baseline;
 }

@@ -343,7 +343,8 @@ fn batches(
         if (batch.sequence > head.observed.sequence) return error.BatchBeyondObserved;
         sequence = try std.math.add(u64, sequence, 1);
         if (batch.sequence != sequence) return error.BatchCoverageGap;
-        const fits = try prefix.fits(a, fact);
+        try prefix.add(a, fact);
+        const fits = !try prefix.crowded();
         if (!fits and result.items.len > 0) break;
         try result.append(a, fact);
         if (!fits or batch.coverage != .complete) break;

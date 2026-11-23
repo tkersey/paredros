@@ -1062,13 +1062,13 @@ fn capturedBatch(a: std.mem.Allocator, sequence: u64) !t.Batch {
     };
 }
 
-test "index materialization hands an ordinary backlog by its model context" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var rows: [5]idx.Row = undefined;
-    rows[0] = try genesis(a);
+fn capturedBacklog(a: std.mem.Allocator, bound: u64) !usize {
+    var rows: [9]idx.Row = undefined;
     var previous = head();
+    previous.specification.policies.render_input_bytes = bound;
+    var genesis_input = fixture.genesis();
+    genesis_input.specification.policies.render_input_bytes = bound;
+    rows[0] = try row(a, 1, .{ .genesis = genesis_input }, .{ .genesis = previous });
     for (1..rows.len) |sequence| {
         const operation = try std.fmt.allocPrint(a, "captured-check-{d}", .{sequence});
         const input = step(previous, ref(rows[sequence - 1]), operation);
@@ -1084,7 +1084,21 @@ test "index materialization hands an ordinary backlog by its model context" {
     const materialize = @import("../native/materialize.zig");
     var frozen = try materialize.step(a, &index, rows[0].input.task, 900, null);
     defer frozen.deinit();
-    try std.testing.expectEqual(rows.len - 1, frozen.value.batches.items.len);
+    const batches = frozen.value.batches;
+    try std.testing.expect(batches.items.len > 0);
+    try std.testing.expectEqual(1, batches.items[0].value.sequence);
+    const wire = try c.encodeOwned(@TypeOf(batches), a, batches);
+    try std.testing.expect(batches.items.len == 1 or wire.len <= bound);
+    return batches.items.len;
+}
+
+test "index materialization bounds an ordinary backlog by context and step input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(3, try capturedBacklog(a, 64 * 1024));
+    try std.testing.expectEqual(8, try capturedBacklog(a, 256 * 1024));
+    try std.testing.expectEqual(1, try capturedBacklog(a, 1024));
 }
 
 test "index dispatch gate fences a selected step immediately after restrictive admission" {
