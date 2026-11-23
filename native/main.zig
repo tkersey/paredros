@@ -425,7 +425,11 @@ fn dispatchObserved(
     index: ?*const @import("index.zig").Index,
 ) ![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
-    const response = try control.dispatchWithIndex(
+    const decoration: ?control.Decoration = if (runtime.slack) |channel| .{
+        .name = "slack_transport",
+        .value = try native.values.toJson(transport.Health, a, channel.health()),
+    } else null;
+    return control.dispatchDecorated(
         a,
         driver,
         runtime.config.*,
@@ -433,16 +437,8 @@ fn dispatchObserved(
         bytes,
         runtime.continuity,
         index,
+        decoration,
     );
-    const channel = runtime.slack orelse return response;
-    var parsed = try native.json.parse(a, response, .{ .bytes = control.frame_bytes_max });
-    defer parsed.deinit();
-    try native.json.put(a, &parsed.value, "slack_transport", try native.values.toJson(
-        transport.Health,
-        a,
-        channel.health(),
-    ));
-    return native.json.canonical(a, parsed.value);
 }
 
 const Runtime = struct {

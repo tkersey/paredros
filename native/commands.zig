@@ -42,7 +42,7 @@ pub fn resolveProposal(index: *const idx.Index, selector: ProposalSelector) !Con
     return found orelse error.UnknownProposal;
 }
 
-fn authenticate(driver: anytype, origin: t.Origin) !void {
+pub fn authenticate(driver: anytype, origin: t.Origin) !void {
     if (!driver.attached or origin == .derived) return error.UnauthenticatedRequest;
 }
 
@@ -256,16 +256,6 @@ pub fn proposal(index: *const idx.Index, confirmation: Confirmation) !t.Proposal
     return value;
 }
 
-pub fn confirm(
-    driver: anytype,
-    a: std.mem.Allocator,
-    operation: []const u8,
-    origin: t.Origin,
-    confirmation: Confirmation,
-) !t.Id {
-    return confirmIngress(driver, a, operation, origin, confirmation, null);
-}
-
 fn proposalDigest(
     a: std.mem.Allocator,
     confirmation: Confirmation,
@@ -287,39 +277,68 @@ pub fn confirmed(
     a: std.mem.Allocator,
     index: *const idx.Index,
     operation: []const u8,
+    origin: t.Origin,
     confirmation: Confirmation,
 ) !?t.Id {
+    try authenticate(driver, origin);
     if (try driver.service.operationLookup(a, operation)) |saved| {
         var receipt = saved;
         receipt.deinit();
         return null;
     }
-    const digest = try proposalDigest(a, confirmation, try proposal(index, confirmation));
+    const selected = try proposal(index, confirmation);
+    const digest = try proposalDigest(a, confirmation, selected);
+    return switch (selected.body) {
+        .genesis => confirmedGenesis(index, digest),
+        .directive => |body| confirmedDirective(
+            a,
+            index,
+            selected.target orelse return error.InvalidProposalTarget,
+            body,
+            digest,
+        ),
+    };
+}
+
+fn confirmedGenesis(index: *const idx.Index, digest: t.Digest) ?t.Id {
     for (index.records) |record| switch (record.input) {
         .genesis => |value| if (std.meta.eql(value.envelope.stable_request, digest))
             return record.task,
-        .directive => |value| if (std.meta.eql(
-            value.envelope.stable_request,
-            try admission.directiveDigest(a, value.envelope.operation.bytes, digest),
-        )) return record.task,
         else => {},
     };
     return null;
 }
 
-pub fn confirmIngress(
+fn confirmedDirective(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    target: t.Id,
+    body: t.DirectiveBody,
+    digest: t.Digest,
+) !?t.Id {
+    const obligation = index.obligation(target) orelse return null;
+    for (obligation.directives) |position| {
+        const value = index.records[position].input.directive;
+        if (std.meta.activeTag(value.body) != std.meta.activeTag(body)) continue;
+        if (std.meta.eql(
+            value.envelope.stable_request,
+            try admission.directiveDigest(a, value.envelope.operation.bytes, digest),
+        )) return index.records[position].task;
+    }
+    return null;
+}
+
+pub fn admitConfirmation(
     driver: anytype,
     a: std.mem.Allocator,
+    index: *const idx.Index,
     operation: []const u8,
     origin: t.Origin,
     confirmation: Confirmation,
     ingress: ?t.Ingress,
 ) !t.Id {
     try authenticate(driver, origin);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    if (try confirmed(driver, a, &index, operation, confirmation)) |task| return task;
-    const selected = try proposal(&index, confirmation);
+    const selected = try proposal(index, confirmation);
     const digest = try proposalDigest(a, confirmation, selected);
     return switch (selected.body) {
         .genesis => |specification| try admitGenesis(

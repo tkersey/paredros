@@ -94,16 +94,6 @@ pub fn Driver(comptime Types: type) type {
             return commands.turn(self, a, operation, origin, request);
         }
 
-        pub fn confirm(
-            self: *Self,
-            a: std.mem.Allocator,
-            operation: []const u8,
-            origin: t.Origin,
-            confirmation: commands.Confirmation,
-        ) !t.Id {
-            return commands.confirm(self, a, operation, origin, confirmation);
-        }
-
         pub fn recoverTurns(self: *Self, a: std.mem.Allocator, limit: u32) ![]t.Id {
             return @import("conversation_recovery.zig").advance(self, a, limit);
         }

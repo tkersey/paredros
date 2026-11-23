@@ -2,6 +2,7 @@ const std = @import("std");
 const native = @import("protean_native");
 const driver_module = @import("driver.zig");
 const socket = @import("control_socket.zig");
+const control_protocol = @import("control.zig");
 const t = @import("application_types");
 const Index = @import("index.zig").Index;
 
@@ -180,6 +181,10 @@ pub fn Daemon(comptime Types: type) type {
                 try handler.call(handler.context, a, self.driver, request.uid, request.bytes);
             self.server.respond(request.token, response) catch |err| switch (err) {
                 error.StaleConnection => {},
+                error.FrameTooLarge => try self.server.respond(
+                    request.token,
+                    control_protocol.capacity_rejection,
+                ),
                 else => return err,
             };
             return true;

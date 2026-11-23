@@ -80,6 +80,12 @@ const Control = struct {
             self.durable_before_ack = true;
             return "paused";
         }
+        if (std.mem.eql(u8, bytes, "oversized")) {
+            const oversized = try frame.alloc(u8, (socket.Config{ .operator_uid = 0 })
+                .max_frame_bytes + 1);
+            @memset(oversized, 'x');
+            return oversized;
+        }
         var index = try driver.rebuild(frame);
         defer index.deinit();
         const obligation = index.obligation(self.target).?;
@@ -226,6 +232,19 @@ test "native daemon two socket clients admit durable pause while worker is withh
         .{},
     ));
     try std.testing.expect(setup.driver.service.dispatch_gate == .selected);
+}
+
+test "native daemon answers an oversized control reply with a typed capacity rejection" {
+    var setup: Setup = .{};
+    defer setup.deinit();
+    try setup.init();
+    var client = try socket.Client.init(a, setup.server.?.path, .{});
+    defer client.deinit();
+    try send(&client, "oversized\n");
+    try response(&setup, &client, @import("../native/control.zig").capacity_rejection);
+    try send(&client, "status\n");
+    try response(&setup, &client, "active");
+    try std.testing.expectEqual(2, setup.control.count);
 }
 
 test "native daemon clean stop captures worker and admits no queued control" {

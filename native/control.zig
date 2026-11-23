@@ -13,6 +13,15 @@ const restore = @import("restore.zig");
 const ingress_policy = @import("ingress_policy.zig");
 
 pub const frame_bytes_max: u32 = 4 * 1024 * 1024;
+pub const decoration_reserve: struct { bytes: u32, tokens: u32 } = .{
+    .bytes = 16 * 1024,
+    .tokens = 512,
+};
+pub const capacity_rejection =
+    \\{"error":"Capacity","schema":"paredros.control.v1","status":"rejected"}
+;
+pub const Decoration = struct { name: []const u8, value: native.json.Value };
+const frame_limits: native.json.Limits = .{ .bytes = frame_bytes_max };
 
 pub const Request = struct {
     version: u32,
@@ -77,19 +86,94 @@ pub fn dispatchWithIndex(
     environment: ?continuity_control.Environment,
     index: ?*const idx.Index,
 ) ![]const u8 {
+    return dispatchDecorated(a, driver, config, uid, bytes, environment, index, null);
+}
+
+pub fn dispatchDecorated(
+    a: std.mem.Allocator,
+    driver: anytype,
+    config: configuration.Config,
+    uid: u32,
+    bytes: []const u8,
+    environment: ?continuity_control.Environment,
+    index: ?*const idx.Index,
+    decoration: ?Decoration,
+) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
     const response = execute(scratch, driver, config, uid, bytes, environment, index) catch |err|
         try rejected(scratch, err);
-    return frame(a, response) catch |err|
-        frame(a, try rejected(scratch, err));
+    return frame(a, try decorate(scratch, response, decoration)) catch |err|
+        frame(a, try decorate(scratch, try rejected(scratch, err), decoration)) catch |last|
+        frame(a, try rejected(scratch, last));
+}
+
+fn decorate(
+    a: std.mem.Allocator,
+    value: native.json.Value,
+    decoration: ?Decoration,
+) !native.json.Value {
+    var result = value;
+    if (decoration) |extra| try native.json.put(a, &result, extra.name, extra.value);
+    return result;
 }
 
 fn frame(a: std.mem.Allocator, value: native.json.Value) ![]u8 {
-    const limits: native.json.Limits = .{ .bytes = frame_bytes_max };
-    if (!try native.json.fits(a, value, limits)) return error.Capacity;
+    if (!try native.json.fits(a, value, frame_limits)) return error.Capacity;
     return native.json.canonicalBounded(a, value, frame_bytes_max);
+}
+
+const Extent = struct {
+    bytes: u64,
+    tokens: u64,
+
+    fn plus(self: Extent, other: Extent) Extent {
+        return .{ .bytes = self.bytes + other.bytes, .tokens = self.tokens + other.tokens };
+    }
+
+    fn within(self: Extent, room: Extent) bool {
+        return self.bytes <= room.bytes and self.tokens <= room.tokens;
+    }
+
+    fn less(self: Extent, other: Extent) ?Extent {
+        if (!other.within(self)) return null;
+        return .{ .bytes = self.bytes - other.bytes, .tokens = self.tokens - other.tokens };
+    }
+};
+
+const content: Extent = .{
+    .bytes = frame_bytes_max - decoration_reserve.bytes,
+    .tokens = frame_limits.tokens - decoration_reserve.tokens,
+};
+const separator: Extent = .{ .bytes = 1, .tokens = 0 };
+
+fn extent(a: std.mem.Allocator, value: native.json.Value) !Extent {
+    var buffer: [4096]u8 = undefined;
+    var counter = std.Io.Writer.Discarding.init(&buffer);
+    try std.json.Stringify.value(value, .{}, &counter.writer);
+    var pending: std.ArrayList(native.json.Value) = .empty;
+    defer pending.deinit(a);
+    try pending.append(a, value);
+    var tokens: u64 = 0;
+    while (pending.pop()) |item| switch (item) {
+        .object => |map| {
+            tokens += 2 + map.count();
+            try pending.appendSlice(a, map.values());
+        },
+        .array => |items| {
+            tokens += 2;
+            try pending.appendSlice(a, items.items);
+        },
+        else => tokens += 1,
+    };
+    return .{ .bytes = counter.fullCount(), .tokens = tokens };
+}
+
+fn dataRoom(a: std.mem.Allocator) !Extent {
+    const wrapper = try extent(a, try reply(a, "observed", .null));
+    const unwrapped = wrapper.less(try extent(a, .null)) orelse return error.Capacity;
+    return content.less(unwrapped) orelse error.Capacity;
 }
 
 fn rejected(a: std.mem.Allocator, err: anyerror) !native.json.Value {
@@ -365,10 +449,12 @@ fn confirmProposal(
     origin: t.Origin,
     selector: commands.ProposalSelector,
 ) !t.Id {
+    try commands.authenticate(driver, origin);
     var index = try driver.rebuild(a);
     defer index.deinit();
     const confirmation = try commands.resolveProposal(&index, selector);
-    if (try commands.confirmed(driver, a, &index, operation_id, confirmation)) |prior| return prior;
+    const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
+    if (prior) |task_id| return task_id;
     const selected = try commands.proposal(&index, confirmation);
     if (selected.body == .directive) try validateDirective(
         a,
@@ -378,7 +464,7 @@ fn confirmProposal(
         selected.target orelse return error.InvalidProposalTarget,
         selected.body.directive,
     );
-    return driver.confirm(a, operation_id, origin, confirmation);
+    return commands.admitConfirmation(driver, a, &index, operation_id, origin, confirmation, null);
 }
 
 fn proposal(
@@ -425,7 +511,7 @@ fn inspect(
 ) !native.json.Value {
     const data = switch (request.command) {
         .status => |value| try status(a, service, index, clock_ms, value.after, value.limit),
-        .monitor_show => |id| try monitor(a, index, id, clock_ms),
+        .monitor_show => |id| try shownMonitor(a, index, id, clock_ms),
         .monitor_directives => |page| try pendingDirectives(
             a,
             index,
@@ -516,14 +602,45 @@ fn status(
             return std.mem.order(u8, &left.task, &right.task) == .lt;
         }
     }.less);
+    var result = try statusSummary(a, service, index, clock_ms);
     var items: std.array_list.Managed(native.json.Value) = .init(a);
+    try native.json.put(a, &result, "obligations", .{ .array = items });
+    try native.json.put(a, &result, "next", try native.values.toJson(t.Id, a, @splat(0)));
+    const room = try dataRoom(a);
+    var used = try extent(a, result);
     var next: ?t.Id = null;
+    var stopped = false;
     for (ordered) |obligation| {
         if (after) |previous| if (std.mem.order(u8, &obligation.task, &previous) != .gt) continue;
         if (items.items.len == limit) break;
-        try items.append(try monitor(a, index, obligation.task, clock_ms));
+        const gap: Extent = if (items.items.len == 0) .{ .bytes = 0, .tokens = 0 } else separator;
+        const entry = if (room.less(used.plus(gap))) |available|
+            try monitor(a, index, obligation.task, clock_ms, available)
+        else
+            null;
+        if (entry == null or (entry.?.clipped and items.items.len != 0)) {
+            if (items.items.len == 0) return error.Capacity;
+            stopped = true;
+            break;
+        }
+        try items.append(entry.?.value);
+        used = used.plus(gap).plus(entry.?.extent);
         next = obligation.task;
     }
+    try native.json.put(a, &result, "obligations", .{ .array = items });
+    try native.json.put(a, &result, "next", if (items.items.len == limit or stopped)
+        try native.values.toJson(?t.Id, a, next)
+    else
+        .null);
+    return result;
+}
+
+fn statusSummary(
+    a: std.mem.Allocator,
+    service: anytype,
+    index: *const idx.Index,
+    clock_ms: i64,
+) !native.json.Value {
     var result = native.json.object();
     const bytes = try namespaceBytes(service.io, .{ .handle = service.namespace.directory });
     try native.json.put(a, &result, "namespace_bytes", try native.values.toJson(u64, a, bytes));
@@ -538,11 +655,6 @@ fn status(
         try a.dupe(u8, &std.fmt.bytesToHex(service.profile.runtime_identity, .lower)),
     ));
     try native.json.put(a, &result, "daemon", daemon);
-    try native.json.put(a, &result, "obligations", .{ .array = items });
-    try native.json.put(a, &result, "next", if (items.items.len == limit)
-        try native.values.toJson(?t.Id, a, next)
-    else
-        .null);
     try native.json.put(
         a,
         &result,
@@ -553,17 +665,41 @@ fn status(
     return result;
 }
 
+const Entry = struct { value: native.json.Value, extent: Extent, clipped: bool, shown: usize };
+
 fn monitor(
     a: std.mem.Allocator,
     index: *const idx.Index,
     id: t.Id,
     clock_ms: i64,
-) !native.json.Value {
+    room: Extent,
+) !?Entry {
     const obligation = index.obligation(id) orelse return error.UnknownObligation;
+    var result = try monitorHead(a, index, obligation, clock_ms);
+    return appendPending(a, index, obligation, null, 16, &result, room);
+}
+
+fn shownMonitor(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    id: t.Id,
+    clock_ms: i64,
+) !native.json.Value {
+    const entry = try monitor(a, index, id, clock_ms, try dataRoom(a)) orelse
+        return error.Capacity;
+    return entry.value;
+}
+
+fn monitorHead(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+    clock_ms: i64,
+) !native.json.Value {
     const head = index.head(obligation);
     var result = native.json.object();
     try native.json.put(a, &result, "id", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)),
+        try a.dupe(u8, &std.fmt.bytesToHex(obligation.task, .lower)),
     ));
     try native.json.put(a, &result, "head", try native.values.toJson(t.Head, a, head));
     try native.json.put(
@@ -589,7 +725,7 @@ fn monitor(
         a,
         try materialize.backlog(a, index, obligation),
     ));
-    const reconciliation = try @import("reconciliation.zig").inspect(a, index, id);
+    const reconciliation = try @import("reconciliation.zig").inspect(a, index, obligation.task);
     try native.json.put(a, &result, "reconciliation", native.json.string(
         @tagName(reconciliation.capability),
     ));
@@ -598,7 +734,6 @@ fn monitor(
         a,
         reconciliation,
     ));
-    try appendPending(a, index, obligation, null, 16, &result);
     return result;
 }
 
@@ -611,7 +746,8 @@ fn pendingDirectives(
 ) !native.json.Value {
     const obligation = index.obligation(id) orelse return error.UnknownObligation;
     var result = native.json.object();
-    try appendPending(a, index, obligation, after, limit, &result);
+    const page = try appendPending(a, index, obligation, after, limit, &result, try dataRoom(a));
+    if (page == null or (page.?.clipped and page.?.shown == 0)) return error.Capacity;
     return result;
 }
 
@@ -622,7 +758,8 @@ fn appendPending(
     after: ?u64,
     limit: u32,
     result: *native.json.Value,
-) !void {
+    room: Extent,
+) !?Entry {
     if (limit == 0 or limit > 64) return error.InvalidPageLimit;
     const folded = index.head(obligation).folded_directive_ordinal;
     var total: u64 = 0;
@@ -642,8 +779,18 @@ fn appendPending(
         try native.values.toJson(u64, a, folded),
     );
     var pending: std.array_list.Managed(native.json.Value) = .init(a);
+    try native.json.put(a, result, "pending_directives", .{ .array = pending });
+    const widest: ?u64 = std.math.maxInt(u64);
+    try native.json.put(a, result, "pending_directives_next", try native.values.toJson(
+        ?u64,
+        a,
+        widest,
+    ));
+    var used = try extent(a, result.*);
+    if (!used.within(room)) return null;
     var cursor = @max(after orelse folded, folded);
     var more = false;
+    var clipped = false;
     for (obligation.directives) |position| {
         const directive = index.records[position].input.directive;
         if (directive.ordinal <= cursor) continue;
@@ -651,24 +798,16 @@ fn appendPending(
             more = true;
             break;
         }
-        try pending.append(try native.values.toJson(t.Directive, a, directive));
-        try native.json.put(a, result, "pending_directives", .{ .array = pending });
-        try native.json.put(
-            a,
-            result,
-            "pending_directives_next",
-            try native.values.toJson(u64, a, directive.ordinal),
-        );
-        if (!try native.json.fits(
-            a,
-            try reply(a, "observed", result.*),
-            .{ .bytes = frame_bytes_max },
-        )) {
-            _ = pending.pop();
-            if (pending.items.len == 0) return error.Capacity;
+        const item = try native.values.toJson(t.Directive, a, directive);
+        var size = try extent(a, item);
+        if (pending.items.len != 0) size = size.plus(separator);
+        if (!used.plus(size).within(room)) {
             more = true;
+            clipped = true;
             break;
         }
+        try pending.append(item);
+        used = used.plus(size);
         cursor = directive.ordinal;
     }
     try native.json.put(a, result, "pending_directives", .{ .array = pending });
@@ -678,6 +817,7 @@ fn appendPending(
         "pending_directives_next",
         try native.values.toJson(?u64, a, if (more) cursor else null),
     );
+    return .{ .value = result.*, .extent = used, .clipped = clipped, .shown = pending.items.len };
 }
 
 fn task(a: std.mem.Allocator, index: *const idx.Index, id: t.Id) !native.json.Value {

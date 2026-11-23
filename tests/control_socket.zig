@@ -286,6 +286,33 @@ test "control socket path lock keeps a bound socket that is not yet listening" {
     try std.testing.expectError(error.FileNotFound, kind(directory.lock));
 }
 
+test "control socket path lock retries a lock file its holder already released" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    const holder = c.open(
+        directory.lock,
+        .{ .CREAT = true, .EXCL = true, .ACCMODE = .RDONLY },
+        @as(c_uint, 0o600),
+    );
+    if (holder < 0) return error.TestFileFailed;
+    try std.testing.expectEqual(0, flock(holder, c.LOCK.EX | c.LOCK.NB));
+    const early = c.open(directory.lock, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (early < 0) return error.TestFileFailed;
+    try std.testing.expectError(error.PathOccupied, transport.lockOpened(early, directory.lock));
+    const late = c.open(directory.lock, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (late < 0) return error.TestFileFailed;
+    try std.testing.expectEqual(0, c.unlink(directory.lock));
+    try std.testing.expect(try transport.lockOpened(late, directory.lock) == null);
+    std.Io.Threaded.closeFd(holder);
+    var server = try transport.Server.init(
+        a,
+        directory.socket,
+        .{ .operator_uid = transport.currentUid() },
+    );
+    defer server.deinit();
+    try served(&server, directory.socket);
+}
+
 test "control socket cleanup preserves a replacement regular file or another socket" {
     var directory = try Directory.init();
     defer directory.deinit();

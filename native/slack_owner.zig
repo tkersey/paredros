@@ -247,12 +247,14 @@ fn confirm(
     selected: Bound,
     evidence: t.Ingress,
 ) !t.Id {
+    try commands.authenticate(driver, authenticated);
     const delivery = selected.record.input.delivery;
     if (same(selected.button.action_id.bytes, "paredros.proposal.confirm.v1")) {
         const producer = delivery.envelope.origin.derived.predecessor;
         const ordinal = try proposalOrdinal(index, producer, selected.button.value.bytes);
         const confirmation: commands.Confirmation = .{ .turn = producer, .ordinal = ordinal };
-        if (try commands.confirmed(driver, a, index, name, confirmation)) |task| return task;
+        const prior = try commands.confirmed(driver, a, index, name, authenticated, confirmation);
+        if (prior) |task| return task;
         const offered = try commands.proposal(index, confirmation);
         if (offered.body == .directive) try ingress_policy.directive(
             a,
@@ -260,7 +262,15 @@ fn confirm(
             offered.target orelse return error.InvalidProposalTarget,
             offered.body.directive,
         );
-        return commands.confirmIngress(driver, a, name, authenticated, confirmation, evidence);
+        return commands.admitConfirmation(
+            driver,
+            a,
+            index,
+            name,
+            authenticated,
+            confirmation,
+            evidence,
+        );
     }
     if (!same(selected.button.action_id.bytes, "answer")) return error.UnknownProposal;
     const target = delivery.payload.logical.obligation orelse return error.InvalidQuestion;

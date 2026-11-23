@@ -94,6 +94,7 @@ fn equals(value: std.json.Value, key: []const u8, expected: []const u8) bool {
 
 fn topLevel(message: std.json.Value) bool {
     const thread = optional(message, "thread_ts") orelse return true;
+    if (thread == .null) return true;
     return same(text(thread) catch return false, string(message, "ts") catch return false);
 }
 
@@ -931,6 +932,7 @@ pub const HistoryAudit = struct {
 
 fn nextCursor(page: std.json.Value) ![]const u8 {
     const metadata = optional(page, "response_metadata") orelse return "";
+    if (metadata == .null) return "";
     if (metadata != .object) return error.Malformed;
     const next = optional(metadata, "next_cursor") orelse return "";
     if (next == .null) return "";

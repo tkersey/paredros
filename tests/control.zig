@@ -292,6 +292,165 @@ test "control pages pending directives with exact frozen contents" {
     }, "unused"));
 }
 
+fn decodeFrame(frame: std.mem.Allocator, bytes: []const u8) !native.json.Value {
+    return (try native.json.parse(frame, bytes, .{ .bytes = control.frame_bytes_max })).value;
+}
+
+fn admitLarge(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    target: t.Id,
+    wording: []const u8,
+    count: usize,
+) !void {
+    for (0..count) |position| {
+        const operation = try std.fmt.allocPrint(frame, "large:{s}:{d}", .{
+            &std.fmt.bytesToHex(target, .lower),
+            position,
+        });
+        _ = try taskId(try dispatch(frame, driver, try control.encode(frame, .{
+            .version = 1,
+            .operation = .{ .bytes = operation },
+            .command = .{ .directive = .{ .target = target, .body = .{ .amend = .{
+                .expected_revision = 0,
+                .interval_ms = null,
+                .wording = .{ .bytes = wording },
+                .policies = null,
+                .repository_route = null,
+            } } } },
+        }), 501));
+    }
+}
+
+fn decorated(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    request: []const u8,
+    value: native.json.Value,
+) ![]const u8 {
+    const bytes = try control.dispatchDecorated(
+        frame,
+        driver,
+        configuration(),
+        501,
+        request,
+        null,
+        null,
+        .{ .name = "slack_transport", .value = value },
+    );
+    try std.testing.expect(bytes.len <= control.frame_bytes_max);
+    return bytes;
+}
+
+fn statusPage(frame: std.mem.Allocator, driver: *Driver, after: ?t.Id) !native.json.Value {
+    const bytes = try control.dispatch(frame, driver, configuration(), 501, try control.encode(
+        frame,
+        .{ .version = 1, .operation = null, .command = .{ .status = .{
+            .after = after,
+            .limit = 16,
+        } } },
+    ));
+    try std.testing.expect(bytes.len <= control.frame_bytes_max);
+    const value = try decodeFrame(frame, bytes);
+    try std.testing.expectEqualStrings(
+        "observed",
+        try native.json.text(value.object.get("status").?),
+    );
+    return value.object.get("data").?;
+}
+
+test "control pages pending directives and status within one decorated frame" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const wording = try frame.alloc(u8, 16 * 1024);
+    @memset(wording, 1);
+    var ids: [3]t.Id = undefined;
+    for (&ids, [_]usize{ 44, 16, 16 }, 0..) |*id, count, position| {
+        const name = try std.fmt.allocPrint(frame, "large-monitor:{d}", .{position});
+        id.* = try taskId(try dispatch(frame, &driver, try control.encode(frame, .{
+            .version = 1,
+            .operation = .{ .bytes = name },
+            .command = .{ .monitor_add = .{ .wording = .{ .bytes = name }, .interval_ms = null } },
+        }), 501));
+        try finish(&fixture, id.*);
+        try admitLarge(frame, &driver, id.*, wording, count);
+    }
+    var seen: usize = 0;
+    var after: ?t.Id = null;
+    for (0..3) |_| {
+        const page = try statusPage(frame, &driver, after);
+        const items = page.object.get("obligations").?.array.items;
+        try std.testing.expect(items.len > 0 and items.len < 3);
+        for (items) |item| try std.testing.expectEqual(
+            16,
+            item.object.get("pending_directives").?.array.items.len,
+        );
+        seen += items.len;
+        after = try native.values.fromJson(?t.Id, frame, page.object.get("next").?);
+        if (after == null) break;
+    }
+    try std.testing.expectEqual(3, seen);
+    const transport = @import("../native/slack_transport.zig");
+    const widest = std.math.maxInt(u64);
+    const health = try native.values.toJson(transport.Health, frame, .{
+        .state = .stopped,
+        .last_failure = .acknowledgement_deadline,
+        .connections = widest,
+        .received = widest,
+        .acknowledged = widest,
+        .ignored = widest,
+        .admission_failures = widest,
+        .deadline_misses = widest,
+        .reconnects = widest,
+        .last_received_ms = std.math.minInt(i64),
+        .last_acknowledged_ms = std.math.minInt(i64),
+    });
+    try std.testing.expect(try native.json.fits(frame, health, .{
+        .bytes = control.decoration_reserve.bytes,
+        .tokens = control.decoration_reserve.tokens,
+    }));
+    const hex_id = std.fmt.bytesToHex(ids[0], .lower);
+    const request = try cli.request(frame, &.{
+        "monitor", "directives", &hex_id, "--limit", "64",
+    }, "unused");
+    const full = try decodeFrame(frame, try decorated(frame, &driver, request, health));
+    const data = full.object.get("data").?;
+    const shown = data.object.get("pending_directives").?.array.items.len;
+    try std.testing.expect(shown > 16 and shown < 44);
+    try std.testing.expect(data.object.get("pending_directives_next").? != .null);
+    try std.testing.expect(full.object.get("slack_transport") != null);
+    const crowding = try frame.alloc(u8, control.frame_bytes_max / 2);
+    @memset(crowding, 'x');
+    const refused = try decodeFrame(frame, try decorated(
+        frame,
+        &driver,
+        request,
+        native.json.string(crowding),
+    ));
+    try std.testing.expectEqualStrings(
+        "Capacity",
+        try native.json.text(refused.object.get("error").?),
+    );
+    try std.testing.expect(refused.object.get("slack_transport") != null);
+    const oversized = try frame.alloc(u8, control.frame_bytes_max);
+    @memset(oversized, 'x');
+    try std.testing.expectEqualStrings(control.capacity_rejection, try decorated(
+        frame,
+        &driver,
+        request,
+        native.json.string(oversized),
+    ));
+}
+
 test "control malformed and unsupported frames are rejected without admission" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
@@ -590,6 +749,17 @@ test "control proposal consumer confirms each proposal once across operations" {
             task.* = try taskId(try consumerOperation(frame, &driver, "confirm", token, operation));
         }
         try std.testing.expectEqualDeep(tasks[0], tasks[1]);
+    }
+    driver.detach();
+    for ([_]t.Turn{ directive, genesis }) |offered| {
+        const request = std.fmt.bytesToHex(offered.envelope.stable_request, .lower);
+        const token = try std.fmt.allocPrint(frame, "{s}:0:0", .{&request});
+        const operation = try std.fmt.allocPrint(frame, "detached-{s}", .{&request});
+        const refused = try consumerOperation(frame, &driver, "confirm", token, operation);
+        try std.testing.expectEqualStrings(
+            "UnauthenticatedRequest",
+            try native.json.text(refused.object.get("error").?),
+        );
     }
     var index = try driver.rebuild(frame);
     defer index.deinit();

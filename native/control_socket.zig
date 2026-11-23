@@ -503,25 +503,35 @@ fn acquire(a: std.mem.Allocator, path: []const u8) !Lock {
     return error.PathOccupied;
 }
 
-fn lockAt(path: [:0]const u8) !?struct { fd: c_int, identity: Identity } {
+pub const Held = struct { fd: c_int, identity: Identity };
+
+fn lockAt(path: [:0]const u8) !?Held {
     const flags: c.O = .{ .ACCMODE = .RDONLY, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true };
     const fd = c.open(path, flags, @as(c_uint, 0o600));
     if (fd < 0) return switch (std.posix.errno(fd)) {
         .LOOP => error.PathOccupied,
         else => error.PathUnavailable,
     };
+    return lockOpened(fd, path);
+}
+
+pub fn lockOpened(fd: c_int, path: [:0]const u8) !?Held {
     errdefer closeFd(fd);
     const held = try descriptorStatus(fd);
     if (held.format != c.S.IFREG or held.status.uid != currentUid()) return error.PathOccupied;
-    if (flock(fd, c.LOCK.EX | c.LOCK.NB) != 0) return switch (std.posix.errno(-1)) {
-        .AGAIN => error.PathOccupied,
-        else => error.PathUnavailable,
-    };
-    const current = try entryStatus(c.AT.FDCWD, path, c.AT.SYMLINK_NOFOLLOW);
-    if (current) |found| if (std.meta.eql(found.status.identity, held.status.identity))
+    const locked = flock(fd, c.LOCK.EX | c.LOCK.NB) == 0;
+    if (!locked and std.posix.errno(-1) != .AGAIN) return error.PathUnavailable;
+    if (try names(path, held.status.identity)) {
+        if (!locked) return error.PathOccupied;
         return .{ .fd = fd, .identity = held.status.identity };
+    }
     closeFd(fd);
     return null;
+}
+
+fn names(path: [:0]const u8, identity: Identity) !bool {
+    const current = try entryStatus(c.AT.FDCWD, path, c.AT.SYMLINK_NOFOLLOW);
+    return if (current) |found| std.meta.eql(found.status.identity, identity) else false;
 }
 
 fn release(a: std.mem.Allocator, lock: Lock) void {
