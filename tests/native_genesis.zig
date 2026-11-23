@@ -80,8 +80,7 @@ fn expectedActivation(input: t.Genesis) t.DeliveryIntent {
             .prior_sequence = 0,
             .through_sequence = 0,
             .frozen_text = .{ .bytes = "PAREDROS is active. " ++
-                "First source observation is pending. " ++
-                "Marker retrieval has not yet been qualified." },
+                "First source observation is pending." },
             .prompt = null,
             .supersedes = null,
         },

@@ -86,7 +86,7 @@ fn cost(c: protean.Context, b: anytype, count: Count, text: anytype) !a.Value(u6
 }
 
 fn counter(c: protean.Context) !Count {
-    const function = try c.author.function("measure escaped Slack scalar budget", .{
+    const function = try c.author.function("measure escaped message scalar budget", .{
         .text = try c.schema(cts.Utf8),
         .index = try c.schema(u64),
         .total = try c.schema(u64),

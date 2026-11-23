@@ -129,7 +129,7 @@ fn expectRejected(value: chain.Result, index: usize, reason: []const u8) !void {
     );
 }
 
-test "native directive policy composes modes coalesced checks and read only final audits" {
+test "native directive policy composes modes coalesced checks and refuses final head audits" {
     var f: Fixture = .{};
     defer f.deinit();
     try f.init();
@@ -160,10 +160,8 @@ test "native directive policy composes modes coalesced checks and read only fina
     expected.mode = .cancelled;
     expected.desired_mode = .cancelled;
     try std.testing.expectEqualDeep(expected, final.head);
-    try expectRejected(final, 1, "final_head");
-    try std.testing.expectEqualDeep(&[_]t.AuditRequest{
-        .{ .delivery = intent().key }, .{ .frontier = {} },
-    }, final.audit_requests.items);
+    for (1..4) |i| try expectRejected(final, i, "final_head");
+    try std.testing.expectEqual(0, final.audit_requests.items.len);
     const transfer = directive(10, 1, null, .{ .transfer = {} });
     const transferred = try execute(&f, "transfer", head(), &.{transfer});
     expected = selected(head(), transfer);
@@ -433,14 +431,14 @@ test "native directive policy abbreviates full escaped digests with a duplicate 
         previous.digest.?.delivery.payload.coverage,
         output.payload.coverage,
     );
-    var prepared = try @import("../native/delivery_prepare.zig").wire(
+    var prepared = try @import("../native/delivery_prepare.zig").materialize(
         f.arena.allocator(),
         output,
-        @splat(7),
-        "B1",
+        .{ .task = @splat(7), .digest = @splat(8) },
+        @splat(9),
     );
     defer prepared.deinit();
-    try std.testing.expect(prepared.body.len != 0);
+    try std.testing.expect(prepared.value.payload.wire_json.bytes.len != 0);
 }
 
 fn slackOrigin() t.Origin {
@@ -453,7 +451,7 @@ fn slackOrigin() t.Origin {
     } };
 }
 
-test "native directive policy emits authored notices and audit requests in fold order" {
+test "native directive policy refuses audits and keeps legacy origin notices in fold order" {
     var f: Fixture = .{};
     defer f.deinit();
     try f.init();
@@ -461,25 +459,20 @@ test "native directive policy emits authored notices and audit requests in fold 
     first.value.envelope.origin = slackOrigin();
     var second = directive(3, 2, first.reference, .{ .audit = .{ .key = intent().key } });
     second.value.envelope.origin = slackOrigin();
-    var bad_key = intent().key;
-    bad_key.lineage = @splat(99);
-    var third = directive(4, 3, second.reference, .{ .audit = .{ .key = bad_key } });
+    var third = directive(4, 3, second.reference, .{ .frontier_audit = {} });
     third.value.envelope.origin = slackOrigin();
     const value = try execute(&f, "notices", head(), &.{ first, second, third });
     try std.testing.expectEqual(3, value.notices.items.len);
-    try std.testing.expectEqual(1, value.audit_requests.items.len);
-    try std.testing.expectEqualDeep(
-        t.AuditRequest{ .delivery = intent().key },
-        value.audit_requests.items[0],
-    );
-    try std.testing.expectEqualStrings(
+    try std.testing.expectEqual(0, value.audit_requests.items.len);
+    try expectApplied(value, 0);
+    for (1..3) |i| try expectRejected(value, i, "audit_unavailable");
+    const texts = [_][]const u8{
         "pause applied.",
-        value.notices.items[0].payload.frozen_text.bytes,
-    );
-    try std.testing.expectEqualStrings(
-        "audit rejected: audit_lineage_mismatch",
-        value.notices.items[2].payload.frozen_text.bytes,
-    );
+        "audit rejected: audit_unavailable",
+        "frontier_audit rejected: audit_unavailable",
+    };
+    for (value.notices.items, texts) |notice, text|
+        try std.testing.expectEqualStrings(text, notice.payload.frozen_text.bytes);
     for (value.notices.items, [_]t.DirectiveFact{ first, second, third }) |notice, fact| {
         try std.testing.expectEqualDeep(head().specification.destination, notice.destination);
         try std.testing.expectEqualDeep(fact.value.envelope.stable_request, notice.key.identity);

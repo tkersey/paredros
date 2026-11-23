@@ -4,7 +4,6 @@ const horos = @import("horos");
 const t = @import("application_types");
 const application = @import("../app/application.zig");
 const github = @import("../app/github_contract.zig");
-const history = @import("../app/audit_contract.zig");
 const model = @import("../app/model_contract.zig");
 
 const Expected = struct {
@@ -15,20 +14,7 @@ const Expected = struct {
 };
 const expected = [_]Expected{
     .{ .identity = github.identity, .role = .read, .resource = "read", .capture = true },
-    .{ .identity = history.identity, .role = .read, .resource = "read", .capture = true },
-    .{
-        .identity = @import("../app/lineage_audit_contract.zig").identity,
-        .role = .read,
-        .resource = "read",
-        .capture = true,
-    },
     .{ .identity = model.P.identity, .role = .model, .resource = "inference", .capture = true },
-    .{
-        .identity = application.notification_identity,
-        .role = .write,
-        .resource = "write",
-        .capture = true,
-    },
     .{
         .identity = @import("../app/method_contract.zig").workspace_identity,
         .role = .read,
@@ -65,32 +51,14 @@ const ObservedApplication = struct {
             }
             try std.testing.expectEqual(1, count);
         }
-        try std.testing.expectEqual(1, c.registry.entry_dispatches.items.len);
-        const protected = c.registry.entry_dispatches.items[0];
-        try std.testing.expectEqual(module.entry, protected.function);
-        try std.testing.expectEqualStrings(application.notification_identity, protected.identity);
-        try std.testing.expectEqual(
-            std.meta.fieldIndex(t.Input, "delivery").?,
-            protected.delivery_case,
-        );
-        try std.testing.expectEqual(
-            std.meta.fieldIndex(t.Output, "delivery").?,
-            protected.result_case,
-        );
-        const payload = c.builder.effects.items[@intCast(protected.effect)].payload;
-        try std.testing.expectEqual(
-            try horos.authoring.interop.schemaId(c.author, try c.schema(t.Delivery)),
-            payload,
-        );
-        const ordinary = c.builder.functions.items[@intCast(protected.ordinary)];
-        try std.testing.expectEqual(expected.len - 1, ordinary.effects.len);
-        for (ordinary.effects) |effect|
-            try std.testing.expect(effect != protected.effect);
+        try std.testing.expectEqual(0, c.registry.entry_dispatches.items.len);
+        const entry = c.builder.functions.items[@intCast(module.entry)];
+        try std.testing.expectEqual(expected.len, entry.effects.len);
         return module;
     }
 };
 
-test "application composition admits exact provider effects and protected notifications" {
+test "application composition admits exact provider effects without protected dispatch" {
     var diagnostic: horos.source.Diagnostic = .{};
     errdefer std.debug.print("application diagnostic {any}\n", .{diagnostic});
     var compiled = try protean.compileObserved(std.testing.allocator, protean.system(.{
@@ -113,11 +81,13 @@ test "application composition admits exact provider effects and protected notifi
 pub fn NativeTests(comptime native: type) type {
     return struct {
         const bridge = @import("../native/application.zig");
-        const cts = @import("protean_contracts");
-        const slack = @import("../native/slack_external.zig");
         const prepare = @import("../native/delivery_prepare.zig");
         const fixtures = @import("contracts.zig");
         const allocator = std.testing.allocator;
+        const Fixture = @import("native_fixture.zig").Fixture(bridge.Types, struct {
+            pub const use_product_assets = true;
+            pub const declarations = bridge.Application.declarations;
+        });
 
         fn intent() t.DeliveryIntent {
             return .{
@@ -140,14 +110,25 @@ pub fn NativeTests(comptime native: type) type {
             };
         }
 
-        fn delivery() !cts.Decoded(t.Delivery) {
+        fn delivery() !@import("protean_contracts").Decoded(t.Delivery) {
             return prepare.materialize(
                 allocator,
                 intent(),
                 .{ .task = @splat(4), .digest = @splat(5) },
                 @splat(6),
-                "B1",
             );
+        }
+
+        fn audit(admitted: t.Delivery) t.Input {
+            return .{ .audit = .{
+                .envelope = admitted.envelope,
+                .delivery = admitted,
+                .ordinal = 0,
+                .oldest = .{ .bytes = "0" },
+                .latest = null,
+                .page_limit = 1,
+                .canary = null,
+            } };
         }
 
         test "native application declarations match production capability schemas" {
@@ -167,60 +148,29 @@ pub fn NativeTests(comptime native: type) type {
                 }
                 try std.testing.expectEqual(1, count);
             }
-            const declaration = bridge.Application.declarations[3];
-            const payload = try declaration.payload_schema(allocator);
-            defer allocator.free(payload);
-            const expected_payload = try native.values.schemaBytes(t.Delivery, allocator);
-            defer allocator.free(expected_payload);
-            try std.testing.expectEqualSlices(u8, expected_payload, payload);
         }
 
-        test "native application delivery projection preserves every sealed adapter input field" {
+        test "native application completes local deliveries and refuses legacy and audit work" {
+            var f: Fixture = .{};
+            defer f.deinit();
+            try f.init();
             var admitted = try delivery();
             defer admitted.deinit();
-            const original = try cts.encodeOwned(t.Delivery, allocator, admitted.value);
-            defer allocator.free(original);
-            const projected = try bridge.projectDelivery(allocator, original);
-            defer allocator.free(projected);
-            var decoded = try cts.decodeOwned(
-                @import("../app/slack_contract.zig").Request,
-                allocator,
-                projected,
-            );
-            defer decoded.deinit();
-            try std.testing.expectEqualDeep(admitted.value.destination, decoded.value.destination);
-            try std.testing.expectEqualDeep(admitted.value.key, decoded.value.key);
-            try std.testing.expectEqualDeep(admitted.value.payload, decoded.value.payload);
-            var prepared = try slack.preparedWire(allocator, decoded.value, "B1");
-            defer prepared.deinit();
-            try std.testing.expectEqualSlices(
-                u8,
-                admitted.value.payload.wire_json.bytes,
-                prepared.body,
-            );
-        }
-
-        test "native application rejects tampered delivery envelopes keys and wire" {
-            var admitted = try delivery();
-            defer admitted.deinit();
-            for (0..6) |mutation| {
-                var changed = admitted.value;
-                switch (mutation) {
-                    0 => changed.envelope.version = 2,
-                    1 => changed.envelope.operation.bytes = "unbound operation",
-                    2 => changed.envelope.stable_request[0] ^= 1,
-                    3 => changed.destination.channel.bytes = "D-other",
-                    4 => changed.key.generation += 1,
-                    5 => changed.payload.logical.frozen_text.bytes = "changed notification",
-                    else => unreachable,
-                }
-                const bytes = try cts.encodeOwned(t.Delivery, allocator, changed);
-                defer allocator.free(bytes);
-                try std.testing.expectError(
-                    error.InvalidPayload,
-                    bridge.projectDelivery(allocator, bytes),
-                );
-            }
+            const version = admitted.value.payload.renderer_version;
+            try std.testing.expectEqual(prepare.renderer_version, version);
+            const task = try f.execute("local-delivery", .{ .delivery = admitted.value });
+            try std.testing.expectEqualDeep(t.Output{ .delivery = .{ .confirmed = .{
+                .timestamp = .{ .bytes = "local" },
+                .metadata_observed = true,
+            } } }, try f.output(task));
+            var legacy = admitted.value;
+            legacy.payload.renderer_version = prepare.legacy_renderer_version;
+            const refusal = "legacy_delivery_unsupported";
+            try f.rejected("legacy-delivery", .{ .delivery = legacy }, refusal);
+            var future = admitted.value;
+            future.envelope.version = 2;
+            try f.rejected("future-delivery", .{ .delivery = future }, "unsupported_input_version");
+            try f.rejected("audit", audit(admitted.value), "audit_unavailable");
         }
     };
 }

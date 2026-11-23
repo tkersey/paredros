@@ -12,20 +12,15 @@ const model = @import("model.zig");
 const method = @import("method.zig");
 const turn = @import("turn.zig");
 const experiment = @import("experiment.zig");
-const audit = @import("audit.zig");
 const github = @import("github_contract.zig");
-const history = @import("audit_contract.zig");
 const m = @import("model_contract.zig");
-const slack = @import("slack_contract.zig");
 
-pub const notification_identity = slack.notification_identity;
+const local_renderer_version: u32 = 2;
 const Function = a.Function(struct { input: t.Input }, t.Output);
 const Functions = struct {
     genesis: genesis.Function,
     step: step.Function,
     turn: turn.Function,
-    audit: audit.Function,
-    lineage_audit: audit.Lineage.EntryFunction,
     experiment: experiment.Function,
 };
 
@@ -35,23 +30,6 @@ pub const Application = struct {
         const inference = try m.P.declare(c);
         const reader = try check.emit(c);
         const github_read = try operation(c, reader, github.Request, github.Reply, github.identity);
-        const history_reader = try audit.emit(c);
-        const history_read = try operation(
-            c,
-            history_reader,
-            history.Request,
-            history.Reply,
-            history.identity,
-        );
-        const lineage_reader = try audit.Lineage.emit(c);
-        const lineage_contract = @import("lineage_audit_contract.zig");
-        const lineage_read = try operation(
-            c,
-            lineage_reader,
-            lineage_contract.Request,
-            lineage_contract.Reply,
-            lineage_contract.identity,
-        );
         const method_ops = try method.declare(c);
         const render_effects = .{ inference, method_ops.workspace, method_ops.codec };
         const retained = try method.emit(c, method_ops, completion, render_effects);
@@ -70,8 +48,6 @@ pub const Application = struct {
                 .{ github_read, inference, method_ops.workspace, method_ops.codec },
             ),
             .turn = try turn.emit(c, completion, .{inference}),
-            .audit = history_reader,
-            .lineage_audit = lineage_reader,
             .experiment = try experiment.emit(
                 c,
                 experiment_ops,
@@ -80,20 +56,11 @@ pub const Application = struct {
                 experiment_effects,
             ),
         };
-        const ordinary = try dispatch(c, functions, .{
-            github_read,      inference,            history_read,         method_ops.workspace,
-            method_ops.codec, experiment_ops.codec, experiment_ops.clock, lineage_read,
+        const entry = try dispatch(c, functions, .{
+            github_read,      inference,            method_ops.workspace,
+            method_ops.codec, experiment_ops.codec, experiment_ops.clock,
         });
-        const published = try c.author.module(ordinary, try c.schema(t.Failure));
-        const prefix = protean.notification.identity_prefix;
-        if (!std.mem.startsWith(u8, notification_identity, prefix))
-            return error.InvalidNotificationIdentity;
-        const entry = try protean.notification.Dispatcher(t.Input, t.Output).emit(
-            c,
-            notification_identity[prefix.len..],
-            try horos.authoring.interop.functionId(c.author, ordinary),
-        );
-        return c.builder.module(entry, published.failure);
+        return c.author.module(entry, try c.schema(t.Failure));
     }
 };
 
@@ -143,22 +110,37 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
             "directive",
             directive.payload(),
         )),
-        .delivery = try delivery.fail(
-            try c.schema(t.Output),
-            try c.literal(t.Failure, .{ .code = .{ .bytes = "notification_dispatch_bypass" } }),
-        ),
-        .audit = try inspect.ret(try invoke(c, inspect, functions.audit, "audit")),
+        .delivery = try delivery.ret(try deliver(c, delivery)),
+        .audit = try inspect.fail(try c.schema(t.Output), try unavailable(c)),
         .turn = try converse.ret(try invoke(c, converse, functions.turn, "turn")),
         .experiment = try compare.ret(try invoke(c, compare, functions.experiment, "experiment")),
         .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
         .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
         .restore = try restore.ret(try preserve(c, restore, "restore")),
-        .lineage_audit = try lineage.ret(
-            try invoke(c, lineage, functions.lineage_audit, "lineage_audit"),
-        ),
+        .lineage_audit = try lineage.fail(try c.schema(t.Output), try unavailable(c)),
     });
     try c.author.define(function, try b.ret(result));
     return function;
+}
+
+fn deliver(c: protean.Context, case: anytype) !a.Value(t.Output) {
+    const b = case.body();
+    const input = case.payload();
+    try envelope(c, b, input);
+    const version = try b.field(try b.field(input, "payload"), "renderer_version");
+    try a.require(
+        c,
+        b,
+        try b.equal(version, try b.constant(u32, local_renderer_version)),
+        "legacy_delivery_unsupported",
+    );
+    return b.variant(try c.schema(t.Output), "delivery", try c.literal(t.DeliveryOutcome, .{
+        .confirmed = .{ .timestamp = .{ .bytes = "local" }, .metadata_observed = true },
+    }));
+}
+
+fn unavailable(c: protean.Context) !a.Value(t.Failure) {
+    return c.literal(t.Failure, .{ .code = .{ .bytes = "audit_unavailable" } });
 }
 
 fn preserve(c: protean.Context, case: anytype, comptime tag: []const u8) !a.Value(t.Output) {

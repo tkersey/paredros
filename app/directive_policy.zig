@@ -47,12 +47,7 @@ pub fn emit(c: protean.Context) !chain.Apply {
         try b.constant(bool, true),
         try mode.enumIs(c, b, t.Mode, old_mode, .transferred),
     );
-    const readonly = try b.select(
-        try bodyIs(b, body, "audit"),
-        try b.constant(bool, true),
-        try bodyIs(b, body, "frontier_audit"),
-    );
-    const allowed = try b.select(final, readonly, try b.constant(bool, true));
+    const allowed = try b.booleanNot(final);
     const active = try b.branch();
     const ended = try b.branch();
     const next = try applyBody(c, active, helpers, head, directive, body);
@@ -92,9 +87,6 @@ fn applyBody(
         head,
         .{ .next_due_ms = try check.body().field(head, "clock_ms") },
     );
-    const frontier_result = try frontier.body().update(try accept(c, frontier.body(), head), .{
-        .audit_request = try c.literal(?t.AuditRequest, .{ .frontier = {} }),
-    });
     const amended = try revise(c, amend.body(), h.revision, head, "amend", amend.payload());
     const adopted = try revise(c, adopt.body(), h.revision, head, "adopt", adopt.payload());
     const reverted = try revise(c, revert.body(), h.revision, head, "revert", revert.payload());
@@ -120,14 +112,10 @@ fn applyBody(
             directive,
             try release.body().field(release.payload(), "key"),
         )),
-        .audit = try audit.ret(try requestAudit(
-            c,
-            audit.body(),
-            h,
-            head,
-            try audit.body().field(audit.payload(), "key"),
-        )),
-        .frontier_audit = try frontier.ret(frontier_result),
+        .audit = try audit.ret(try refuse(c, audit.body(), head, "audit_unavailable")),
+        .frontier_audit = try frontier.ret(
+            try refuse(c, frontier.body(), head, "audit_unavailable"),
+        ),
         .recovery_hold = try recovery_hold.ret(held),
         .recovery_release = try recovery_release.ret(released),
     });
@@ -580,21 +568,6 @@ fn replacementText(
         .used = try b.constant(u64, 0),
     });
     return b.conditional(keep, try retained.ret(complete), try abbreviated.ret(summary));
-}
-
-fn requestAudit(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    key: a.Value(t.DeliveryKey),
-) !a.Value(chain.Applied) {
-    const valid = try digestEqual(b, h, try b.field(key, "lineage"), try b.field(head, "lineage"));
-    const request = try b.variant(try c.schema(t.AuditRequest), "delivery", key);
-    const accepted = try b.update(try accept(c, b, head), .{
-        .audit_request = try b.variant(try c.schema(?t.AuditRequest), "some", request),
-    });
-    return b.select(valid, accepted, try refuse(c, b, head, "audit_lineage_mismatch"));
 }
 
 fn withNotice(
