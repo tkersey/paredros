@@ -38,6 +38,7 @@ const Identity = struct { device: u64, inode: u64 };
 const Status = struct { identity: Identity, uid: u32, mode: u32 };
 const Entry = struct { status: Status, format: u32 };
 const Lock = struct { fd: c_int, path: [:0]u8, identity: Identity };
+const lock_attempts = 64;
 
 pub const Selection = struct {
     allocator: std.mem.Allocator,
@@ -519,14 +520,25 @@ pub fn lockOpened(fd: c_int, path: [:0]const u8) !?Held {
     errdefer closeFd(fd);
     const held = try descriptorStatus(fd);
     if (held.format != c.S.IFREG or held.status.uid != currentUid()) return error.PathOccupied;
-    const locked = flock(fd, c.LOCK.EX | c.LOCK.NB) == 0;
-    if (!locked and std.posix.errno(-1) != .AGAIN) return error.PathUnavailable;
+    const locked = try exclusive(fd, flock);
     if (try names(path, held.status.identity)) {
         if (!locked) return error.PathOccupied;
         return .{ .fd = fd, .identity = held.status.identity };
     }
     closeFd(fd);
     return null;
+}
+
+pub fn exclusive(fd: c_int, comptime lock: fn (c_int, c_int) callconv(.c) c_int) !bool {
+    for (0..lock_attempts) |_| {
+        if (lock(fd, c.LOCK.EX | c.LOCK.NB) == 0) return true;
+        switch (std.posix.errno(-1)) {
+            .INTR => {},
+            .AGAIN => return false,
+            else => return error.PathUnavailable,
+        }
+    }
+    return error.PathUnavailable;
 }
 
 fn names(path: [:0]const u8, identity: Identity) !bool {

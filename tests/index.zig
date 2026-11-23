@@ -1026,6 +1026,67 @@ test "index materialization accounts changed revisions without repeating a consu
     );
 }
 
+fn capturedBatch(a: std.mem.Allocator, sequence: u64) !t.Batch {
+    const body = try a.alloc(u8, 20 * 1024);
+    @memset(body, 'x');
+    const evidence = try a.dupe(t.ReadEvidence, &.{.{
+        .request_digest = @splat(9),
+        .target = .{ .bytes = "https://api.github.com/repositories/1/compare/a...b" },
+        .status = 200,
+        .body = .{ .bytes = body },
+        .body_digest = @splat(8),
+        .captured_ms = 100,
+        .provider_date = null,
+        .request_id = null,
+        .link = null,
+        .etag = null,
+        .retry_after = null,
+        .rate_remaining = null,
+        .rate_reset = null,
+    }});
+    const commits = try a.dupe(t.Commit, &.{.{
+        .oid = @splat('a' + @as(u8, @intCast(sequence))),
+        .message = .{ .bytes = "small change" },
+    }});
+    return .{
+        .repository = fixture.specification().repository,
+        .sequence = sequence,
+        .epoch = 0,
+        .base = @splat('a' + @as(u8, @intCast(sequence - 1))),
+        .tip = @splat('a' + @as(u8, @intCast(sequence))),
+        .coverage = .complete,
+        .commits = .{ .items = commits },
+        .raw_evidence = .{ .items = evidence },
+        .acquired_ms = 100,
+        .provider_date = null,
+    };
+}
+
+test "index materialization hands an ordinary backlog by its model context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rows: [5]idx.Row = undefined;
+    rows[0] = try genesis(a);
+    var previous = head();
+    for (1..rows.len) |sequence| {
+        const operation = try std.fmt.allocPrint(a, "captured-check-{d}", .{sequence});
+        const input = step(previous, ref(rows[sequence - 1]), operation);
+        var output = successor(input);
+        const batch = try capturedBatch(a, sequence);
+        output.step.head.observed = .{ .sequence = sequence, .epoch = 0, .tip = batch.tip };
+        output.step.batch = batch;
+        rows[sequence] = try row(a, @intCast(sequence + 1), .{ .step = input }, output);
+        previous = output.step.head;
+    }
+    var index = try idx.Index.init(Native, a, &rows, &.{});
+    defer index.deinit();
+    const materialize = @import("../native/materialize.zig");
+    var frozen = try materialize.step(a, &index, rows[0].input.task, 900, null);
+    defer frozen.deinit();
+    try std.testing.expectEqual(rows.len - 1, frozen.value.batches.items.len);
+}
+
 test "index dispatch gate fences a selected step immediately after restrictive admission" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

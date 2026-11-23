@@ -6,6 +6,7 @@ const e = @import("../app/experiment_contract.zig");
 const m = @import("../app/model_contract.zig");
 const method = @import("../app/method_contract.zig");
 const step = @import("../app/step.zig");
+const measure = @import("render_measure.zig");
 
 pub const OwnedReply = struct {
     arena: std.heap.ArenaAllocator,
@@ -272,21 +273,20 @@ fn validateCase(a: std.mem.Allocator, selected: e.Case) !void {
         return error.EmptyRubricTerm;
     for (selected.rubric.forbidden.items) |text| if (text.bytes.len == 0)
         return error.EmptyRubricTerm;
-    const oversized = !try firstFits(a, input);
+    const oversized = try firstOversized(a, input);
     if (selected.condition == .oversized and !oversized) return error.OversizedCaseFits;
     if (selected.condition != .oversized and oversized) return error.MethodNotExercised;
 }
 
-fn firstFits(a: std.mem.Allocator, input: step.RenderInput) !bool {
+fn firstOversized(a: std.mem.Allocator, input: step.RenderInput) !bool {
     const first = input.step.batches.items[0];
-    const one = [_]@FieldType(method.GuestInput, "batches").Child{.{
-        .reference = first.reference,
-        .value = first.value,
-    }};
-    return @import("method_external.zig").guestFits(a, .{
-        .batches = .{ .items = &one },
-        .state = .{ .bytes = "" },
-    }, input.head.specification.policies.render_input_bytes);
+    const specification = input.head.specification;
+    var ordinary = try measure.Prefix.init(.ordinary, specification, "");
+    var retained = try measure.Prefix.init(.retained, specification, "");
+    const baseline = !try ordinary.fits(a, first);
+    const candidate = !try retained.fits(a, first);
+    if (baseline != candidate) return error.ArmMeasuresDisagree;
+    return baseline;
 }
 
 pub fn scriptedBinding() t.ModelBinding {

@@ -10,6 +10,7 @@ const render = @import("../app/render.zig");
 const method = @import("../app/method.zig");
 const method_contract = @import("../app/method_contract.zig");
 const method_external = @import("../native/method_external.zig");
+const measure = @import("../native/render_measure.zig");
 const method_fixture = @import("native_method.zig");
 const examples = @import("contracts.zig");
 const fresh = @import("native_genesis.zig").expectedFresh;
@@ -378,6 +379,55 @@ test "native ordinary render bounds its exact model context and not retained raw
     try std.testing.expectEqual(2, scenario.calls);
 }
 
+fn expectMeasured(
+    a: std.mem.Allocator,
+    previous: t.Head,
+    facts: []const Fact,
+    expected: []const usize,
+) !void {
+    var prefix = try measure.Prefix.forHead(previous);
+    var guest = try measure.Prefix.init(.retained, previous.specification, "carried");
+    const items = try a.alloc(@FieldType(method_contract.GuestInput, "batches").Child, facts.len);
+    for (facts, expected, items, 1..) |fact, length, *item, count| {
+        try std.testing.expect(try prefix.fits(a, fact));
+        try std.testing.expectEqual(length, try prefix.total());
+        item.* = .{ .reference = fact.reference, .value = fact.value };
+        _ = try guest.fits(a, fact);
+        const encoded = try cts.encodeOwned(method_contract.GuestInput, a, .{
+            .batches = .{ .items = items[0..count] },
+            .state = .{ .bytes = "carried" },
+        });
+        try std.testing.expectEqual(encoded.len, try guest.total());
+    }
+}
+
+test "native ordinary render bounds its prefix by the context bound it enforces" {
+    var scenario: Scenario = .{};
+    var f: Fixture = .{};
+    defer f.deinit();
+    f.profile.environment = &scenario;
+    try f.initWithGrants(&.{model_identity});
+    const a = f.arena.allocator();
+    const values = try commits(a, 8);
+    const facts = [_]Fact{ batch(1, 0, 4, values[0..4]), batch(2, 4, 8, values[4..8]) };
+    _ = try execute(&f, "single-context", input(head(1), facts[0..1]));
+    const single = try a.dupe(u8, scenario.context.?);
+    _ = try execute(&f, "double-context", input(head(2), &facts));
+    const double = try a.dupe(u8, scenario.context.?);
+    try expectMeasured(a, head(2), &facts, &.{ single.len, double.len });
+    var previous = head(2);
+    previous.specification.policies.context_bytes = double.len - 1;
+    const value = try execute(&f, "context-bound-prefix", input(previous, &facts));
+    _ = try assertFrame(previous, value, facts[0]);
+    try std.testing.expectEqual(3, scenario.calls);
+    try std.testing.expectEqualStrings(single, scenario.context.?);
+    previous.specification.policies.context_bytes = 64 * 1024;
+    previous.specification.policies.render_input_bytes = 512 * 1024;
+    const wide = try execute(&f, "capacity-bound-prefix", input(previous, &facts));
+    _ = try assertFrame(previous, wide, facts[1]);
+    try std.testing.expectEqual(4, scenario.calls);
+}
+
 test "native ordinary render calls one model with complete provenance and validates highlights" {
     var scenario: Scenario = .{};
     var f: Fixture = .{};
@@ -436,9 +486,9 @@ test "native ordinary render makes context exhaustion explicit without truncatio
     var previous = head(1);
     previous.specification.policies.context_bytes = 50;
     const value = try execute(&f, "small-context", input(previous, &.{first}));
-    try contains(value.digest.?.delivery.payload.frozen_text.bytes, "Context-bound fallback");
+    try contains(value.digest.?.delivery.payload.frozen_text.bytes, "Large-batch fallback");
     try std.testing.expectEqual(0, scenario.calls);
-    var missing = input(previous, &.{first});
+    var missing = input(head(1), &.{first});
     missing.step.model = null;
     const no_model = try execute(&f, "no-model", missing);
     try contains(no_model.digest.?.delivery.payload.frozen_text.bytes, "No model configured");

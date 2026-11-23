@@ -7,6 +7,7 @@ const admission = @import("admission.zig");
 const delivery = @import("delivery_fact.zig");
 const continuity = @import("continuity.zig");
 const interaction = @import("interaction_evidence.zig");
+const measure = @import("render_measure.zig");
 
 pub fn step(
     a: std.mem.Allocator,
@@ -334,7 +335,7 @@ fn batches(
         }
     }.less);
     var result: std.ArrayList(BatchFact) = .empty;
-    var size: u64 = 0;
+    var prefix = try measure.Prefix.forHead(head);
     var sequence = head.told.sequence;
     for (candidates.items) |fact| {
         const batch = fact.value;
@@ -342,12 +343,10 @@ fn batches(
         if (batch.sequence > head.observed.sequence) return error.BatchBeyondObserved;
         sequence = try std.math.add(u64, sequence, 1);
         if (batch.sequence != sequence) return error.BatchCoverageGap;
-        const encoded = try c.encodeOwned(BatchFact, a, fact);
-        size = try std.math.add(u64, size, encoded.len);
-        if (size > head.specification.policies.render_input_bytes and result.items.len > 0) break;
+        const fits = try prefix.fits(a, fact);
+        if (!fits and result.items.len > 0) break;
         try result.append(a, fact);
-        if (size > head.specification.policies.render_input_bytes or
-            batch.coverage != .complete) break;
+        if (!fits or batch.coverage != .complete) break;
     }
     return result.toOwnedSlice(a);
 }

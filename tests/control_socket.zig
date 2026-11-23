@@ -313,6 +313,37 @@ test "control socket path lock retries a lock file its holder already released" 
     try served(&server, directory.socket);
 }
 
+var interruptions: u32 = 0;
+
+fn interruptedLock(fd: c_int, operation: c_int) callconv(.c) c_int {
+    if (interruptions == 0) return flock(fd, operation);
+    interruptions -= 1;
+    c._errno().* = @intFromEnum(c.E.INTR);
+    return -1;
+}
+
+test "control socket path lock retries an interrupted lock attempt" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    const fd = c.open(
+        directory.lock,
+        .{ .CREAT = true, .EXCL = true, .ACCMODE = .RDONLY },
+        @as(c_uint, 0o600),
+    );
+    if (fd < 0) return error.TestFileFailed;
+    defer std.Io.Threaded.closeFd(fd);
+    interruptions = 3;
+    try std.testing.expect(try transport.exclusive(fd, interruptedLock));
+    try std.testing.expectEqual(0, interruptions);
+    const other = c.open(directory.lock, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (other < 0) return error.TestFileFailed;
+    defer std.Io.Threaded.closeFd(other);
+    interruptions = 1;
+    try std.testing.expect(!try transport.exclusive(other, interruptedLock));
+    interruptions = std.math.maxInt(u32);
+    try std.testing.expectError(error.PathUnavailable, transport.exclusive(other, interruptedLock));
+}
+
 test "control socket cleanup preserves a replacement regular file or another socket" {
     var directory = try Directory.init();
     defer directory.deinit();

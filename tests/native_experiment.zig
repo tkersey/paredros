@@ -450,6 +450,42 @@ test "native experiment rejects missing conditions budgets and exposed withheld 
     changed.cases.items = unexercised;
     try rejectedPlan(allocator, changed, false, "MethodNotExercised");
     try retainedReserve(allocator, original);
+    try armDisagreement(allocator, original);
+}
+
+fn armDisagreement(allocator: std.mem.Allocator, original: e.ComparisonPlan) !void {
+    var changed = original;
+    const cases = try allocator.dupe(e.Case, original.cases.items);
+    changed.cases.items = cases;
+    cases[0].input.head.specification.policies.context_bytes = 64;
+    cases[0].input.step.previous = cases[0].input.head;
+    try rejectedPlan(allocator, changed, false, "ArmMeasuresDisagree");
+    cases[0] = original.cases.items[0];
+    const facts = try allocator.dupe(
+        @FieldType(t.Step, "batches").Child,
+        cases[0].input.step.batches.items,
+    );
+    const body = try allocator.alloc(u8, 4096);
+    @memset(body, 'x');
+    facts[0].value.raw_evidence = .{ .items = try allocator.dupe(t.ReadEvidence, &.{.{
+        .request_digest = @splat(9),
+        .target = .{ .bytes = "https://api.github.com/repositories/1/compare/a...b" },
+        .status = 200,
+        .body = .{ .bytes = body },
+        .body_digest = @splat(8),
+        .captured_ms = 100,
+        .provider_date = null,
+        .request_id = null,
+        .link = null,
+        .etag = null,
+        .retry_after = null,
+        .rate_remaining = null,
+        .rate_reset = null,
+    }}) };
+    cases[0].input.step.batches.items = facts;
+    cases[0].input.head.specification.policies.render_input_bytes = 2048;
+    cases[0].input.step.previous = cases[0].input.head;
+    try rejectedPlan(allocator, changed, false, "ArmMeasuresDisagree");
 }
 
 fn exactBound(allocator: std.mem.Allocator, selected: *e.Case) !void {

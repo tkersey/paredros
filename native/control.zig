@@ -149,9 +149,8 @@ const content: Extent = .{
 const separator: Extent = .{ .bytes = 1, .tokens = 0 };
 
 fn extent(a: std.mem.Allocator, value: native.json.Value) !Extent {
-    var buffer: [4096]u8 = undefined;
-    var counter = std.Io.Writer.Discarding.init(&buffer);
-    try std.json.Stringify.value(value, .{}, &counter.writer);
+    const encoded = try native.json.canonical(a, value);
+    defer a.free(encoded);
     var pending: std.ArrayList(native.json.Value) = .empty;
     defer pending.deinit(a);
     try pending.append(a, value);
@@ -167,7 +166,7 @@ fn extent(a: std.mem.Allocator, value: native.json.Value) !Extent {
         },
         else => tokens += 1,
     };
-    return .{ .bytes = counter.fullCount(), .tokens = tokens };
+    return .{ .bytes = encoded.len, .tokens = tokens };
 }
 
 fn dataRoom(a: std.mem.Allocator) !Extent {

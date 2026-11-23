@@ -11,6 +11,7 @@ const m = @import("model_contract.zig");
 const frame = @import("render_frame.zig");
 const method = @import("method.zig");
 const mc = @import("method_contract.zig");
+const words = @import("render_text.zig");
 
 const Batches = @FieldType(t.Step, "batches");
 const BatchFact = Batches.Child;
@@ -33,9 +34,7 @@ const Prefix = struct {
 const Selection = struct { input: step.RenderInput, prefix: Prefix };
 const Select = a.Function(struct { state: Selection }, Prefix);
 const Projected = a.Function(struct { commits: frame.Commits, index: u64, total: u64 }, u64);
-const commit_lead = "\nEvidence untrusted: commit ";
-const commit_size = " message bytes=";
-const commit_end = "\n";
+const context_capacity = Context.max_length.?;
 const ContextState = struct {
     batches: Batches,
     count: u64,
@@ -187,7 +186,8 @@ fn projection(c: protean.Context) !Projected {
         try a.failure(c, "render_commit_bounds"),
     );
     const message = try more.blobLength(try more.field(commit, "message"));
-    const fixed = commit_lead.len + @typeInfo(t.Oid).array.len + commit_size.len + commit_end.len;
+    const fixed = words.commit_lead.len + @typeInfo(t.Oid).array.len + words.commit_size.len +
+        words.commit_end.len;
     const header = try add(c, more, try more.constant(u64, fixed), try more.blobLength(
         try more.textInteger(message),
     ));
@@ -416,14 +416,30 @@ fn exceeds(
     framed: a.Value(u64),
     comptime field: []const u8,
 ) !a.Value(bool) {
-    const policies = try b.field(
-        try b.field(try b.field(input, "head"), "specification"),
-        "policies",
-    );
     return b.less(
-        try b.field(policies, "render_input_bytes"),
+        try inputLimit(b, try b.field(input, "head")),
         try add(c, b, framed, try b.field(prefix, field)),
     );
+}
+
+fn inputLimit(b: anytype, head: a.Value(t.Head)) !a.Value(u64) {
+    const policies = try b.field(try b.field(head, "specification"), "policies");
+    const selected = try b.field(head, "method");
+    const ordinary = try b.caseOf(selected, "ordinary");
+    const retained = try b.caseOf(selected, "retained");
+    const method_bound = try retained.body().field(policies, "render_input_bytes");
+    return b.match(selected, .{
+        .ordinary = try ordinary.ret(try contextLimit(ordinary.body(), policies)),
+        .retained = try retained.ret(method_bound),
+    });
+}
+
+fn contextLimit(b: anytype, policies: a.Value(t.Policies)) !a.Value(u64) {
+    const input = try b.field(policies, "render_input_bytes");
+    const context = try b.field(policies, "context_bytes");
+    const capacity = try b.constant(u64, context_capacity);
+    const configured = try b.select(try b.less(input, context), input, context);
+    return b.select(try b.less(configured, capacity), configured, capacity);
 }
 
 fn validateBatch(
@@ -566,18 +582,15 @@ fn identityText(
     comptime N: usize,
     identity: a.Value([N]u8),
 ) !a.Value(Context) {
-    var text = try literal(c, "[");
+    var text = try literal(c, words.identity_open);
     inline for (0..N) |index| {
         const byte = try b.variantPayload(
             try b.sequenceGet(identity, try b.constant(u64, index)),
             "some",
             try a.failure(c, "render_identity_bounds"),
         );
-        text = try join(
-            c,
-            b,
-            .{ text, try b.textInteger(byte), try literal(c, if (index + 1 == N) "]" else ",") },
-        );
+        const end = if (index + 1 == N) words.identity_close else words.identity_separator;
+        text = try join(c, b, .{ text, try b.textInteger(byte), try literal(c, end) });
     }
     return text;
 }
@@ -606,11 +619,11 @@ fn contextCommits(c: protean.Context, oid: oid_text.Function) !ContextCommits {
         c,
         more,
         .{
-            try literal(c, commit_lead),
+            try literal(c, words.commit_lead),
             try oid_text.format(c, more, oid, try more.field(commit, "oid")),
-            try literal(c, commit_size),
+            try literal(c, words.commit_size),
             try more.textInteger(try more.blobLength(message)),
-            try literal(c, commit_end),
+            try literal(c, words.commit_end),
         },
     );
     const required = try add(
@@ -689,17 +702,17 @@ fn batchHeader(c: protean.Context, b: anytype, fact: a.Value(BatchFact)) !a.Valu
         c,
         b,
         .{
-            try literal(c, "\nState: complete batch sequence="),
+            try literal(c, words.batch),
             try b.textInteger(try b.field(batch, "sequence")),
-            try literal(c, " epoch="),
+            try literal(c, words.epoch),
             try b.textInteger(try b.field(batch, "epoch")),
-            try literal(c, " acquired_ms="),
+            try literal(c, words.acquired),
             try b.textInteger(try b.field(batch, "acquired_ms")),
-            try literal(c, " retained task bytes="),
+            try literal(c, words.task),
             try identityText(c, b, 16, try b.field(reference, "task")),
-            try literal(c, " result digest bytes="),
+            try literal(c, words.digest),
             try identityText(c, b, 32, try b.field(reference, "digest")),
-            try literal(c, "\n"),
+            try literal(c, words.batch_end),
         },
     );
 }
@@ -743,16 +756,15 @@ fn prelude(
 ) !a.Value(Context) {
     const repository = try b.field(specification, "repository");
     return join(c, b, .{
-        try literal(c, "Operator instruction bytes="),
+        try literal(c, words.instruction),
         try b.textInteger(try b.blobLength(try b.field(specification, "wording"))),
-        try literal(c, "\n"),
+        try literal(c, words.instruction_end),
         try b.field(specification, "wording"),
-        try literal(c, "\nState: repository id="),
+        try literal(c, words.repository),
         try b.textInteger(try b.field(repository, "id")),
-        try literal(c, " ref="),
+        try literal(c, words.ref),
         try b.field(repository, "ref"),
-        try literal(c, "\nComplete commit records and immutable provenance follow. " ++
-            "Provider captures remain retained locally; this context projects commit evidence.\n"),
+        try literal(c, words.lead_end),
     });
 }
 
@@ -764,9 +776,7 @@ fn renderContext(
     prefix: a.Value(Prefix),
 ) !a.Value(?Context) {
     const specification = try b.field(try b.field(input, "head"), "specification");
-    const configured = try b.field(try b.field(specification, "policies"), "context_bytes");
-    const capacity = try b.constant(u64, 256 * 1024);
-    const limit = try b.select(try b.less(configured, capacity), configured, capacity);
+    const limit = try contextLimit(b, try b.field(specification, "policies"));
     const text = try prelude(c, b, specification);
     const fits = try b.branch();
     const full = try b.branch();
