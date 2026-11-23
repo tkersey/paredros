@@ -435,7 +435,9 @@ test "control reads messages without admission and refuses removed Slack command
         try native.json.text((try decodeFrame(frame, bytes)).object.get("status").?),
     );
     for ([_][]const u8{ "0", "65" }) |limit| {
-        const request = try cli.request(frame, &.{ "messages", &hex_id, "--limit", limit }, "unused");
+        const request = try cli.request(frame, &.{
+            "messages", &hex_id, "--limit", limit,
+        }, "unused");
         const response = try dispatch(frame, &driver, request, 501);
         try std.testing.expectEqualStrings(
             "InvalidPageLimit",
