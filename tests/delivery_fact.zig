@@ -84,7 +84,11 @@ const Fixture = struct {
         };
     }
 
-    fn retarget(self: *Fixture, purpose: @FieldType(t.DeliveryKey, "purpose"), renderer: u32) !void {
+    fn retarget(
+        self: *Fixture,
+        purpose: @FieldType(t.DeliveryKey, "purpose"),
+        renderer: u32,
+    ) !void {
         const allocator = self.arena.allocator();
         var input = try c.decodeOwned(t.Input, allocator, self.evidence.input.bytes);
         input.value.delivery.key.purpose = purpose;
@@ -283,6 +287,7 @@ test "delivery facts confirm completed local deliveries from the task result" {
     const receipt = result.value.?.receipt.?;
     try std.testing.expectEqualStrings("local", receipt.timestamp.bytes);
     try std.testing.expectEqual(.captured_response, receipt.basis);
-    try std.testing.expectEqual(fixture.snapshot.result.?.reference.digest, receipt.evidence.digest);
+    const result = fixture.snapshot.result.?;
+    try std.testing.expectEqual(result.reference.digest, receipt.evidence.digest);
     try std.testing.expectEqual(fixture.snapshot.task, receipt.evidence.task);
 }

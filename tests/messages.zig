@@ -129,7 +129,8 @@ test "messages list an obligation's local and legacy records in stable order" {
     try std.testing.expectEqual(4, page.total);
     try std.testing.expectEqual(null, page.next);
     const items = page.messages.items;
-    const purposes = [_]@FieldType(t.DeliveryKey, "purpose"){ .activation, .digest, .question, .control };
+    const Purpose = @FieldType(t.DeliveryKey, "purpose");
+    const purposes = [_]Purpose{ .activation, .digest, .question, .control };
     const states = [_]messages.State{ .legacy_possibly_sent, .legacy_unsent, .delivered, .pending };
     for (items, purposes, states, 1..) |item, purpose, state, ordinal| {
         try std.testing.expectEqual(ordinal, item.ordinal);
