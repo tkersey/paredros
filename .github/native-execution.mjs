@@ -9,7 +9,7 @@ const suites = {
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
-  providers: 40,
+  providers: 41,
   'transitions-first': 15,
   'transitions-second': {
     receipts: group(1, 'native settlements retain deliveries with mismatched admissions or receipts'),

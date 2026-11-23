@@ -113,6 +113,10 @@ pub fn row(loaded: LoadedSnapshot) index.Row {
     };
 }
 
+fn sized(value: native.tasks.ApplicationValue) !void {
+    if (value.reference.bytes != value.bytes.len) return error.DigestMismatch;
+}
+
 fn rowValue(value: native.tasks.ApplicationValue) index.Value {
     return .{
         .task = value.task,
@@ -192,6 +196,8 @@ pub fn load(service: anytype, a: std.mem.Allocator, task: t.Id, page_limit: u32)
     const result = try service.applicationValue(scratch, task, .result);
     if (input.revision != saved.revision or (result != null and
         result.?.revision != saved.revision)) return error.StaleRevision;
+    try sized(input);
+    if (result) |selected| try sized(selected);
     const frozen = try service.frozenInputs(scratch, task);
     const attempts = try loadAttempts(
         service,

@@ -479,13 +479,15 @@ fn validateGenesis(record: Record, initial: t.Head) !void {
 }
 
 fn restrict(mode: t.Mode, body: t.DirectiveBody) t.Mode {
-    if (mode == .cancelled or mode == .transferred) return mode;
-    return switch (body) {
-        .pause => .paused,
-        .cancel => .cancelled,
-        .transfer => .transferred,
-        else => mode,
+    if (body == .@"resume" or body == .recovery_release) return mode;
+    var state: ControlState = .{
+        .mode = mode,
+        .desired = .active,
+        .recovery_hold = false,
+        .boundary = null,
     };
+    state.apply(body);
+    return state.mode;
 }
 
 fn orderedDirectives(self: *Index, obligation: t.Id, initial: t.Head) ![]const usize {
@@ -602,9 +604,9 @@ const ControlState = struct {
         };
     }
 
-    fn apply(self: *ControlState, directive: t.Directive) void {
+    fn apply(self: *ControlState, body: t.DirectiveBody) void {
         if (self.mode == .cancelled or self.mode == .transferred) return;
-        switch (directive.body) {
+        switch (body) {
             .pause => {
                 self.mode = .paused;
                 self.desired = .paused;
@@ -667,7 +669,7 @@ fn validateStep(
             !try sameValue(a, t.Directive, fact.value, admitted.input.directive))
             return error.CopiedDirectiveMismatch;
         last = reference;
-        control_state.apply(fact.value);
+        control_state.apply(fact.value.body);
     }
     try validateFacts(self, step, chain);
     try validateBatches(self, step, chain);
@@ -942,39 +944,4 @@ pub fn readCancellation(
         .revision = saved.value.revision,
         .bytes = bytes,
     } };
-}
-
-pub fn readRow(service: anytype, a: std.mem.Allocator, task: t.Id) !c.Decoded(Row) {
-    var arena = std.heap.ArenaAllocator.init(a);
-    errdefer arena.deinit();
-    const scratch = arena.allocator();
-    var input = (try service.applicationValue(a, task, .input)) orelse return error.MissingInput;
-    defer input.deinit();
-    const copied = try copyValue(scratch, input);
-    var result: ?Value = null;
-    if (try service.applicationValue(a, task, .result)) |owned| {
-        var output = owned;
-        defer output.deinit();
-        result = try copyValue(scratch, output);
-    }
-    if (!std.meta.eql(copied.task, task)) return error.WrongTask;
-    if (result) |output| if (!std.meta.eql(output.task, task) or
-        output.revision != copied.revision) return error.RevisionMismatch;
-    return .{ .arena = arena, .value = .{ .input = copied, .result = result } };
-}
-
-fn copyValue(a: std.mem.Allocator, value: anytype) !Value {
-    if (value.reference.bytes != value.bytes.len or
-        !std.meta.eql(value.reference.digest, digest(value.bytes))) return error.DigestMismatch;
-    return .{
-        .task = value.task,
-        .revision = value.revision,
-        .digest = value.reference.digest,
-        .schema_id = try a.dupe(u8, value.schema_id),
-        .encoding = switch (value.encoding) {
-            .contract => .contract,
-            .json => .json,
-        },
-        .bytes = try a.dupe(u8, value.bytes),
-    };
 }

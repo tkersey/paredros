@@ -210,6 +210,37 @@ test "index rebuild orders shuffled heads and pending directives without task co
     try std.testing.expectEqualSlices(usize, &.{ 3, 1 }, state.directives);
 }
 
+test "index pending recovery hold pauses effective mode until a release folds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try genesis(a);
+    const begun = try row(a, 4, .{ .restore = .{
+        .envelope = envelope("restore"),
+        .action = .{ .begin = .{ .previous = null, .cut = .{ .items = &.{} } } },
+    } }, null);
+    const boundary = inputRef(begun);
+    const hold = directive("hold", 1, null, .{ .recovery_hold = .{ .recovery = boundary } });
+    const held = try row(a, 2, .{ .directive = hold }, null);
+    const release = directive("release", 2, inputRef(held), .{ .recovery_release = .{
+        .recovery = boundary,
+        .exclusive_owner = true,
+    } });
+    const released = try row(a, 3, .{ .directive = release }, null);
+    var index = try idx.Index.init(
+        Native,
+        std.testing.allocator,
+        &.{ released, held, begun, initial },
+        &.{},
+    );
+    defer index.deinit();
+    const state = index.obligation(@splat(1)).?;
+    try std.testing.expectEqual(t.Mode.active, state.folded_mode);
+    try std.testing.expectEqual(t.Mode.paused, state.effective_mode);
+    try std.testing.expect(state.recovery_hold);
+    try std.testing.expect(!state.ordinaryDispatch());
+}
+
 test "index resume permits dispatch only after folding the directive chain" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -443,69 +474,6 @@ test "index cancellation evidence is read independently and authenticates method
     try std.testing.expectError(
         error.InvalidCancellationReceipt,
         idx.readCancellation(&owner, a, requested),
-    );
-}
-
-const ValueOwner = struct {
-    row: idx.Row,
-    corrupt_length: bool = false,
-    const Owned = struct {
-        allocator: std.mem.Allocator,
-        task: t.Id,
-        revision: u64,
-        reference: struct { digest: t.Digest, bytes: u64 },
-        schema_id: []const u8,
-        encoding: idx.Encoding,
-        bytes: []u8,
-
-        pub fn deinit(self: *Owned) void {
-            self.allocator.free(self.schema_id);
-            self.allocator.free(self.bytes);
-        }
-    };
-
-    pub fn applicationValue(
-        self: *@This(),
-        a: std.mem.Allocator,
-        _: t.Id,
-        kind: enum { input, result },
-    ) !?Owned {
-        const value = if (kind == .result) self.row.result orelse return null else self.row.input;
-        const schema = try a.dupe(u8, value.schema_id);
-        errdefer a.free(schema);
-        return .{
-            .allocator = a,
-            .task = value.task,
-            .revision = value.revision,
-            .reference = .{
-                .digest = value.digest,
-                .bytes = value.bytes.len + @intFromBool(self.corrupt_length),
-            },
-            .schema_id = schema,
-            .encoding = value.encoding,
-            .bytes = try a.dupe(u8, value.bytes),
-        };
-    }
-};
-
-test "index owner row preserves retained digest and owns bytes after owner read closes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var owner: ValueOwner = .{ .row = try genesis(arena.allocator()) };
-    var read = try idx.readRow(&owner, std.testing.allocator, @splat(1));
-    defer read.deinit();
-    try std.testing.expectEqualDeep(owner.row.input, read.value.input);
-    try std.testing.expectEqualDeep(owner.row.result, read.value.result);
-    owner.corrupt_length = true;
-    try std.testing.expectError(
-        error.DigestMismatch,
-        idx.readRow(&owner, std.testing.allocator, @splat(1)),
-    );
-    owner.corrupt_length = false;
-    owner.row.result.?.revision += 1;
-    try std.testing.expectError(
-        error.RevisionMismatch,
-        idx.readRow(&owner, std.testing.allocator, @splat(1)),
     );
 }
 

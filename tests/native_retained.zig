@@ -53,6 +53,75 @@ const FailureApplication = struct {
 };
 const FailureFixture = @import("native_fixture.zig").Fixture(Types, FailureApplication);
 
+const Service = native.tasks.Service(Types);
+
+fn Returned(comptime method: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(method)).@"fn".return_type.?).error_union.payload;
+}
+
+fn Param(comptime method: anytype, comptime position: usize) type {
+    return @typeInfo(@TypeOf(method)).@"fn".param_types[position].?;
+}
+
+const Selection = Param(Service.applicationValue, 3);
+const Skewed = struct {
+    service: *Service,
+    skew: ?Selection = null,
+
+    pub fn task(self: Skewed, s: std.mem.Allocator, id: t.Id) !Returned(Service.task) {
+        return self.service.task(s, id);
+    }
+
+    pub fn applicationValue(
+        self: Skewed,
+        s: std.mem.Allocator,
+        id: t.Id,
+        selection: Selection,
+    ) !Returned(Service.applicationValue) {
+        var value = (try self.service.applicationValue(s, id, selection)) orelse return null;
+        if (self.skew != null and self.skew.? == selection) value.reference.bytes += 1;
+        return value;
+    }
+
+    pub fn frozenInputs(
+        self: Skewed,
+        s: std.mem.Allocator,
+        id: t.Id,
+    ) !Returned(Service.frozenInputs) {
+        return self.service.frozenInputs(s, id);
+    }
+
+    pub fn status(
+        self: Skewed,
+        s: std.mem.Allocator,
+        value: Param(Service.status, 2),
+    ) !Returned(Service.status) {
+        return self.service.status(s, value);
+    }
+
+    pub fn attemptPage(
+        self: Skewed,
+        s: std.mem.Allocator,
+        id: t.Id,
+        revision: u64,
+        after: Param(Service.attemptPage, 4),
+        limit: u32,
+    ) !Returned(Service.attemptPage) {
+        return self.service.attemptPage(s, id, revision, after, limit);
+    }
+
+    pub fn attemptValue(
+        self: Skewed,
+        s: std.mem.Allocator,
+        id: t.Id,
+        revision: u64,
+        attempt: Param(Service.attemptValue, 4),
+        part: Param(Service.attemptValue, 5),
+    ) !Returned(Service.attemptValue) {
+        return self.service.attemptValue(s, id, revision, attempt, part);
+    }
+};
+
 fn fact(snapshot: retained.OwnedSnapshot) t.Settlement {
     return .{
         .reference = snapshot.reference,
@@ -127,6 +196,25 @@ test "native retained snapshot freezes exact owner bytes and survives reopening"
     try std.testing.expectEqualSlices(u8, saved.snapshot.bytes, reopened.snapshot.bytes);
     try std.testing.checkAllAllocationFailures(a, loadAllocation, .{ &fixture.service.?, id });
     try std.testing.checkAllAllocationFailures(a, decodeAllocation, .{saved.snapshot});
+}
+
+test "native retained load refuses application references whose length disagrees with bytes" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const id = try fixture.execute("first", .{ .genesis = examples.genesis() });
+    const service = &fixture.service.?;
+    var saved = try retained.load(Skewed{ .service = service }, a, id, 1);
+    defer saved.deinit();
+    var input = (try service.applicationValue(a, id, .input)).?;
+    defer input.deinit();
+    try std.testing.expectEqual(input.reference.digest, saved.evidence.input.digest);
+    try std.testing.expectEqualSlices(u8, input.bytes, saved.evidence.input.bytes);
+    try std.testing.expect(saved.evidence.result != null);
+    for ([_]Selection{ .input, .result }) |skew| try std.testing.expectError(
+        error.DigestMismatch,
+        retained.load(Skewed{ .service = service, .skew = skew }, a, id, 1),
+    );
 }
 
 test "native retained snapshot counts terminal failures but excludes control cancellation" {
