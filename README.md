@@ -124,9 +124,10 @@ and landing. Application qualification and reviews must cover this selected pin;
 upstream verification alone does not qualify PAREDROS. Live-provider qualification
 remains deferred.
 
-By owner decision this release omits three specified behaviors: Slack and GitHub
-transport health in `status`; the single announcement for a reference that returns
-`404` on consecutive checks (A65), whose head field would make existing namespaces
+By owner decision this release omits three specified behaviors: GitHub transport
+health in `status` (control replies carry Slack transport health when Slack is
+configured); the single announcement for a reference that returns `404` on
+consecutive checks (A65), whose head field would make existing namespaces
 unreadable; and the visible storage hold for exhausted storage. When SQLite reports
 a full database, Protean fences the store (`StorageUnavailable`); the `storage`
 delivery-hold variant stays reserved in the schema but is never produced.

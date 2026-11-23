@@ -263,7 +263,7 @@ def run(jobs, output, started, deadline, source=None, selection=None):
     def save():
         success = source_error is None and all(item["state"] == "passed" for item in rows.values())
         report = {"platform": [platform.system(), platform.machine()], "shared_budget_seconds": BUDGET_SECONDS,
-                  "selected_group": selection, "qualified": selection is None and success,
+                  "selected_group": selection, "qualified": selection is None and success and BUDGET_SECONDS <= 600,
                   "source": initial, "source_error": source_error,
                   "expected_product": product_expectations(platform.system()),
                   "elapsed_seconds": round(time.monotonic() - (deadline - BUDGET_SECONDS), 3), "jobs": rows,
