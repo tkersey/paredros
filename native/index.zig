@@ -69,6 +69,11 @@ pub const Index = struct {
     recovery_hold: bool = false,
     recovery_purpose: ?t.RestorePurpose = null,
     restore_cut: []const t.InputReference = &.{},
+    import_hold: bool = false,
+
+    pub fn outputHeld(self: *const Index) bool {
+        return self.recovery_hold or self.import_hold;
+    }
 
     pub fn deinit(self: *Index) void {
         self.storage.deinit(self.arena.child_allocator);
@@ -151,6 +156,7 @@ pub const Index = struct {
         self.recovery_purpose = recovery_view.recovery_purpose;
         self.restore_cut = recovery_view.restore_cut;
         self.continuity_import = try continuity.prepareImport(scratch, self);
+        self.import_hold = restore.importHeld(self);
         self.imports = try continuity.prepareImports(scratch, self);
         self.portable = try continuity.preparePortable(scratch, self);
         try validateTurns(self, cancellations);
@@ -419,7 +425,7 @@ fn buildObligation(
         return error.OrphanStep;
     const latest = recordHead(self.records[selected]).?;
     var effective = latest.mode;
-    var recovery_hold = latest.recovery_hold or self.recovery_hold or
+    var recovery_hold = latest.recovery_hold or self.outputHeld() or
         !try continuity.controlsComplete(a, self, genesis.task, latest.folded_directive_ordinal);
     for (directives) |position| {
         const directive = self.records[position].input.directive;

@@ -368,6 +368,10 @@ test "native continuity global turns preserve frozen context and ingress identit
     )).?;
     try std.testing.expect(held.record(retained_task).?.input == .continuity_member);
     held.deinit();
+    const waiting = try transfer.admitPendingTurns(&destination, a, origin);
+    try std.testing.expect(waiting.admitted == null);
+    try std.testing.expectEqual(1, waiting.remaining);
+    try releaseImport(&to, &destination);
     const mapped = try transfer.admitPendingTurns(&destination, a, origin);
     try std.testing.expectEqual(0, mapped.remaining);
     try verifyFrozenTurn(&to, &destination, frozen, mapped.admitted.?);
@@ -378,6 +382,113 @@ test "native continuity global turns preserve frozen context and ingress identit
         origin,
     )).admitted == null);
     try importDone(&to, &destination, bundle.value);
+}
+
+const restore = @import("../native/restore.zig");
+const eligibility = @import("../native/eligibility.zig");
+const notification = @import("../app/slack_contract.zig").notification_identity;
+
+fn releaseImport(f: *Fixture, driver: *Driver) !void {
+    const a = f.arena.allocator();
+    const boundary = try restore.begin(driver, a, "import-ownership", origin);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(index.import_hold and index.recovery_hold);
+    const reference: t.InputReference = .{
+        .task = boundary,
+        .digest = index.record(boundary).?.input_digest,
+    };
+    _ = try restore.release(driver, a, "import-release", origin, reference, true);
+}
+
+fn permitted(driver: *Driver, a: std.mem.Allocator, task: t.Id, capability: []const u8) !bool {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    return eligibility.permits(a, &index, .{
+        .task = task,
+        .identity = @splat(9),
+        .kind = .acquisition,
+        .capability = capability,
+    }, 500);
+}
+
+fn replyPermitted(driver: *Driver, a: std.mem.Allocator, turn: t.Id) !bool {
+    const replies = try driver.turnDeliveries(a);
+    defer a.free(replies);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const wanted = index.record(turn).?.input.turn.envelope.stable_request;
+    for (replies) |task| {
+        if (!std.meta.eql(index.record(task).?.input.delivery.key.identity, wanted)) continue;
+        return permitted(driver, a, task, notification);
+    }
+    return error.MissingTurnDelivery;
+}
+
+fn heldAsk(f: *Fixture, driver: *Driver) !t.Id {
+    const a = f.arena.allocator();
+    const task = try driver.turn(a, "slack-held-event", slackOrigin(), .{
+        .destination = contracts.specification().destination,
+        .text = .{ .bytes = "Asked before the exclusive ownership release." },
+        .ingress = .{ .stable_request = @splat(23), .timestamp = .{ .bytes = "1700000001.1" } },
+    });
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(index.import_hold and !index.recovery_hold);
+    return task;
+}
+
+test "native continuity imported output waits for the exclusive ownership release" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try original.attach(a);
+    defer if (original.attached) original.detach();
+    _ = try frozenTurn(&from, &original);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    try importDone(&to, &destination, bundle.value);
+    const model = @import("../app/model_contract.zig").P.identity;
+    const asked = try heldAsk(&to, &destination);
+    try std.testing.expect(!try permitted(&destination, a, asked, model));
+    try std.testing.expect(!try destination.importedTurns(a));
+    try finish(&to, asked);
+    try std.testing.expect(!try replyPermitted(&destination, a, asked));
+    try releaseImport(&to, &destination);
+    try std.testing.expect(try permitted(&destination, a, asked, model));
+    try std.testing.expect(try destination.importedTurns(a));
+    var index = try destination.rebuild(a);
+    const imported = (try transfer.importedIngress(
+        a,
+        &index,
+        "slack-original-event",
+        slackOrigin(),
+        @splat(19),
+    )).?;
+    try std.testing.expect(index.record(imported).?.input == .turn);
+    index.deinit();
+    try std.testing.expect(try permitted(&destination, a, imported, model));
+    try finish(&to, imported);
+    try std.testing.expect(try replyPermitted(&destination, a, imported));
 }
 
 const lineage_contract = @import("../app/lineage_audit_contract.zig");
@@ -1051,6 +1162,7 @@ fn verifyCarried(driver: *Driver, a: std.mem.Allocator, bundle: transfer.Bundle)
 fn importTurnChain(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
     try importDone(f, driver, bundle);
+    try releaseImport(f, driver);
     const mapped = try transfer.admitPendingTurns(driver, a, origin);
     try finish(f, mapped.admitted.?);
 }

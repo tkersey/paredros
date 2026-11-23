@@ -233,7 +233,7 @@ pub fn admit(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !Progress 
     if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
     var progress: Progress = .{};
     const selected = try pending(scratch, &index, &progress);
-    if (selected.len == 0) return progress;
+    if (selected.len == 0 or index.import_hold) return progress;
     const first = selected[0];
     const input = try mappedInput(
         scratch,

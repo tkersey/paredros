@@ -22,7 +22,7 @@ pub fn permits(
         .step => |value| blk: {
             const obligation = index.obligation(value.obligation) orelse break :blk false;
             const position = obligation.eligible orelse break :blk false;
-            break :blk !index.recovery_hold and
+            break :blk !index.outputHeld() and
                 std.meta.eql(index.records[position].task, record.task) and
                 obligation.ordinaryDispatch() and !value.fold_only;
         },
@@ -41,7 +41,7 @@ pub fn permits(
             @import("../app/lineage_audit_contract.zig").identity,
         ) and
             try @import("lineage_audit.zig").permits(a, index, value),
-        .turn => record.input.turn.envelope.origin != .derived,
+        .turn => record.input.turn.envelope.origin != .derived and !index.outputHeld(),
         .experiment => |value| experimentPermitted(value, request.capability),
         .genesis, .directive, .continuity_member, .continuity_cut, .restore => false,
     };

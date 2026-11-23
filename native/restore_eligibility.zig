@@ -3,7 +3,7 @@ const t = @import("application_types");
 const idx = @import("index.zig");
 
 pub fn allows(index: *const idx.Index, delivery: t.Delivery) bool {
-    if (index.recovery_hold) return false;
+    if (index.outputHeld()) return false;
     for (index.restore_cut) |reference| {
         const record = index.record(reference.task) orelse return false;
         if (!std.meta.eql(record.input_digest, reference.digest)) return false;

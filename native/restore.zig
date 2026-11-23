@@ -48,6 +48,20 @@ pub fn inspect(a: std.mem.Allocator, index: anytype) !View {
     return result;
 }
 
+pub fn importHeld(index: anytype) bool {
+    const view = index.continuity_import orelse return false;
+    const manifest = index.records[view.position];
+    const reference: t.InputReference = .{ .task = manifest.task, .digest = manifest.input_digest };
+    for (index.records) |item| {
+        if (item.input != .restore or item.input.restore.action != .release) continue;
+        const boundary = index.record(item.input.restore.action.release.recovery.task) orelse
+            continue;
+        if (boundary.input != .restore or boundary.input.restore.action != .begin) continue;
+        if (contains(boundary.input.restore.action.begin.cut.items, reference)) return false;
+    }
+    return true;
+}
+
 fn contains(cut: []const t.InputReference, reference: t.InputReference) bool {
     for (cut) |item| if (std.meta.eql(item, reference)) return true;
     return false;
