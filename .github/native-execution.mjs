@@ -52,7 +52,7 @@ const suites = {
       'tests.experiment.', 'tests.native_genesis.', 'tests.contracts.'),
   },
   'continuity-first': 7,
-  'continuity-second': 22,
+  'continuity-second': 23,
   'continuity-third': 26,
   product: 5,
   crash: 12,
