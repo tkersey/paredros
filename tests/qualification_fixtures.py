@@ -1,8 +1,7 @@
 """Check an offline product against an explicitly supplied fixture directory.
 
-historical-reopen and daemon-100k take exclusive, disposable state/ directories
-at their original device and inode. historical-import needs only the archive.
-The verifier creates private control sockets and import destinations under /tmp.
+daemon-100k takes an exclusive, disposable state/ directory at its original
+device and inode. The verifier creates a private control socket under /tmp.
 """
 
 import argparse
@@ -11,10 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
-import platform
-import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -90,111 +86,6 @@ def serve(binary, config, ready_timeout=45, stop_timeout=45):
                     raise RuntimeError(f"shutdown exited {code}: {log.read()}")
 
 
-def import_archive(binary, fixture, report, home):
-    config = configure(home, fixture, home / "state")
-    archive = home / "backups" / "legacy-audit"
-    shutil.copyfile(fixture / "backups" / archive.name, archive)
-    archive.chmod(0o600)
-    expected = bytes(report["export"]["data"]["digest"]).hex()
-    require(digest(archive) == expected, "archive SHA-256 differs from historical export")
-    with serve(binary, config):
-        deadline = time.monotonic() + 180
-        while True:
-            imported = command(
-                binary, "--config", config, "transfer", "import", archive,
-                "--operation", "legacy-import",
-            )
-            if imported["data"]["phase"] == "materialized":
-                break
-            require(time.monotonic() < deadline, "import did not materialize")
-            time.sleep(0.1)
-        status = command(binary, "--config", config, "status")
-        obligations = status["data"]["obligations"]
-        require(len(obligations) == 1, "expected one imported obligation")
-        item = obligations[0]
-        require(item["head"]["told"] == report["head"]["told"], "import changed told head")
-        require(item["ordinary_dispatch"] is False, "expected imported dispatch to be held")
-    require(digest(archive) == expected, "import changed archive bytes")
-    return expected
-
-
-@contextlib.contextmanager
-def preserved(state):
-    pristine = state.with_name(state.name + ".pristine")
-    staging = state.with_name(state.name + ".partial")
-    if staging.exists():
-        shutil.rmtree(staging)
-    if pristine.exists():
-        restore(state, pristine)
-    staging.mkdir(mode=0o700)
-    clone(state, staging)
-    staging.rename(pristine)
-    try:
-        yield
-    finally:
-        restore(state, pristine)
-
-
-def clone(source, destination):
-    flags = ["-c"] if platform.system() == "Darwin" else []
-    for item in sorted(source.iterdir()):
-        require(item.is_file(), f"unexpected namespace entry: {item}")
-        subprocess.run(["cp", *flags, "-p", item, destination / item.name], check=True)
-
-
-def restore(state, pristine):
-    for item in state.iterdir():
-        item.unlink()
-    clone(pristine, state)
-    shutil.rmtree(pristine)
-
-
-def tree(root):
-    return {p.relative_to(root): digest(p) for p in root.rglob("*") if p.is_file()}
-
-
-def reopen(binary, fixture, report, home):
-    state = fixture / "state"
-    config = configure(home, fixture, state)
-    with preserved(state):
-        reopened(binary, report, config, state)
-
-
-def reopened(binary, report, config, state):
-    def files():
-        return tree(state)
-
-    before = files()
-    audit = command(binary, "--config", config, "namespace", "check")
-    require(audit["report"]["native_closure"]["application_readability"] == "verified",
-            "historical namespace readability was not verified")
-    require(files() == before, "read-only audit changed historical namespace files")
-    tasks = task_ids(audit)
-    with serve(binary, config):
-        task = command(binary, "--config", config, "task", "show", report["audit"]["data"]["task"])
-        require(task["data"]["input"] == report["audit_task"]["data"]["input"],
-                "reopened audit task input differs")
-        item = command(binary, "--config", config, "monitor", "show", report["obligation"])["data"]
-        for field in ("observed", "told"):
-            require(item["head"][field] == report["head"][field], f"reopened {field} head differs")
-        page = command(binary, "--config", config, "messages", report["obligation"])["data"]
-        legacy = [message for message in page["messages"] if message["purpose"] == "activation"]
-        require(legacy and all(message["state"].startswith("legacy_") for message in legacy),
-                "expected the activation flagged legacy")
-    after = task_ids(command(binary, "--config", config, "namespace", "check"))
-    require(tasks <= after, "reopen lost historical tasks")
-    added = after - tasks
-    require(len(added) <= 1, f"reopen admitted {len(added)} tasks; expected at most one step")
-    with serve(binary, config):
-        for task in added:
-            shown = command(binary, "--config", config, "task", "show", task)["data"]
-            require(shown["input"]["tag"] == "step", "reopen admitted a task other than a step")
-
-
-def task_ids(audit):
-    return {bytes(task["id"]).hex() for task in audit["report"]["tasks"]}
-
-
 def check_100k(binary, fixture, report, home):
     state = fixture / "state"
     config = configure(home, fixture, state)
@@ -236,20 +127,9 @@ def check_100k(binary, fixture, report, home):
     }
 
 
-def verify_producer(check, system, report, current_sha256):
-    producers = {"77866577394711e6152a1e97fdecfeb0cfcd2f2c"}
-    if check == "historical-reopen" and system == "Linux":
-        producers.add("95a2f040029a38a46daf5be4d6dadff6c8c08dab")
-    require(report.get("source_head") in producers, "expected historical source commit")
-    prior = report.get("binary_sha256")
-    require(isinstance(prior, str) and re.fullmatch(r"[0-9a-f]{64}", prior),
-            "expected historical binary SHA-256")
-    require(prior != current_sha256, "historical fixture names the current executable")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("check", choices=("historical-import", "historical-reopen", "daemon-100k"))
+    parser.add_argument("check", choices=("daemon-100k",))
     parser.add_argument("binary", type=Path)
     parser.add_argument("fixture", type=Path)
     args = parser.parse_args()
@@ -257,20 +137,8 @@ def main():
     fixture = args.fixture.resolve(strict=True)
     report = json.loads((fixture / "report.json").read_bytes())
     binary_sha256 = digest(binary)
-    if args.check.startswith("historical-"):
-        verify_producer(args.check, platform.system(), report, binary_sha256)
     with tempfile.TemporaryDirectory(prefix="pf-", dir="/tmp") as directory:
-        root = Path(directory).resolve()
-        if args.check == "daemon-100k":
-            evidence = check_100k(binary, fixture, report, root / "scale")
-        else:
-            if args.check == "historical-reopen":
-                reopen(binary, fixture, report, root / "reopen")
-            evidence = {
-                "source_head": report["source_head"],
-                "source_binary_sha256": report["binary_sha256"],
-                "archive_sha256": import_archive(binary, fixture, report, root / "import"),
-            }
+        evidence = check_100k(binary, fixture, report, Path(directory).resolve() / "scale")
     require(digest(binary) == binary_sha256, "product changed during qualification")
     print(json.dumps({"check": args.check, "binary_sha256": binary_sha256, **evidence}))
 

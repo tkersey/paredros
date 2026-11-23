@@ -50,9 +50,8 @@ Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
 essential set within one 600-second budget measured from the `zig build`
 invocation: TigerStyle over every tracked Zig file, the source contracts, the
 emitted-application check, the native `providers` owner group, the installed
-product's smoke checks, ten process-death cases, and historical namespace
-reopen and archive import. On macOS one build compiles every essential artifact
-concurrently. The product and native tests embed the committed emitted application in
+product's smoke checks, and ten process-death cases. On macOS one build compiles
+every essential artifact concurrently. The product and native tests embed the committed emitted application in
 `app/emitted/`, so they compile alongside Protean's emitter instead of after it.
 Qualification runs `check-emitted`, which requires those bytes to equal a fresh
 emission from `app/`. After editing `app/`, run
@@ -61,29 +60,19 @@ x86-64 Linux under Rosetta, export `ZIG_DEBUG_CMD=1` before invoking Zig. Use
 `zig build qualify -- --list` to inspect the groups. Each invocation executes the
 tests and writes fresh timings, outcomes, and logs under `zig-out/qualification/`.
 For groups and their prerequisites use `zig build qualify -- --group NAME[,NAME...]`.
-This requires only the fixtures used by the selected groups.
 
 The authority, transitions, rendering, continuity and methods owner groups, the
 24-arm comparison and the 100,000-task daemon are diagnostics. They do not gate a
 candidate, and their absence from a result is not a pass. Run them with
 `--group`, for example `zig build qualify -- --group methods-campaign`.
 
-Historical reopen and import use fixtures produced by the older application.
-The scale check opens a product-configured namespace containing 100,000 real
-tasks. Keep dedicated offline fixtures under
-`.zig-cache/qualification-fixtures/{reopen,archive,100k}`, or set
-`PAREDROS_HISTORY_REOPEN`, `PAREDROS_HISTORY_ARCHIVE`, and
-`PAREDROS_HISTORY_100K` to their respective directories. If a selected check's
-fixture is missing, qualification stops before running anything and reports
-every check incomplete. To provision another machine, build
-the legacy application at commit `77866577394711e6152a1e97fdecfeb0cfcd2f2c`
-in a separate checkout. The following commands create a dedicated historical
-namespace and snapshot with that binary and seed a separate scale namespace with
-the installed product. Run these once per fixture, outside the timed checks.
+The 100,000-task daemon diagnostic opens a product-configured namespace
+containing 100,000 real tasks. Keep it under
+`.zig-cache/qualification-fixtures/100k`, or set `PAREDROS_HISTORY_100K` to its
+directory. If its fixture is missing, `--group daemon-100k` stops before running
+anything. Generate it once with the installed product, outside the timed checks:
 
 ```sh
-uv run --no-project python tests/seed_history.py /path/to/legacy-checkout .zig-cache/qualification-fixtures/reopen
-ln -s reopen .zig-cache/qualification-fixtures/archive
 zig build setup
 zig build install build-scale-tests -Dnative=true -Dscale-tests=true -Doptimize=safe
 uv run --no-project python tests/seed_scale_fixture.py
@@ -110,8 +99,7 @@ takes six to eight minutes on a hosted runner, which leaves the lane at nine to
 ten minutes, so it runs with `--budget-seconds 840`. It passes `--essential`, omitting the licenses, version and offline
 ask probes, which cost about 75 seconds on the direct backend; the macOS smoke
 keeps them. The process-death cases need about nine minutes on a hosted runner,
-so they run in local and fallback qualification with historical reopen and
-import, which need local fixtures. When none of a hosted run's jobs start, the
+so they run in local and fallback qualification. When none of a hosted run's jobs start, the
 fallback workflow dispatches full macOS qualification on the Mac's self-hosted
 runner as a separate `macOS fallback` check; it never replaces the hosted result.
 

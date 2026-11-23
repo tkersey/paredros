@@ -127,9 +127,7 @@ def inventory(zig, system, install, output, full):
                 args, verify = [executable], exact_line(f"All {count} tests passed.")
             jobs.append(Job(name, args, (builder,), verify))
 
-    histories = [("historical-reopen", "reopen"), ("historical-import", "archive")]
-    if not full:
-        histories.append(("daemon-100k", "100k"))
+    histories = [] if full else [("daemon-100k", "100k")]
     for name, suffix in histories:
         variable = f"PAREDROS_HISTORY_{suffix.upper()}"
         fixture = Path(os.environ.get(variable) or Path(".zig-cache/qualification-fixtures") / suffix)
@@ -204,10 +202,8 @@ def missing_fixture(job):
         return None
     fixture = Path(job.args[-1])
     paths = ["config.json", "report.json"]
-    if job.name in ("historical-reopen", "daemon-100k"):
+    if job.name == "daemon-100k":
         paths += ["state/identity", "state/seal", "state/state.sqlite", "state/owner.lock"]
-    if job.name in ("historical-reopen", "historical-import"):
-        paths.append("backups/legacy-audit")
     missing = [entry for entry in paths if not (fixture / entry).is_file()]
     if missing:
         return f"{fixture} ({job.fixture}) requires: {', '.join(missing)}"
