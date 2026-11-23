@@ -11,7 +11,6 @@ pub const Environment = struct { io: std.Io, source: transfer.Source };
 pub const Export = struct { name: t.Name, snapshot: bool = false };
 pub const Import = struct {
     path: c.Text(4096),
-    exclusive_owner: bool = false,
     bytes_max: ?u64 = null,
 };
 pub const ExportProgress = struct {
@@ -31,7 +30,10 @@ pub fn exportBundle(
     request: Export,
 ) !ExportProgress {
     const directory = config.backup_directory orelse return error.MissingBackupDirectory;
-    try transfer.validateExportDestination(environment.io, directory, request.name.bytes);
+    if (try operationAdmitted(driver, a, operation))
+        try transfer.validateExportDestination(environment.io, directory, request.name.bytes)
+    else
+        try transfer.validateExportName(environment.io, directory, request.name.bytes);
     const stable = try admission.stableDigest(a, .{
         .request = request,
         .directory = c.Text(4096){ .bytes = directory },
@@ -68,6 +70,12 @@ pub fn exportBundle(
         cut_task,
     );
     return .{ .phase = .written, .cut = cut_task, .digest = digest, .name = request.name };
+}
+
+fn operationAdmitted(driver: anytype, a: std.mem.Allocator, operation: []const u8) !bool {
+    var receipt = try driver.service.operationLookup(a, operation) orelse return false;
+    receipt.deinit();
+    return true;
 }
 
 fn derivedOperation(a: std.mem.Allocator, prefix: []const u8, operation: []const u8) ![]const u8 {
@@ -147,21 +155,20 @@ pub fn importBundle(
         .repository = config.repository.value(),
         .destination = config.slack.destination(),
     });
-    const admitted = try admission.admit(driver.service, a, .{
+    const admitted_request: admission.Request = .{
         .operation = operation,
         .kind = .continuity_cut,
         .target = null,
         .origin = origin,
         .digest = stable,
-    }, ImportMaterializer(@TypeOf(driver)){
-        .driver = driver,
-        .config = config,
-        .io = environment.io,
-        .request = request,
-    });
+    };
+    const manifest = if (try operationAdmitted(driver, a, operation))
+        (try admission.admit(driver.service, a, admitted_request, Frozen{})).receipt.task
+    else
+        try beginImport(driver, a, config, environment, admitted_request, request);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    const record = index.record(admitted.receipt.task).?;
+    const record = index.record(manifest).?;
     if (record.result == null) return .{
         .phase = .manifest_pending,
         .manifest = record.task,
@@ -170,32 +177,40 @@ pub fn importBundle(
     };
     var bundle = try transfer.committedBundle(a, &index, record.task);
     defer bundle.deinit();
-    return transfer.importBundle(driver, a, config, origin, bundle.value, request.exclusive_owner);
+    return transfer.importBundle(driver, a, config, origin, bundle.value);
 }
 
-fn ImportMaterializer(comptime Driver: type) type {
-    return struct {
-        driver: Driver,
-        config: configuration.Config,
-        io: std.Io,
-        request: Import,
-
-        pub fn materialize(
-            self: @This(),
-            a: std.mem.Allocator,
-            request: admission.Request,
-        ) !t.Input {
-            const maximum: ?usize = if (self.request.bytes_max) |value|
-                std.math.cast(usize, value) orelse return error.Capacity
-            else
-                null;
-            var bundle = try transfer.readBundle(a, self.io, self.request.path.bytes, maximum);
-            defer bundle.deinit();
-            var index = try self.driver.rebuild(a);
-            defer index.deinit();
-            if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
-            try transfer.validateImport(a, &index, self.config, bundle.value);
-            return cut(request, a, bundle.value);
-        }
-    };
+fn beginImport(
+    driver: anytype,
+    a: std.mem.Allocator,
+    config: configuration.Config,
+    environment: Environment,
+    admitted_request: admission.Request,
+    request: Import,
+) !t.Id {
+    const maximum: ?usize = if (request.bytes_max) |value|
+        std.math.cast(usize, value) orelse return error.Capacity
+    else
+        null;
+    var bundle = try transfer.readBundle(a, environment.io, request.path.bytes, maximum);
+    defer bundle.deinit();
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
+    const namespace = driver.service.namespace.identity;
+    if (try transfer.validateImport(a, &index, config, namespace, bundle.value)) |task|
+        return task;
+    const input = try cut(admitted_request, a, bundle.value);
+    const result = try admission.admit(driver.service, a, admitted_request, Frozen{
+        .input = input,
+    });
+    return result.receipt.task;
 }
+
+const Frozen = struct {
+    input: ?t.Input = null,
+
+    pub fn materialize(self: Frozen, _: std.mem.Allocator, _: admission.Request) !t.Input {
+        return self.input orelse error.MissingAdmittedInput;
+    }
+};

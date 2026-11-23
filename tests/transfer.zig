@@ -80,7 +80,7 @@ fn importDone(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
     const budget = bundle.members.items.len + bundle.lineages.items.len + 3;
     for (0..budget) |_| {
-        var progress = try transfer.importBundle(driver, a, config(), origin, bundle, true);
+        var progress = try transfer.importBundle(driver, a, config(), origin, bundle);
         defer progress.deinit(a);
         if (progress.phase == .materialized) return;
         var index = try driver.rebuild(a);
@@ -200,7 +200,6 @@ test "native continuity import maps pending controls once and resume retains rec
         config(),
         origin,
         conflict,
-        true,
     ));
     try verifyFiles(a, bundle.value);
 }
@@ -373,6 +372,7 @@ test "native continuity global turns preserve frozen context and ingress identit
         a,
         origin,
     )).admitted == null);
+    try importDone(&to, &destination, bundle.value);
 }
 
 const lineage_contract = @import("../app/lineage_audit_contract.zig");
@@ -621,4 +621,338 @@ test "native continuity transfers captured external lineage marker across import
     destination.service = &to.service.?;
     try destination.attach(to.arena.allocator());
     try verifyTransferredHistory(&to, &destination, imported, source_namespace, witness);
+}
+
+fn secondGenesis() t.Genesis {
+    var value = contracts.genesis();
+    value.envelope.operation = .{ .bytes = "local-genesis-second" };
+    value.envelope.stable_request = @splat(9);
+    value.lineage = @splat(10);
+    return value;
+}
+
+fn importInterleaved(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
+    const a = f.arena.allocator();
+    const budget = bundle.members.items.len + 2 * bundle.lineages.items.len + 3;
+    for (0..budget) |_| {
+        var progress = try transfer.importBundle(driver, a, config(), origin, bundle);
+        defer progress.deinit(a);
+        if (progress.phase == .materialized) return;
+        try completeAdmissions(f, driver);
+        var index = try driver.rebuild(a);
+        defer index.deinit();
+        for (index.obligations) |obligation| {
+            _ = try transfer.admitPendingControls(driver, a, obligation.task, origin);
+        }
+        try completeAdmissions(f, driver);
+    }
+    return error.ImportDidNotComplete;
+}
+
+test "native continuity import completes every lineage while imported obligations act" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const first = contracts.genesis();
+    const second = secondGenesis();
+    const targets = [_]t.Id{
+        try from.execute(first.envelope.operation.bytes, .{ .genesis = first }),
+        try from.execute(second.envelope.operation.bytes, .{ .genesis = second }),
+    };
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    defer if (original.attached) original.detach();
+    _ = try original.directive(a, "old-pause-first", origin, targets[0], .{ .pause = {} });
+    _ = try original.directive(a, "old-pause-second", origin, targets[1], .{ .pause = {} });
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    try std.testing.expectEqual(2, bundle.value.lineages.items.len);
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    try importInterleaved(&to, &destination, bundle.value);
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(2, index.obligations.len);
+    try std.testing.expect(!try transfer.importPending(a, &index, bundle.value.source.namespace));
+}
+
+fn cancelledWithLateControl(f: *Fixture, driver: *Driver) !t.Id {
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    try driver.attach(a);
+    _ = try driver.directive(a, "old-cancel", origin, target, .{ .cancel = {} });
+    const step = (try driver.nextStep(a, target)).?;
+    _ = try driver.directive(a, "late-pause", origin, target, .{ .pause = {} });
+    try finish(f, step);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(.cancelled, index.head(index.obligation(target).?).mode);
+    return target;
+}
+
+test "native continuity import keeps controls under a cancelled head historical" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    defer if (original.attached) original.detach();
+    _ = try cancelledWithLateControl(&from, &original);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    try std.testing.expectEqual(1, bundle.value.lineages.items[0].pending_controls.items.len);
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, bundle.value);
+    const progress = try transfer.admitPendingControls(&destination, a, imported, origin);
+    try std.testing.expect(progress.admitted == null);
+    try std.testing.expect(!try destination.importedControls(a, imported));
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(try transfer.pendingControlsAdmitted(a, &index, imported));
+    try std.testing.expectEqual(.cancelled, index.head(index.obligation(imported).?).mode);
+}
+
+const continuity_control = @import("../native/continuity_control.zig");
+
+const Backup = struct {
+    temporary: std.testing.TmpDir,
+    buffer: [4096]u8 = undefined,
+    length: usize = 0,
+
+    fn init() !Backup {
+        var value: Backup = .{ .temporary = std.testing.tmpDir(.{}) };
+        try value.temporary.dir.setPermissions(std.testing.io, .fromMode(0o700));
+        return value;
+    }
+
+    fn path(self: *Backup) ![]const u8 {
+        self.length = try self.temporary.dir.realPath(std.testing.io, &self.buffer);
+        return self.buffer[0..self.length];
+    }
+};
+
+test "native continuity control import commits one manifest for one bundle" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    defer if (original.attached) original.detach();
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const directory = try backup.path();
+    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", bundle.value);
+    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    const manifest = try controlImport(&to, &destination, file);
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    var cuts: usize = 0;
+    for (index.records) |record| {
+        if (record.input == .continuity_cut) cuts += 1;
+    }
+    try std.testing.expectEqual(1, cuts);
+    try std.testing.expect(index.record(manifest).?.input == .continuity_cut);
+}
+
+fn controlImport(f: *Fixture, driver: *Driver, file: []const u8) !t.Id {
+    const a = f.arena.allocator();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(f),
+    };
+    var manifest: ?t.Id = null;
+    for (0..16) |_| {
+        var progress = try continuity_control.importBundle(
+            driver,
+            a,
+            config(),
+            environment,
+            "legacy-import",
+            origin,
+            .{ .path = .{ .bytes = file } },
+        );
+        defer progress.deinit(a);
+        if (manifest) |known| try std.testing.expectEqualDeep(known, progress.manifest);
+        manifest = progress.manifest;
+        if (progress.phase == .materialized) return progress.manifest;
+        try completeAdmissions(f, driver);
+    }
+    return error.ImportDidNotComplete;
+}
+
+test "native continuity export refuses an occupied name before fencing the source" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var driver: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    try backup.temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "handoff.paredros",
+        .data = "an earlier handoff",
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(&f),
+    };
+    for ([_]bool{ false, true }) |snapshot| {
+        try std.testing.expectError(error.TransferFileConflict, continuity_control.exportBundle(
+            &driver,
+            a,
+            settings,
+            environment,
+            if (snapshot) "occupied-snapshot" else "occupied-transfer",
+            origin,
+            .{ .name = .{ .bytes = "handoff.paredros" }, .snapshot = snapshot },
+        ));
+    }
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(index.recovery_purpose == null);
+    try std.testing.expectEqual(1, index.records.len);
+    try std.testing.expectEqual(.active, index.head(index.obligation(target).?).mode);
+}
+
+const audit_contract = @import("../app/audit_contract.zig");
+
+fn emptyAuditPage(a: std.mem.Allocator, prepared: []const u8) ![]u8 {
+    const body = "{\"ok\":true,\"messages\":[],\"has_more\":false," ++
+        "\"response_metadata\":{\"next_cursor\":\"\"}}";
+    const head = try std.http.Client.Response.Head.parse(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ++
+            "Date: Mon, 16 Nov 2026 00:00:00 GMT\r\nX-Slack-Req-Id: transfer-audit\r\n\r\n",
+    );
+    var reader = std.Io.Reader.fixed(body);
+    var captured = try http.captureResponse(a, head, &reader, .{}, "secret-never-retained");
+    defer captured.deinit();
+    return slack_audit.captureBytes(a, prepared, "B123", captured, 500);
+}
+
+fn finishAudit(f: *Fixture, task_id: t.Id) !void {
+    const a = f.arena.allocator();
+    for (0..4096) |_| {
+        var task = try f.service.?.task(a, task_id);
+        defer task.deinit();
+        if (task.value.terminal()) return;
+        switch (try f.service.?.pump(a)) {
+            .work => |work| {
+                if (!std.mem.eql(u8, audit_contract.identity, work.entry.declaration.identity))
+                    return error.UnexpectedAuditWork;
+                const bytes = try emptyAuditPage(a, work.prepared orelse
+                    return error.MissingPrepared);
+                defer a.free(bytes);
+                try f.service.?.completeWork(a, work, .{ .acquired = bytes });
+            },
+            .idle, .waiting, .progressed => {},
+        }
+    }
+    return error.AuditDidNotComplete;
+}
+
+fn importedAudit(driver: *Driver, a: std.mem.Allocator, target: t.Id) !t.Id {
+    const scheduled = try driver.audits(a, target);
+    defer a.free(scheduled);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    for (scheduled) |task| if (index.record(task).?.input == .audit) return task;
+    return error.ImportedAuditMissing;
+}
+
+test "native continuity completed audit of an imported delivery triggers a step" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try original.attach(a);
+    defer if (original.attached) original.detach();
+    const deliveries = try original.deliveries(a, target);
+    try std.testing.expectEqual(1, deliveries.len);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.initWithGrants(&.{audit_contract.identity});
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, bundle.value);
+    const audit = try importedAudit(&destination, a, imported);
+    try finishAudit(&to, audit);
+    var index = try destination.rebuild(a);
+    try std.testing.expect(index.record(audit).?.result != null);
+    index.deinit();
+    try std.testing.expect(try destination.nextStep(a, imported) != null);
 }

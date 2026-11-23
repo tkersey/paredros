@@ -210,16 +210,19 @@ paredros --config /new/config.json transfer import /backup/handoff.paredros
 Exports write only into the configured protected `backup_directory`. Snapshot
 export captures an immutable cut while the original responsibility continues.
 Transfer export durably fences the source namespace, folds the transferred
-disposition, and keeps source output disabled. Repeating the same transfer command
-uses the same default operation identity, including after a client restart.
-Responses also expose that identity. An explicit `--operation` overrides it.
-Use a new snapshot filename for a new cut; existing files are never overwritten
-with different content.
+disposition, and keeps source output disabled. Repeating the same transfer export
+or import command uses the same default operation identity, including after a
+client restart. Each snapshot export run takes a new cut. Responses also expose
+the operation identity, and an explicit `--operation` overrides it. Export refuses
+a filename that already exists before it takes a cut or fences the source; existing
+files are never overwritten.
 
 Import requires a fresh target namespace and matching configured resource
 bindings. It preserves portable observations, pending controls, method source,
 and unresolved delivery evidence. Imported output remains held. Establish that
-the original source cannot run again before declaring exclusive ownership.
+the original source cannot run again, then declare exclusive ownership when
+releasing: run `recovery begin`, take TASK and DIGEST from `recovery status`, and
+run `recovery release TASK DIGEST --exclusive-owner`.
 
 After a known filesystem rollback, start with `serve --recover`. Inspect
 `recovery status`, perform read-only `delivery audit KEY_JSON` operations, and

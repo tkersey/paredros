@@ -158,22 +158,15 @@ fn clientRequest(
         if (args.len != 1) return error.InvalidArguments;
         return null;
     }
-    if (same(args[0], "transfer")) {
-        const bytes = try std.json.Stringify.valueAlloc(init.gpa, .{
-            .namespace = config.namespace_path,
-            .backup_directory = config.backup_directory,
-            .arguments = args,
-        }, .{});
-        defer init.gpa.free(bytes);
-        var digest: t.Digest = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        const operation = std.fmt.bytesToHex(digest, .lower);
-        return try cli.request(init.gpa, args, &operation);
-    }
-    var random: [16]u8 = undefined;
-    try init.io.randomSecure(&random);
-    const operation = std.fmt.bytesToHex(random, .lower);
-    return try cli.request(init.gpa, args, &operation);
+    const operation = try cli.defaultOperation(
+        init.gpa,
+        init.io,
+        config.namespace_path,
+        config.backup_directory,
+        args,
+    );
+    defer init.gpa.free(operation);
+    return try cli.request(init.gpa, args, operation);
 }
 
 fn responseCode(a: std.mem.Allocator, bytes: []const u8) !u8 {

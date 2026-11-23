@@ -102,7 +102,7 @@ def import_archive(binary, fixture, report, home):
         while True:
             imported = command(
                 binary, "--config", config, "transfer", "import", archive,
-                "--exclusive-owner", "--operation", "legacy-import",
+                "--operation", "legacy-import",
             )
             if imported["data"]["phase"] == "materialized":
                 break

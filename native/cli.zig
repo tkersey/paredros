@@ -23,10 +23,39 @@ pub const help =
     \\  namespace check | describe-build | licenses
     \\  recovery status | candidates [AFTER LIMIT] | begin | release TASK DIGEST --exclusive-owner
     \\  transfer export NAME [--snapshot]
-    \\  transfer import PATH [--exclusive-owner] [--bytes-max N]
+    \\  transfer import PATH [--bytes-max N]
     \\  request JSON | stdio              Machine-readable daemon access
     \\Mutations accept --operation ID. Success means admission, not remote completion.
 ;
+
+pub fn defaultOperation(
+    a: std.mem.Allocator,
+    io: std.Io,
+    namespace: []const u8,
+    backup_directory: ?[]const u8,
+    args: []const []const u8,
+) ![]u8 {
+    if (!same(args[0], "transfer") or snapshotExport(args)) {
+        var random: [16]u8 = undefined;
+        try io.randomSecure(&random);
+        return a.dupe(u8, &std.fmt.bytesToHex(random, .lower));
+    }
+    const bytes = try std.json.Stringify.valueAlloc(a, .{
+        .namespace = namespace,
+        .backup_directory = backup_directory,
+        .arguments = args,
+    }, .{});
+    defer a.free(bytes);
+    var digest: t.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return a.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
+}
+
+fn snapshotExport(args: []const []const u8) bool {
+    if (args.len < 3 or !same(args[1], "export")) return false;
+    for (args[3..]) |arg| if (same(arg, "--snapshot")) return true;
+    return false;
+}
 
 pub fn request(
     a: std.mem.Allocator,
@@ -132,9 +161,7 @@ fn transfer(args: []const []const u8) !Command {
     var importing: @import("continuity_control.zig").Import = .{ .path = .{ .bytes = args[1] } };
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        if (same(args[i], "--exclusive-owner") and !importing.exclusive_owner) {
-            importing.exclusive_owner = true;
-        } else if (same(args[i], "--bytes-max") and importing.bytes_max == null) {
+        if (same(args[i], "--bytes-max") and importing.bytes_max == null) {
             i += 1;
             if (i == args.len) return error.InvalidArguments;
             importing.bytes_max = try number(u64, args[i]);

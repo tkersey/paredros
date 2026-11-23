@@ -463,22 +463,34 @@ fn validateFresh(index: *const idx.Index, identity: t.Digest) !void {
     };
 }
 
+fn admittedManifest(
+    index: *const idx.Index,
+    namespace: t.Digest,
+    bundle: Bundle,
+    identity: t.Digest,
+) !?*const idx.Record {
+    if (std.meta.eql(bundle.source.namespace, namespace)) return error.ImportTargetNotFresh;
+    for (bundle.lineages.items) |root| _ = try existingLineage(index, root.identity, identity);
+    for (index.records) |*record| {
+        if (record.input == .continuity_cut and
+            std.meta.eql(record.input.continuity_cut.bundle_digest, identity)) return record;
+    }
+    return null;
+}
+
 pub fn validateImport(
     a: std.mem.Allocator,
     index: *const idx.Index,
     config: configuration.Config,
+    namespace: t.Digest,
     bundle: Bundle,
-) !void {
+) !?t.Id {
     try continuity.validate(a, bundle);
     const identity = try continuity.digest(a, Bundle, bundle);
-    var materialized = bundle.lineages.items.len != 0;
-    for (bundle.lineages.items) |root| {
-        const existing = try existingLineage(index, root.identity, identity);
-        if (existing == null or existing.?.result == null) materialized = false;
-    }
-    if (materialized) return;
+    if (try admittedManifest(index, namespace, bundle, identity)) |record| return record.task;
     try validateDestination(a, bundle, config);
     try validateFresh(index, identity);
+    return null;
 }
 
 fn completedCut(a: std.mem.Allocator, record: idx.Record, identity: t.Digest) !?t.Reference {
@@ -537,7 +549,6 @@ fn genesisInput(
     mappings: []const t.ContinuityBinding,
     root: continuity.Lineage,
     clock_ms: i64,
-    exclusive_owner: bool,
 ) !t.Genesis {
     var source = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
     defer source.deinit();
@@ -554,7 +565,7 @@ fn genesisInput(
         .imported = .{
             .source = root.source_head,
             .head = rebased,
-            .exclusive_owner = exclusive_owner,
+            .exclusive_owner = false,
             .continuity = .{
                 .bundle = identity,
                 .manifest = manifest,
@@ -574,7 +585,6 @@ pub fn importBundle(
     config: configuration.Config,
     origin: t.Origin,
     bundle: Bundle,
-    exclusive_owner: bool,
 ) !ImportProgress {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -584,7 +594,6 @@ pub fn importBundle(
         config,
         origin,
         bundle,
-        exclusive_owner,
     );
     result.obligations = try a.dupe(t.Id, result.obligations);
     return result;
@@ -596,47 +605,30 @@ fn importWithArena(
     config: configuration.Config,
     origin: t.Origin,
     bundle: Bundle,
-    exclusive_owner: bool,
 ) !ImportProgress {
     if (!driver.attached or origin != .local) return error.TransferLocalOnly;
     try continuity.validate(a, bundle);
     const identity = try continuity.digest(a, Bundle, bundle);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    var roots: std.ArrayList(t.Id) = .empty;
-    var finished = true;
-    for (bundle.lineages.items) |root| {
-        const existing = try existingLineage(&index, root.identity, identity);
-        if (existing) |record| {
-            try roots.append(a, record.task);
-            if (record.result == null) finished = false;
-        } else finished = false;
-    }
-    const cut_operation = try std.fmt.allocPrint(a, "continuity-cut:{s}", .{
-        std.fmt.bytesToHex(identity, .lower),
-    });
-    const cut_record = byOperation(&index, cut_operation);
-    if (finished and bundle.lineages.items.len != 0) return .{
-        .phase = .materialized,
-        .manifest = (cut_record orelse return error.MissingContinuityManifest).task,
-        .members = bundle.members.items.len,
-        .obligations = try roots.toOwnedSlice(a),
+    const namespace = driver.service.namespace.identity;
+    const cut_record = try admittedManifest(&index, namespace, bundle, identity) orelse {
+        try validateDestination(a, bundle, config);
+        try validateFresh(&index, identity);
+        return .{
+            .phase = .manifest_pending,
+            .manifest = try admitCut(driver.service, a, origin, bundle),
+            .members = 0,
+            .obligations = &.{},
+        };
     };
-    try validateDestination(a, bundle, config);
-    try validateFresh(&index, identity);
-    if (cut_record == null) return .{
+    const manifest = (try completedCut(a, cut_record.*, identity)) orelse return .{
         .phase = .manifest_pending,
-        .manifest = try admitCut(driver.service, a, origin, bundle),
+        .manifest = cut_record.task,
         .members = 0,
-        .obligations = try roots.toOwnedSlice(a),
+        .obligations = &.{},
     };
-    const manifest = (try completedCut(a, cut_record.?.*, identity)) orelse return .{
-        .phase = .manifest_pending,
-        .manifest = cut_record.?.task,
-        .members = 0,
-        .obligations = try roots.toOwnedSlice(a),
-    };
-    return importMembers(driver, a, &index, origin, bundle, identity, manifest, exclusive_owner);
+    return importMembers(driver, a, &index, origin, bundle, identity, manifest);
 }
 
 fn importMembers(
@@ -647,7 +639,6 @@ fn importMembers(
     bundle: Bundle,
     identity: t.Digest,
     manifest: t.Reference,
-    exclusive_owner: bool,
 ) !ImportProgress {
     var mappings: std.ArrayList(t.ContinuityBinding) = .empty;
     for (bundle.members.items) |member| {
@@ -691,7 +682,6 @@ fn importMembers(
         identity,
         manifest,
         mappings.items,
-        exclusive_owner,
     );
 }
 
@@ -704,7 +694,6 @@ fn importRoots(
     identity: t.Digest,
     manifest: t.Reference,
     mappings: []const t.ContinuityBinding,
-    exclusive_owner: bool,
 ) !ImportProgress {
     var obligations: std.ArrayList(t.Id) = .empty;
     var pending = false;
@@ -723,7 +712,6 @@ fn importRoots(
             mappings,
             root,
             try driver.clock.now(driver.clock.context),
-            exclusive_owner,
         );
         const admitted = try driver.service.submit(
             a,
@@ -940,13 +928,14 @@ pub fn admitPendingControls(
         imported.bundle,
         index.record(target).?.input.genesis.lineage,
     ).?;
+    const owed = controlsOwed(&index, target);
     var result: PendingControlProgress = .{};
     var next: ?t.Digest = null;
     for (root.pending_controls.items) |key| {
         const item = continuity.member(imported.bundle, key).?;
         var control = try continuity.decode(.directive, a, item.data);
         defer control.deinit();
-        if (continuity.historicalControl(control.value.body)) {
+        if (!owed or continuity.historicalControl(control.value.body)) {
             result.historical += 1;
         } else if (try continuity.mappedControl(a, &index, imported, key) == null) {
             result.remaining += 1;
@@ -975,7 +964,13 @@ pub fn admitPendingControls(
     return result;
 }
 
+fn controlsOwed(index: *const idx.Index, target: t.Id) bool {
+    const mode = index.head(index.obligation(target) orelse return false).mode;
+    return mode != .cancelled and mode != .transferred;
+}
+
 pub fn pendingControlsAdmitted(a: std.mem.Allocator, index: *const idx.Index, target: t.Id) !bool {
+    if (!controlsOwed(index, target)) return true;
     return continuity.controlsComplete(a, index, target, null);
 }
 
@@ -1007,6 +1002,16 @@ pub fn importPending(a: std.mem.Allocator, index: *const idx.Index, namespace: t
 pub fn validateExportDestination(io: std.Io, directory: []const u8, name: []const u8) !void {
     const opened = try openDestination(io, directory, name);
     opened.close(io);
+}
+
+pub fn validateExportName(io: std.Io, directory: []const u8, name: []const u8) !void {
+    const opened = try openDestination(io, directory, name);
+    defer opened.close(io);
+    _ = opened.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    return error.TransferFileConflict;
 }
 
 pub const PendingTurnProgress = @import("continuity_turn.zig").Progress;

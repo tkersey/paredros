@@ -115,6 +115,28 @@ test "control CLI preserves exact revisions and rejects ambiguous arguments" {
         error.InvalidIdentity,
         cli.request(frame, &.{ "monitor", "show", "short" }, "id"),
     );
+    try std.testing.expectError(
+        error.InvalidArguments,
+        cli.request(frame, &.{ "transfer", "import", "/b/h.paredros", "--exclusive-owner" }, "id"),
+    );
+}
+
+test "control CLI repeats transfer identity but takes a new snapshot identity per run" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const io = std.testing.io;
+    const snapshot: []const []const u8 = &.{ "transfer", "export", "nightly", "--snapshot" };
+    const handoff: []const []const u8 = &.{ "transfer", "export", "handoff" };
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        try cli.defaultOperation(frame, io, "/ns", "/backup", snapshot),
+        try cli.defaultOperation(frame, io, "/ns", "/backup", snapshot),
+    ));
+    try std.testing.expectEqualStrings(
+        try cli.defaultOperation(frame, io, "/ns", "/backup", handoff),
+        try cli.defaultOperation(frame, io, "/ns", "/backup", handoff),
+    );
 }
 
 test "control protocol freezes activation retry and acknowledges persisted restrictive controls" {

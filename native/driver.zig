@@ -339,14 +339,9 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
         if (index.records[position].input.directive.ordinal > head.folded_directive_ordinal)
             return true;
     for (index.records) |record| {
-        const evidence = @import("interaction_evidence.zig").target(index, record);
-        const target = evidence orelse switch (record.input) {
-            .delivery => |value| @import("delivery_target.zig").resolve(index, value),
-            .audit => |value| @import("delivery_target.zig").resolve(index, value.delivery),
-            .turn => |value| value.target,
-            else => continue,
-        };
-        if (target == null or !std.meta.eql(target.?, obligation.task)) continue;
+        if (record.input == .step) continue;
+        const target = materialize.factTarget(index, record) orelse continue;
+        if (!std.meta.eql(target, obligation.task)) continue;
         if (record.input == .audit and record.result == null) continue;
         if (!materialize.readyFact(record)) continue;
         var consumed = false;

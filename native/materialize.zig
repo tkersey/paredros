@@ -129,19 +129,13 @@ fn directives(
     return result.toOwnedSlice(a);
 }
 
-fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
-    if (interaction.target(index, record)) |selected| return std.meta.eql(selected, target);
+pub fn factTarget(index: *const idx.Index, record: idx.Record) ?t.Id {
+    if (interaction.target(index, record)) |selected| return selected;
     return switch (record.input) {
-        .step => |value| std.meta.eql(value.obligation, target),
-        .delivery => |value| sameTarget(
-            @import("delivery_target.zig").resolve(index, value),
-            target,
-        ),
-        .audit => |value| sameTarget(
-            @import("audit_control.zig").deliveryTarget(index, value.delivery),
-            target,
-        ),
-        .turn => |value| sameTarget(value.target, target),
+        .step => |value| value.obligation,
+        .delivery => |value| @import("delivery_target.zig").resolve(index, value),
+        .audit => |value| @import("audit_control.zig").deliveryTarget(index, value.delivery),
+        .turn => |value| value.target,
         .genesis,
         .directive,
         .experiment,
@@ -149,12 +143,13 @@ fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
         .continuity_cut,
         .restore,
         .lineage_audit,
-        => false,
+        => null,
     };
 }
 
-fn sameTarget(value: ?t.Id, target: t.Id) bool {
-    return value != null and std.meta.eql(value.?, target);
+fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
+    const selected = factTarget(index, record) orelse return false;
+    return std.meta.eql(selected, target);
 }
 
 fn priorFact(index: *const idx.Index, obligation: *const idx.Obligation, task: t.Id) ?t.Settlement {
