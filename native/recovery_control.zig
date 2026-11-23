@@ -10,6 +10,7 @@ pub const Release = struct {
 };
 
 pub fn validateBindings(a: std.mem.Allocator, index: anytype, config: configuration.Config) !void {
+    const bound = configuration.bindings(config);
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
@@ -17,13 +18,13 @@ pub fn validateBindings(a: std.mem.Allocator, index: anytype, config: configurat
             a,
             t.Repository,
             head.specification.repository,
-            config.repository.value(),
+            bound.repository,
         );
         const destination_matches = try equal(
             a,
             t.Destination,
             head.specification.destination,
-            config.slack.destination(),
+            bound.destination,
         );
         if (!repository_matches or !destination_matches)
             return error.RecoveryResourceMismatch;

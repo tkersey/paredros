@@ -249,7 +249,6 @@ fn safeHeader(name: []const u8) bool {
         "x-ratelimit-used",
         "x-ratelimit-resource",
         "x-request-id",
-        "x-slack-req-id",
         "content-length",
     }) |allowed| {
         if (std.ascii.eqlIgnoreCase(name, allowed)) return true;

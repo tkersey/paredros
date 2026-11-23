@@ -90,10 +90,10 @@ test "configuration closed schema validates uid version and bindings" {
     defer a.free(relative);
     try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, relative, 42));
     changed = fixture();
-    changed.slack.channel = "C100";
+    changed.slack.?.channel = "D 100";
     const channel = try encoded(changed);
     defer a.free(channel);
-    try std.testing.expectError(error.InvalidBinding, configuration.parse(a, channel, 42));
+    try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, channel, 42));
 }
 
 fn withModel() configuration.Config {
@@ -110,22 +110,14 @@ fn withModel() configuration.Config {
 
 test "configuration offline skips all credentials and helper execution" {
     var config = withModel();
-    config.grants = .{
-        .github_read = true,
-        .slack_history = true,
-        .slack_write = true,
-        .model = true,
-    };
+    config.grants = .{ .github_read = true, .model = true };
     config.github_credential_file = "/definitely-does-not-exist/github";
-    config.slack_bot_credential_file = "/definitely-does-not-exist/bot";
-    config.slack_app_credential_file = "/definitely-does-not-exist/app";
     const launch = try configuration.prepare(a, std.testing.io, config, build);
     defer launch.deinit();
     try std.testing.expect(launch.environment.github == null);
-    try std.testing.expect(launch.environment.slack == null);
     try std.testing.expect(launch.environment.model == null);
     try std.testing.expect(launch.model_binding == null and launch.selection == null);
-    try std.testing.expect(launch.slack_app_token == null);
+    try std.testing.expect(launch.github_token == null);
     try std.testing.expect(!launch.profile.authority.inference);
     try expectLocalGrants(launch);
     const identity = try launch.profile.resourceIdentity(a, build.image_identity);
@@ -208,12 +200,11 @@ test "configuration private files feed only selected live roles and stay out of 
     var config = fixture();
     config.current_uid = @import("../native/control_socket.zig").currentUid();
     config.mode = .live;
-    config.grants = .{ .github_read = true, .slack_history = true, .slack_write = true };
+    config.grants = .{ .github_read = true };
     config.github_credential_file = path;
-    config.slack_bot_credential_file = path;
     const first = try configuration.prepare(a, std.testing.io, config, build);
     defer first.deinit();
-    try std.testing.expectEqual(8, first.profile.authority.grants.len);
+    try std.testing.expectEqual(5, first.profile.authority.grants.len);
     try std.testing.expectEqualStrings(
         "fake-private-token-one",
         first.environment.github.?.http.token,
@@ -222,7 +213,6 @@ test "configuration private files feed only selected live roles and stay out of 
         "https://api.github.com",
         first.environment.github.?.http.origin,
     );
-    try std.testing.expectEqualStrings("https://slack.com", first.environment.slack.?.http.origin);
     try std.testing.expect(std.mem.indexOf(u8, first.profile.bytes, "fake-private-token") == null);
     try std.testing.expect(std.mem.indexOf(u8, first.profile.bytes, path) == null);
     try privateFile(temporary.dir, "credential", "fake-private-token-two");
@@ -231,7 +221,7 @@ test "configuration private files feed only selected live roles and stay out of 
     try std.testing.expectEqualStrings(first.profile.bytes, second.profile.bytes);
     try std.testing.expectEqualStrings(
         "fake-private-token-two",
-        second.environment.slack.?.http.token,
+        second.environment.github.?.http.token,
     );
     const first_identity = try first.profile.resourceIdentity(a, build.image_identity);
     const second_identity = try second.profile.resourceIdentity(a, build.image_identity);
@@ -289,6 +279,71 @@ test "configuration offline profile permits authenticated local owner reads" {
     defer page.deinit();
     try std.testing.expectEqual(0, page.tasks.len);
     try expectLocalGrants(launch);
-    try std.testing.expect(launch.environment.github == null and launch.environment.slack == null);
+    try std.testing.expect(launch.environment.github == null);
     try std.testing.expect(launch.environment.model == null);
+}
+
+fn expectDestination(
+    bindings: configuration.Bindings,
+    expected: [5][]const u8,
+) !void {
+    const destination = bindings.destination;
+    const actual = [_][]const u8{
+        destination.account.bytes,
+        destination.app.bytes,
+        destination.workspace.bytes,
+        destination.operator.bytes,
+        destination.channel.bytes,
+    };
+    for (expected, actual) |left, right| try std.testing.expectEqualStrings(left, right);
+}
+
+test "configuration legacy Slack section keeps the destination and tenant of existing namespaces" {
+    const legacy =
+        \\{"version":1,"current_uid":42,"namespace_path":"/tmp/unused-paredros-namespace",
+        \\"control_socket_path":"/tmp/unused-paredros-control",
+        \\"repository":{"account":"offline","id":1,"owner":"fixture","name":"repository",
+        \\"ref":"refs/heads/main"},
+        \\"slack":{"account":"offline","app":"A1","workspace":"T1","operator":"U1",
+        \\"channel":"D1","bot_id":"B1"}}
+    ;
+    var parsed = try configuration.parse(a, legacy, 42);
+    defer parsed.deinit();
+    const bound = configuration.bindings(parsed.value);
+    try expectDestination(bound, .{ "offline", "A1", "T1", "U1", "D1" });
+    try std.testing.expectEqualStrings("T1", configuration.tenant(parsed.value));
+    const launch = try configuration.prepare(a, std.testing.io, parsed.value, build);
+    defer launch.deinit();
+    try std.testing.expectEqualStrings("T1", launch.profile.authority.tenant);
+    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "slack") == null);
+    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "B1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "\"D1\"") != null);
+    var local = parsed.value;
+    local.slack = null;
+    try expectDestination(
+        configuration.bindings(local),
+        .{ "local", "paredros", "local", "owner", "cli" },
+    );
+    try std.testing.expectEqualStrings("local", configuration.tenant(local));
+    const fresh = try configuration.prepare(a, std.testing.io, local, build);
+    defer fresh.deinit();
+    try std.testing.expectEqualStrings("local", fresh.profile.authority.tenant);
+    try std.testing.expect(!std.mem.eql(u8, launch.profile.bytes, fresh.profile.bytes));
+}
+
+test "configuration refuses Slack grants and credential references" {
+    var refused: [4]configuration.Config = @splat(fixture());
+    refused[0].grants.slack_history = true;
+    refused[1].grants.slack_write = true;
+    refused[2].slack_bot_credential_file = "/private/bot";
+    refused[3].slack_app_credential_file = "/private/app";
+    for (refused) |config| {
+        const bytes = try encoded(config);
+        defer a.free(bytes);
+        try std.testing.expectError(error.SlackRemoved, configuration.parse(a, bytes, 42));
+        try std.testing.expectError(
+            error.SlackRemoved,
+            configuration.prepare(a, std.testing.io, config, build),
+        );
+    }
 }

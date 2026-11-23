@@ -114,13 +114,13 @@ fn checkStep(
 ) void {
     const check = b.step(
         "check",
-        "Check GitHub and Slack provider protocols (add -Dcheck-recovery=true for capture/reopen)",
+        "Check GitHub provider protocols (add -Dcheck-recovery=true for capture/reopen)",
     );
     const checked = b.addSystemCommand(&.{ "echo", if (check_recovery)
-        "Passed GitHub and Slack provider protocol checks and the native GitHub " ++
+        "Passed GitHub provider protocol checks and the native GitHub " ++
             "capture/reopen witness."
     else
-        "Passed GitHub and Slack provider protocol checks. For native GitHub " ++
+        "Passed GitHub provider protocol checks. For native GitHub " ++
             "capture/reopen, run zig build check -Dcheck-recovery=true." });
     checked.has_side_effects = true;
     check.dependOn(&checked.step);
@@ -232,10 +232,7 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
                 "tests.native_genesis.test.",
             },
             .second => &.{
-                "tests.native_slack_owner.test.",
-                "tests.native_audit_control.test.",
                 "tests.control.test.",
-                "tests.slack_owner.test.",
                 "tests.configuration.test.",
             },
         },

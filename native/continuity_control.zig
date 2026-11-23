@@ -203,7 +203,7 @@ pub fn importBundle(
         .digest = try admission.stableDigest(a, .{
             .request = request,
             .repository = config.repository.value(),
-            .destination = config.slack.destination(),
+            .destination = configuration.bindings(config).destination,
         }),
     };
     const maximum: ?usize = if (request.bytes_max) |value|

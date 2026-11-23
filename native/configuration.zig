@@ -7,7 +7,6 @@ const m = @import("../app/model_contract.zig");
 const application = @import("application.zig");
 const external = @import("model_external.zig");
 const github = @import("github.zig");
-const slack = @import("slack.zig");
 
 pub const Grants = struct {
     github_read: bool = false,
@@ -32,33 +31,27 @@ pub const Repository = struct {
         };
     }
 };
-pub const Slack = struct {
+pub const LegacySlack = struct {
     account: []const u8,
     app: []const u8,
     workspace: []const u8,
     operator: []const u8,
     channel: []const u8,
     bot_id: []const u8,
-
-    pub fn destination(self: Slack) t.Destination {
-        return .{
-            .account = .{ .bytes = self.account },
-            .app = .{ .bytes = self.app },
-            .workspace = .{ .bytes = self.workspace },
-            .operator = .{ .bytes = self.operator },
-            .channel = .{ .bytes = self.channel },
-        };
-    }
-
-    pub fn binding(self: Slack) slack.Binding {
-        return .{
-            .app_id = self.app,
-            .team_id = self.workspace,
-            .operator_id = self.operator,
-            .channel_id = self.channel,
-            .bot_id = self.bot_id,
-        };
-    }
+};
+const Destination = struct {
+    account: []const u8,
+    app: []const u8,
+    workspace: []const u8,
+    operator: []const u8,
+    channel: []const u8,
+};
+const local_destination: Destination = .{
+    .account = "local",
+    .app = "paredros",
+    .workspace = "local",
+    .operator = "owner",
+    .channel = "cli",
 };
 pub const Model = struct {
     account: []const u8,
@@ -77,7 +70,7 @@ pub const Config = struct {
     control_socket_path: []const u8,
     backup_directory: ?[]const u8 = null,
     repository: Repository,
-    slack: Slack,
+    slack: ?LegacySlack = null,
     mode: enum { offline, live } = .offline,
     grants: Grants = .{},
     interval_ms: u64 = 900_000,
@@ -90,8 +83,30 @@ pub const Config = struct {
 pub const OwnedConfig = std.json.Parsed(Config);
 pub const Bindings = struct { repository: t.Repository, destination: t.Destination };
 
+fn destination(config: Config) Destination {
+    const legacy = config.slack orelse return local_destination;
+    return .{
+        .account = legacy.account,
+        .app = legacy.app,
+        .workspace = legacy.workspace,
+        .operator = legacy.operator,
+        .channel = legacy.channel,
+    };
+}
+
 pub fn bindings(config: Config) Bindings {
-    return .{ .repository = config.repository.value(), .destination = config.slack.destination() };
+    const selected = destination(config);
+    return .{ .repository = config.repository.value(), .destination = .{
+        .account = .{ .bytes = selected.account },
+        .app = .{ .bytes = selected.app },
+        .workspace = .{ .bytes = selected.workspace },
+        .operator = .{ .bytes = selected.operator },
+        .channel = .{ .bytes = selected.channel },
+    } };
+}
+
+pub fn tenant(config: Config) []const u8 {
+    return destination(config).workspace;
 }
 pub const Build = struct { runtime_identity: t.Digest, image_identity: t.Digest };
 
@@ -125,14 +140,12 @@ fn validate(value: Config, current_uid: u32) !void {
         .name = value.repository.name,
         .ref = value.repository.ref,
     });
-    inline for (@typeInfo(Slack).@"struct".field_names) |name|
-        try visible(@field(value.slack, name), 128);
-    try slack.validateBinding(value.slack.binding());
-    const references = [_]?[]const u8{
-        value.github_credential_file,    value.slack_bot_credential_file,
-        value.slack_app_credential_file,
-    };
-    for (references) |path| if (path) |selected| try absolute(selected);
+    if (value.slack) |legacy| inline for (@typeInfo(LegacySlack).@"struct".field_names) |name|
+        try visible(@field(legacy, name), 128);
+    if (value.grants.slack_history or value.grants.slack_write or
+        value.slack_bot_credential_file != null or value.slack_app_credential_file != null)
+        return error.SlackRemoved;
+    if (value.github_credential_file) |path| try absolute(path);
     if (value.model) |model| {
         try visible(model.account, 64);
         try visible(model.slug, 128);
@@ -171,14 +184,11 @@ pub const OwnedLaunch = struct {
     model_binding: ?c.Decoded(m.Binding) = null,
     selection: ?*native.siwc.Selection = null,
     github_token: ?[]u8 = null,
-    slack_bot_token: ?[]u8 = null,
-    slack_app_token: ?[]u8 = null,
 
     pub fn deinit(self: *OwnedLaunch) void {
         if (self.model_binding) |*binding| binding.deinit();
         if (self.selection) |selection| selection.deinit();
-        for ([_]?[]u8{ self.github_token, self.slack_bot_token, self.slack_app_token }) |token|
-            if (token) |bytes| std.crypto.secureZero(u8, bytes);
+        if (self.github_token) |bytes| std.crypto.secureZero(u8, bytes);
         self.arena.deinit();
         self.allocator.destroy(self);
     }
@@ -210,21 +220,6 @@ fn remote(self: *OwnedLaunch, io: std.Io) !?t.Digest {
         } };
         _ = try self.environment.github.?.http.validate();
     }
-    if (config.grants.slack_history or config.grants.slack_write) {
-        self.slack_bot_token = try credential(a, io, config.slack_bot_credential_file);
-        self.environment.slack = .{
-            .destination = config.slack.destination(),
-            .bot_id = config.slack.bot_id,
-            .http = .{
-                .account = config.slack.account,
-                .origin = "https://slack.com",
-                .token = self.slack_bot_token.?,
-            },
-        };
-        _ = try self.environment.slack.?.http.validate();
-    }
-    if (config.slack_app_credential_file != null)
-        self.slack_app_token = try credential(a, io, config.slack_app_credential_file);
     if (!config.grants.model) return null;
     const model = config.model orelse return error.MissingModelSelection;
     self.selection = try native.siwc.Selection.init(self.allocator, io, .{
@@ -282,9 +277,12 @@ pub fn profileBytes(a: std.mem.Allocator, config: Config, billing: ?t.Digest) ![
         .version = config.version,
         .current_uid = config.current_uid,
         .mode = config.mode,
-        .grants = if (config.mode == .live) config.grants else Grants{},
+        .grants = .{
+            .github_read = config.mode == .live and config.grants.github_read,
+            .model = config.mode == .live and config.grants.model,
+        },
         .repository = config.repository,
-        .slack = config.slack,
+        .destination = destination(config),
         .interval_ms = config.interval_ms,
         .policies = config.policies,
         .model_account = if (billing != null)
@@ -317,14 +315,6 @@ fn permitted(config: Config, identity: []const u8) bool {
     if (config.mode == .offline) return false;
     if (std.mem.eql(u8, identity, @import("../app/github_contract.zig").identity))
         return config.grants.github_read;
-    if (std.mem.eql(u8, identity, @import("../app/audit_contract.zig").identity) or
-        std.mem.eql(u8, identity, @import("../app/lineage_audit_contract.zig").identity))
-        return config.grants.slack_history;
-    if (std.mem.eql(
-        u8,
-        identity,
-        application.notification_identity,
-    )) return config.grants.slack_write;
     if (std.mem.eql(u8, identity, m.P.identity)) return config.grants.model;
     return false;
 }
@@ -339,7 +329,7 @@ fn finish(self: *OwnedLaunch, build: Build, billing: ?t.Digest) !void {
         .environment = &self.environment,
         .authority = .{
             .principal = try std.fmt.allocPrint(a, "uid:{d}", .{config.current_uid}),
-            .tenant = config.slack.workspace,
+            .tenant = tenant(config),
             .grants = &.{},
             .inference = billing != null,
             .disclosure = true,

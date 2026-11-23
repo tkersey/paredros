@@ -25,8 +25,6 @@ def config(root):
         "namespace_path": str(root / "state"), "control_socket_path": str(root / "control"),
         "repository": {"account": "github-test", "id": 123, "owner": "owner",
                        "name": "test", "ref": "refs/heads/main"},
-        "slack": {"account": "slack-test", "app": "A123", "workspace": "T123",
-                  "operator": "U123", "channel": "D123", "bot_id": "B123"},
     }
 
 

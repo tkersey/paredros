@@ -135,7 +135,7 @@ test "HTTP captures raw body selected metadata and preserves redirects without f
     try std.testing.expectEqualStrings("60", (try captured.header("retry-after")).?);
     try std.testing.expectEqualStrings("0", (try captured.header("x-ratelimit-remaining")).?);
     try std.testing.expectEqualStrings("github-id", (try captured.header("x-github-request-id")).?);
-    try std.testing.expectEqualStrings("slack-id", (try captured.header("x-slack-req-id")).?);
+    try std.testing.expectEqual(null, try captured.header("x-slack-req-id"));
     try std.testing.expectEqual(null, try captured.header("authorization"));
     try std.testing.expectEqual(null, try captured.header("set-cookie"));
     try std.testing.expect(captured.identity_encoding);

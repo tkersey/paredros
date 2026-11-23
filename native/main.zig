@@ -7,8 +7,6 @@ const compatibility = @import("compatibility.zig");
 const control = @import("control.zig");
 const cli = @import("cli.zig");
 const socket = @import("control_socket.zig");
-const slack_owner = @import("slack_owner.zig");
-const transport = @import("slack_transport.zig");
 const restore = @import("restore.zig");
 const continuity_control = @import("continuity_control.zig");
 const Driver = @import("driver.zig").Driver(t);
@@ -289,7 +287,7 @@ fn audit(
         .bytes = try configuration.profileBytes(scratch, config, null),
         .authority = .{
             .principal = try std.fmt.allocPrint(scratch, "uid:{d}", .{config.current_uid}),
-            .tenant = config.slack.workspace,
+            .tenant = configuration.tenant(config),
             .grants = &.{},
             .inference = false,
             .disclosure = true,
@@ -425,11 +423,7 @@ fn dispatchObserved(
     index: ?*const @import("index.zig").Index,
 ) ![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
-    const decoration: ?control.Decoration = if (runtime.slack) |channel| .{
-        .name = "slack_transport",
-        .value = try native.values.toJson(transport.Health, a, channel.health()),
-    } else null;
-    return control.dispatchDecorated(
+    return control.dispatchWithIndex(
         a,
         driver,
         runtime.config.*,
@@ -437,14 +431,12 @@ fn dispatchObserved(
         bytes,
         runtime.continuity,
         index,
-        decoration,
     );
 }
 
 const Runtime = struct {
     config: *configuration.Config,
     continuity: continuity_control.Environment,
-    slack: ?*transport.Transport = null,
 };
 
 fn serve(
@@ -505,13 +497,7 @@ fn serve(
     }, .{ .stop_grace_ms = 45_000 });
     defer releaseDaemon(a, io, &daemon);
     if (recover) try beginRecovery(a, io, &driver, config.current_uid);
-    if (launch.slack_app_token) |token| {
-        runtime_context.slack = try transport.Transport.init(a, io, .{ .app_token = token });
-        errdefer runtime_context.slack.?.deinit();
-        try runtime_context.slack.?.start();
-    }
-    defer if (runtime_context.slack) |channel| channel.deinit();
-    return loop(a, io, &daemon, &runtime_context);
+    return loop(a, io, &daemon);
 }
 
 fn daemonDriver(service: *native.tasks.Service(t), io: *std.Io, launch: anytype) Driver {
@@ -585,19 +571,14 @@ fn fatal(err: anyerror) noreturn {
     std.process.exit(if (code == 0) 70 else code);
 }
 
-fn loop(a: std.mem.Allocator, io: std.Io, daemon: *Daemon, runtime: ?*Runtime) !u8 {
+fn loop(a: std.mem.Allocator, io: std.Io, daemon: *Daemon) !u8 {
     while (true) { // tiger: event-loop
         const requested = stop_requests.load(.acquire);
         if (requested > 1) fatal(error.ForcedShutdown);
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
-        if (requested != 0) {
-            if (runtime) |context| if (context.slack) |channel| channel.stop();
-            daemon.beginStop(now);
-        }
+        if (requested != 0) daemon.beginStop(now);
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        if (requested == 0) if (runtime) |context|
-            try slackPoll(arena.allocator(), daemon.driver, context);
         switch (try daemon.poll(arena.allocator(), now)) {
             .stopped => return 0,
             .stopped_unclean => return 1,
@@ -608,37 +589,8 @@ fn loop(a: std.mem.Allocator, io: std.Io, daemon: *Daemon, runtime: ?*Runtime) !
     }
 }
 
-fn slackPoll(a: std.mem.Allocator, driver: *Driver, runtime: *Runtime) !void {
-    const channel = runtime.slack orelse return;
-    var request = (try channel.pollNext()) orelse return;
-    defer request.deinit();
-    const admitted = slack_owner.admit(driver, a, runtime.config.*, request.bytes) catch |err| {
-        std.log.err("Slack admission failed: {s}", .{@errorName(err)});
-        try acknowledge(channel, request.token, .failed);
-        return;
-    };
-    try acknowledge(channel, request.token, switch (admitted) {
-        .ignored => .ignored,
-        .admitted => .admitted,
-    });
-}
-
-fn acknowledge(
-    channel: *transport.Transport,
-    token: transport.Token,
-    disposition: transport.Disposition,
-) !void {
-    channel.complete(token, disposition) catch |err| switch (err) {
-        error.StaleEnvelope, error.AcknowledgementExpired => std.log.err(
-            "Slack acknowledgment unavailable: {s}",
-            .{@errorName(err)},
-        ),
-        else => return err,
-    };
-}
-
 fn releaseDaemon(a: std.mem.Allocator, io: std.Io, daemon: *Daemon) void {
     daemon.beginStop(std.Io.Clock.awake.now(io).toMilliseconds());
-    _ = loop(a, io, daemon, null) catch |err| fatal(err);
+    _ = loop(a, io, daemon) catch |err| fatal(err);
     daemon.deinit() catch |err| fatal(err);
 }

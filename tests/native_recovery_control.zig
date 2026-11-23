@@ -115,7 +115,7 @@ fn refusedReleases(
     );
     try std.testing.expectEqual(before, try count(a, driver));
     changed = config();
-    changed.slack.channel = "D-other";
+    changed.slack.?.channel = "D-other";
     try reject(
         try call(a, driver, changed, "wrong-destination", release),
         "RecoveryResourceMismatch",
@@ -168,7 +168,7 @@ test "native recovery control validates bindings before mutation and replays exa
     const before = try count(a, &driver);
     var changed = config();
     changed.repository.id += 1;
-    changed.slack.channel = "D-other";
+    changed.slack.?.channel = "D-other";
     const replay = try taskId(try call(a, &driver, changed, "control-release", command));
     try std.testing.expectEqualDeep(released, replay);
     try std.testing.expectEqual(before, try count(a, &driver));
@@ -180,6 +180,7 @@ test "native recovery control validates bindings before mutation and replays exa
     const data = status.object.get("data").?.object;
     try std.testing.expect(!data.get("recovery_hold").?.bool);
     try std.testing.expect(!data.get("import_hold").?.bool);
+    try std.testing.expect(data.get("external_history") == null);
     const saved = data.get("recovery").?.object;
     try std.testing.expectEqualDeep(reference.task, try cli.hex(
         t.Id,

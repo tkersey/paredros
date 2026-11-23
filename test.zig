@@ -1,12 +1,9 @@
 test {
     _ = @import("tests/restore.zig");
-    _ = @import("tests/websocket.zig");
-    _ = @import("tests/slack_transport.zig");
     _ = @import("tests/experiment.zig");
     _ = @import("tests/method.zig");
     _ = @import("tests/github.zig");
     _ = @import("tests/github_adapter.zig");
-    _ = @import("tests/slack.zig");
     _ = @import("tests/schedule.zig");
     _ = @import("tests/contracts.zig");
     _ = @import("tests/genesis.zig");
@@ -22,7 +19,6 @@ test {
     _ = @import("tests/render_frame.zig");
     _ = @import("tests/delivery_prepare.zig");
     _ = @import("tests/check_publish.zig");
-    _ = @import("tests/audit.zig");
     _ = @import("tests/directive_policy.zig");
     _ = @import("tests/step.zig");
     _ = @import("tests/model.zig");

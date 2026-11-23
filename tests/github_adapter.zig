@@ -501,7 +501,7 @@ test "github adapter request ID projections prefer GitHub then the generic fallb
         "request-123",
         preferred.value.repository.request_id.?.bytes,
     );
-    headers[1].name.bytes = "x-slack-req-id";
+    headers[1].name.bytes = "x-ratelimit-used";
     evidence.request_id = .{ .bytes = "fallback-456" };
     var fallback = try adapter.interpret(a, request, evidence);
     defer fallback.deinit();

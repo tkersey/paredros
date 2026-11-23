@@ -199,7 +199,6 @@ fn responseHeader(name: []const u8) bool {
         "etag",
         "x-request-id",
         "x-github-request-id",
-        "x-slack-req-id",
         "content-type",
         "content-encoding",
         "content-length",
