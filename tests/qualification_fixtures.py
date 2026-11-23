@@ -118,12 +118,39 @@ def import_archive(binary, fixture, report, home):
     return expected
 
 
+@contextlib.contextmanager
+def preserved(state):
+    pristine = state.with_name(state.name + ".pristine")
+    if pristine.exists():
+        shutil.rmtree(state)
+        pristine.rename(state)
+    flags = ["-c"] if platform.system() == "Darwin" else []
+    subprocess.run(["cp", *flags, "-R", state, pristine], check=True)
+    try:
+        yield
+    finally:
+        changed = tree(state) != tree(pristine)
+        if changed:
+            shutil.rmtree(state)
+            pristine.rename(state)
+        else:
+            shutil.rmtree(pristine)
+
+
+def tree(root):
+    return {p.relative_to(root): digest(p) for p in root.rglob("*") if p.is_file()}
+
+
 def reopen(binary, fixture, report, home):
     state = fixture / "state"
     config = configure(home, fixture, state)
+    with preserved(state):
+        reopened(binary, report, config, state)
 
+
+def reopened(binary, report, config, state):
     def files():
-        return {p.relative_to(state): digest(p) for p in state.rglob("*") if p.is_file()}
+        return tree(state)
 
     before = files()
     audit = command(binary, "--config", config, "namespace", "check")
