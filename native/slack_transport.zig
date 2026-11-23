@@ -5,6 +5,7 @@ const websocket = @import("websocket.zig");
 pub const Config = struct {
     app_token: []const u8,
     message_bytes_max: usize = 128 * 1024,
+    discard_bytes_max: u64 = 16 * 1024 * 1024,
     ack_timeout_ms: u32 = 2500,
     connect_timeout_ms: u32 = 15_000,
     idle_timeout_ms: u32 = 60_000,
@@ -254,8 +255,15 @@ pub const Transport = struct {
         self.report.connections +|= 1;
         self.report.state = .connected;
         self.mutex.unlock(self.io);
+        var identity: Identity = undefined;
+        identity.reset();
         var decoder = try websocket.Decoder.init(self.allocator, self.config.message_bytes_max);
         defer decoder.deinit();
+        decoder.overflow = .{
+            .context = &identity,
+            .bytes_max = self.config.discard_bytes_max,
+            .feed = Identity.feed,
+        };
         while (!self.stopped()) { // tiger: event-loop
             var reading: Reading = .{ .decoder = &decoder, .reader = channel.reader };
             defer if (reading.message) |*message| message.deinit();
@@ -269,7 +277,10 @@ pub const Transport = struct {
                     try self.send(channel, .close, message.bytes, self.config.ack_timeout_ms);
                     return;
                 },
-                .text => if (!try self.envelope(channel, message.bytes, now(self.io))) return,
+                .text => if (message.oversized) |size| {
+                    try self.oversized(channel, identity.finish(), size, now(self.io));
+                    identity.reset();
+                } else if (!try self.envelope(channel, message.bytes, now(self.io))) return,
                 .binary, .continuation => return error.UnsupportedMessage,
             }
         }
@@ -292,26 +303,47 @@ pub const Transport = struct {
         }
         const disposition = try self.awaitDisposition(deadline_ms);
         if (metadata.envelope_id) |id| {
-            const ack = try std.json.Stringify.valueAlloc(
-                self.allocator,
-                .{ .envelope_id = id },
-                .{},
-            );
-            defer self.allocator.free(ack);
-            const remaining = deadline_ms - now(self.io);
-            if (remaining <= 0) return error.AcknowledgementExpired;
-            self.send(channel, .text, ack, @intCast(remaining)) catch |err| switch (err) {
-                error.Canceled => return err,
-                error.Timeout => return error.AcknowledgementExpired,
-                else => return error.AcknowledgementWriteFailed,
-            };
-            self.mutex.lockUncancelable(self.io);
-            self.report.acknowledged +|= 1;
-            self.report.last_acknowledged_ms = now(self.io);
-            self.mutex.unlock(self.io);
+            try self.acknowledge(channel, id, deadline_ms);
         } else if (disposition == .admitted) return error.MissingEnvelopeIdentity;
         self.setState(.connected, null);
         return true;
+    }
+
+    fn oversized(
+        self: *Transport,
+        channel: Channel,
+        envelope_id: ?[]const u8,
+        size: u64,
+        received_ms: i64,
+    ) !void {
+        const deadline_ms = try std.math.add(i64, received_ms, self.config.ack_timeout_ms);
+        try self.mutex.lock(self.io);
+        if (self.stopping) {
+            self.mutex.unlock(self.io);
+            return error.Canceled;
+        }
+        self.report.received +|= 1;
+        self.report.ignored +|= 1;
+        self.report.last_received_ms = received_ms;
+        self.mutex.unlock(self.io);
+        std.log.warn("Slack envelope ignored: oversized ({d} bytes)", .{size});
+        if (envelope_id) |id| try self.acknowledge(channel, id, deadline_ms);
+    }
+
+    fn acknowledge(self: *Transport, channel: Channel, id: []const u8, deadline_ms: i64) !void {
+        const ack = try std.json.Stringify.valueAlloc(self.allocator, .{ .envelope_id = id }, .{});
+        defer self.allocator.free(ack);
+        const remaining = deadline_ms - now(self.io);
+        if (remaining <= 0) return error.AcknowledgementExpired;
+        self.send(channel, .text, ack, @intCast(remaining)) catch |err| switch (err) {
+            error.Canceled => return err,
+            error.Timeout => return error.AcknowledgementExpired,
+            else => return error.AcknowledgementWriteFailed,
+        };
+        self.mutex.lockUncancelable(self.io);
+        self.report.acknowledged +|= 1;
+        self.report.last_acknowledged_ms = now(self.io);
+        self.mutex.unlock(self.io);
     }
 
     fn publish(self: *Transport, bytes: []const u8, received_ms: i64, deadline_ms: i64) !void {
@@ -389,7 +421,8 @@ pub const Transport = struct {
 
 fn validateConfig(config: Config) !void {
     if (config.app_token.len == 0 or config.app_token.len > 4096 or
-        config.message_bytes_max == 0 or config.ack_timeout_ms == 0 or
+        config.message_bytes_max == 0 or config.discard_bytes_max < config.message_bytes_max or
+        config.ack_timeout_ms == 0 or
         config.ack_timeout_ms >= 3000 or config.connect_timeout_ms == 0 or
         config.idle_timeout_ms == 0 or config.reconnect_min_ms == 0 or
         config.reconnect_max_ms < config.reconnect_min_ms) return error.InvalidConfig;
@@ -518,6 +551,119 @@ const Metadata = struct {
 
     fn deinit(self: *Metadata) void {
         if (self.parsed) |parsed| parsed.deinit();
+    }
+};
+
+const Identity = struct {
+    memory: [256]u8,
+    fixed: std.heap.FixedBufferAllocator,
+    scanner: std.json.Scanner,
+    text: [256]u8,
+    length: usize,
+    long: bool,
+    key: bool,
+    selected: bool,
+    seen: bool,
+    found: ?[256]u8,
+    found_length: usize,
+    state: enum { scanning, done, failed },
+
+    fn reset(self: *Identity) void {
+        self.fixed = .init(&self.memory);
+        self.scanner = .initStreaming(self.fixed.allocator());
+        self.length = 0;
+        self.long = false;
+        self.key = true;
+        self.selected = false;
+        self.seen = false;
+        self.found = null;
+        self.found_length = 0;
+        self.state = .scanning;
+    }
+
+    fn feed(context: *anyopaque, bytes: []const u8) void {
+        const self: *Identity = @ptrCast(@alignCast(context));
+        if (self.state != .scanning or bytes.len == 0) return;
+        self.scanner.feedInput(bytes);
+        self.drain(bytes.len) catch {
+            self.state = .failed;
+        };
+    }
+
+    fn finish(self: *Identity) ?[]const u8 {
+        if (self.state == .scanning) {
+            self.scanner.endInput();
+            self.drain(0) catch {
+                self.state = .failed;
+            };
+        }
+        if (self.state != .done) return null;
+        const found = &(self.found orelse return null);
+        return found[0..self.found_length];
+    }
+
+    fn drain(self: *Identity, bytes: usize) !void {
+        for (0..bytes + 2) |_| {
+            const item = self.scanner.next() catch |err| switch (err) {
+                error.BufferUnderrun => return,
+                else => return err,
+            };
+            if (item == .end_of_document) {
+                self.state = .done;
+                return;
+            }
+            try self.take(item);
+        }
+        return error.ScannerStalled;
+    }
+
+    fn take(self: *Identity, item: std.json.Token) !void {
+        const height = self.scanner.stackHeight();
+        if (height == 0 and item != .object_end) return error.NotObject;
+        if (height != 1) return;
+        switch (item) {
+            .array_begin => return error.NotObject,
+            .object_begin, .partial_number => {},
+            .partial_string => |piece| self.append(piece),
+            .partial_string_escaped_1 => |piece| self.append(&piece),
+            .partial_string_escaped_2 => |piece| self.append(&piece),
+            .partial_string_escaped_3 => |piece| self.append(&piece),
+            .partial_string_escaped_4 => |piece| self.append(&piece),
+            .string => |piece| {
+                self.append(piece);
+                try self.complete(true);
+            },
+            else => try self.complete(false),
+        }
+    }
+
+    fn append(self: *Identity, piece: []const u8) void {
+        if (self.long or piece.len > self.text.len - self.length) {
+            self.long = true;
+            return;
+        }
+        @memcpy(self.text[self.length..][0..piece.len], piece);
+        self.length += piece.len;
+    }
+
+    fn complete(self: *Identity, string: bool) !void {
+        defer {
+            self.length = 0;
+            self.long = false;
+        }
+        if (self.key) {
+            self.key = false;
+            self.selected = !self.long and
+                std.mem.eql(u8, self.text[0..self.length], "envelope_id");
+            return;
+        }
+        self.key = true;
+        if (!self.selected) return;
+        if (self.seen) return error.DuplicateField;
+        self.seen = true;
+        if (!string or self.long or self.length == 0) return;
+        self.found = self.text;
+        self.found_length = self.length;
     }
 };
 

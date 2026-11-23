@@ -66,17 +66,37 @@ fn settings() transport.Config {
 }
 
 fn frame(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    return fragment(a, 0x81, bytes);
+}
+
+fn fragment(a: std.mem.Allocator, head: u8, bytes: []const u8) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(a);
     errdefer writer.deinit();
-    try writer.writer.writeByte(0x81);
+    try writer.writer.writeByte(head);
     if (bytes.len < 126) {
         try writer.writer.writeByte(@intCast(bytes.len));
-    } else {
+    } else if (bytes.len <= std.math.maxInt(u16)) {
         try writer.writer.writeByte(126);
         try writer.writer.writeInt(u16, @intCast(bytes.len), .big);
+    } else {
+        try writer.writer.writeByte(127);
+        try writer.writer.writeInt(u64, bytes.len, .big);
     }
     try writer.writer.writeAll(bytes);
     return writer.toOwnedSlice();
+}
+
+fn oversized(a: std.mem.Allocator, tail: []const u8) ![]u8 {
+    const filler = try a.alloc(u8, 160 * 1024);
+    defer a.free(filler);
+    @memset(filler, 'x');
+    return std.mem.concat(a, u8, &.{
+        "{\"payload\":{\"api_app_id\":\"A1\",\"team_id\":\"T1\",\"event\":{" ++
+            "\"envelope_id\":\"nested\",\"user\":\"U1\",\"text\":\"\\\"envelope_id\\\":\\\"spoof ",
+        filler,
+        "\"}}",
+        tail,
+    });
 }
 
 fn next(t: *transport.Transport) !transport.Request {
@@ -374,4 +394,73 @@ test "Slack transport tokens cannot cross replacement transport owners" {
     try std.testing.expectError(error.StaleEnvelope, t.complete(original, .admitted));
     t.stop();
     try std.testing.expectEqual(0, replacement.writer.buffered().len);
+}
+
+test "Slack transport acknowledges and ignores an envelope beyond the retained bound" {
+    const a = std.testing.allocator;
+    const broken = try oversized(a, ",\"envelope_id\":\"broken\"");
+    defer a.free(broken);
+    const twice = try oversized(a, ",\"envelope_id\":\"a\",\"envelope_id\":\"b\"}");
+    defer a.free(twice);
+    const huge = try oversized(a, ",\"envelope_id\":\"huge\",\"type\":\"events_api\"}");
+    defer a.free(huge);
+    const split = huge.len / 2;
+    const parts = [_][]u8{
+        try frame(a, broken),
+        try frame(a, twice),
+        try fragment(a, 0x01, huge[0..split]),
+        try fragment(a, 0x89, "p"),
+        try fragment(a, 0x80, huge[split..]),
+        try frame(a, first),
+    };
+    defer for (parts) |part| a.free(part);
+    const wire = try std.mem.concat(a, u8, &parts);
+    defer a.free(wire);
+    var fake: Fake = .{ .frames = &.{wire} };
+    const t = try transport.Transport.initWithBackend(a, std.testing.io, settings(), fake.setup());
+    defer t.deinit();
+    try t.start();
+    var request = try next(t);
+    defer request.deinit();
+    try std.testing.expectEqualStrings(first, request.bytes);
+    try std.testing.expectEqual(1, fake.count);
+    try std.testing.expectEqual(null, t.health().last_failure);
+    try std.testing.expectEqual(3, t.health().ignored);
+    try t.complete(request.token, .admitted);
+    try waitCount(t, "acknowledged", 2);
+    t.stop();
+    try std.testing.expectEqual(4, t.health().received);
+    const output = fake.writer.buffered();
+    try std.testing.expectEqual(@as(u8, 0x8a), output[0]);
+    const boundary = 13 + @as(usize, output[8] & 0x7f);
+    const ignored = try ackPayload(a, output[7..boundary]);
+    defer a.free(ignored);
+    try std.testing.expectEqualStrings("{\"envelope_id\":\"huge\"}", ignored);
+    const admitted = try ackPayload(a, output[boundary..]);
+    defer a.free(admitted);
+    try std.testing.expectEqualStrings("{\"envelope_id\":\"first\"}", admitted);
+}
+
+test "Slack transport retires a connection whose message exceeds the discard bound without ACK" {
+    const a = std.testing.allocator;
+    const huge = try oversized(a, ",\"envelope_id\":\"huge\"}");
+    defer a.free(huge);
+    const wire = try frame(a, huge);
+    defer a.free(wire);
+    var config = settings();
+    config.discard_bytes_max = 160 * 1024;
+    var fake: Fake = .{ .frames = &.{wire} };
+    const t = try transport.Transport.initWithBackend(a, std.testing.io, config, fake.setup());
+    defer t.deinit();
+    try t.start();
+    try waitCount(t, "reconnects", 1);
+    t.stop();
+    try std.testing.expectEqual(0, fake.writer.buffered().len);
+    try std.testing.expectEqual(.protocol, t.health().last_failure.?);
+    try std.testing.expectEqual(0, t.health().received);
+    config.discard_bytes_max = config.message_bytes_max - 1;
+    try std.testing.expectError(
+        error.InvalidConfig,
+        transport.Transport.initWithBackend(a, std.testing.io, config, fake.setup()),
+    );
 }

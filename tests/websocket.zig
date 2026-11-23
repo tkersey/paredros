@@ -129,3 +129,48 @@ test "WebSocket accepts canonical 64-bit lengths and enforces exact message boun
     reader = .fixed(bytes);
     try std.testing.expectError(error.NoncanonicalLength, decoder.next(&reader));
 }
+
+const Sink = struct {
+    bytes: [32]u8 = undefined,
+    length: usize = 0,
+
+    fn feed(context: *anyopaque, chunk: []const u8) void {
+        const self: *Sink = @ptrCast(@alignCast(context));
+        @memcpy(self.bytes[self.length..][0..chunk.len], chunk);
+        self.length += chunk.len;
+    }
+};
+
+test "WebSocket streams an over-limit text message to its overflow sink within a hard bound" {
+    var sink: Sink = .{};
+    var decoder = try ws.Decoder.init(std.testing.allocator, 8);
+    defer decoder.deinit();
+    decoder.overflow = .{ .context = &sink, .bytes_max = 16, .feed = Sink.feed };
+    var reader = std.Io.Reader.fixed("\x01\x05abcde\x89\x01p\x80\x06fghijk\x81\x02lm");
+    var ping = try decoder.next(&reader);
+    defer ping.deinit();
+    try std.testing.expectEqual(.ping, ping.opcode);
+    var large = try decoder.next(&reader);
+    defer large.deinit();
+    try std.testing.expectEqual(.text, large.opcode);
+    try std.testing.expectEqual(11, large.oversized.?);
+    try std.testing.expectEqual(0, large.bytes.len);
+    try std.testing.expectEqualStrings("abcdefghijk", sink.bytes[0..sink.length]);
+    var small = try decoder.next(&reader);
+    defer small.deinit();
+    try std.testing.expectEqualStrings("lm", small.bytes);
+    try std.testing.expectEqual(null, small.oversized);
+    for ([_][]const u8{
+        "\x81\x11",
+        "\x01\x05abcde\x80\x0c",
+        "\x82\x09",
+    }) |bytes| {
+        var bounded = try ws.Decoder.init(std.testing.allocator, 8);
+        defer bounded.deinit();
+        bounded.overflow = .{ .context = &sink, .bytes_max = 16, .feed = Sink.feed };
+        sink.length = 0;
+        reader = .fixed(bytes);
+        try std.testing.expectError(error.MessageTooLarge, bounded.next(&reader));
+        try std.testing.expect(sink.length <= 5);
+    }
+}

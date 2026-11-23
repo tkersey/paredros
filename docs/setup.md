@@ -26,6 +26,17 @@ ID. Configure the owner explicitly. Keep other Socket Mode consumers disconnecte
 from this dedicated app because Slack can distribute events across its connections.
 Only top-level owner text and supported buttons in the bound DM receive authority.
 
+Socket Mode messages up to 128 KiB are classified in full. A larger text message
+up to 16 MiB is streamed without being retained: PAREDROS acknowledges it by its
+top-level `envelope_id`, ignores it as oversized, counts it in the `ignored`
+transport health, and logs the size. A larger message that is not valid JSON or
+lacks a unique string `envelope_id` is ignored without acknowledgment. Slack caps
+message text at 40,000 characters. Four fully escaped copies of that text (`text`
+and rich-text `blocks`, for the current and previous message of an edit) take
+about 2 MB, so 16 MiB leaves eightfold room for formatting, attachments, and
+metadata. A message above 16 MiB ends the connection as a transport protocol
+failure without acknowledgment, and PAREDROS reconnects with backoff.
+
 Audits retrieve metadata using `conversations.history` with
 `include_all_metadata=true`. They do not subscribe to metadata Events API events.
 Validate that this installation returns the complete activation marker before

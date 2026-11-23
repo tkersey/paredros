@@ -13,6 +13,7 @@ pub const Message = struct {
     allocator: std.mem.Allocator,
     opcode: Opcode,
     bytes: []u8,
+    oversized: ?u64 = null,
 
     pub fn deinit(self: *Message) void {
         self.allocator.free(self.bytes);
@@ -20,13 +21,22 @@ pub const Message = struct {
     }
 };
 
-const Frame = struct { final: bool, opcode: Opcode, bytes: []u8 };
+pub const Overflow = struct {
+    context: *anyopaque,
+    bytes_max: u64,
+    feed: *const fn (*anyopaque, []const u8) void,
+};
+
+const Header = struct { final: bool, opcode: Opcode, length: u64 };
 
 pub const Decoder = struct {
     allocator: std.mem.Allocator,
     message_bytes_max: usize,
+    overflow: ?Overflow = null,
     fragments: std.ArrayList(u8) = .empty,
     fragmented_opcode: ?Opcode = null,
+    received: u64 = 0,
+    discarding: bool = false,
 
     pub fn init(a: std.mem.Allocator, maximum: usize) !Decoder {
         if (maximum == 0) return error.InvalidLimit;
@@ -40,50 +50,90 @@ pub const Decoder = struct {
 
     pub fn next(self: *Decoder, reader: *std.Io.Reader) !Message {
         while (true) { // tiger: event-loop
-            const frame = try readFrame(self.allocator, reader, self.message_bytes_max);
-            if (try self.accept(frame)) |message| return message;
+            const header = try readHeader(reader);
+            if (try self.accept(reader, header)) |message| return message;
         }
     }
 
-    fn accept(self: *Decoder, frame: Frame) !?Message {
-        switch (frame.opcode) {
-            .close, .ping, .pong => return .{
-                .allocator = self.allocator,
-                .opcode = frame.opcode,
-                .bytes = frame.bytes,
+    fn accept(self: *Decoder, reader: *std.Io.Reader, header: Header) !?Message {
+        switch (header.opcode) {
+            .close, .ping, .pong => {
+                const bytes = try self.allocator.alloc(u8, @intCast(header.length));
+                errdefer self.allocator.free(bytes);
+                try reader.readSliceAll(bytes);
+                if (header.opcode == .close) try validateClose(bytes);
+                return .{ .allocator = self.allocator, .opcode = header.opcode, .bytes = bytes };
             },
             .text, .binary => {
-                if (self.fragmented_opcode != null) {
-                    self.allocator.free(frame.bytes);
-                    return error.InterleavedMessage;
-                }
-                if (frame.final) {
-                    errdefer self.allocator.free(frame.bytes);
-                    try validateText(frame.opcode, frame.bytes);
-                    return .{
-                        .allocator = self.allocator,
-                        .opcode = frame.opcode,
-                        .bytes = frame.bytes,
-                    };
-                }
-                self.fragmented_opcode = frame.opcode;
-                self.fragments.deinit(self.allocator);
-                self.fragments = .fromOwnedSlice(frame.bytes);
-                return null;
+                if (self.fragmented_opcode != null) return error.InterleavedMessage;
+                self.fragmented_opcode = header.opcode;
+                self.received = 0;
+                self.discarding = false;
+                self.fragments.clearRetainingCapacity();
             },
-            .continuation => {
-                defer self.allocator.free(frame.bytes);
-                const opcode = self.fragmented_opcode orelse return error.UnexpectedContinuation;
-                if (frame.bytes.len > self.message_bytes_max - self.fragments.items.len)
-                    return error.MessageTooLarge;
-                try self.fragments.appendSlice(self.allocator, frame.bytes);
-                if (!frame.final) return null;
-                try validateText(opcode, self.fragments.items);
-                const bytes = try self.fragments.toOwnedSlice(self.allocator);
-                self.fragmented_opcode = null;
-                return .{ .allocator = self.allocator, .opcode = opcode, .bytes = bytes };
-            },
+            .continuation => if (self.fragmented_opcode == null)
+                return error.UnexpectedContinuation,
         }
+        const opcode = self.fragmented_opcode.?;
+        const total = self.received +| header.length;
+        if (self.discarding or total > self.message_bytes_max) {
+            try self.discard(reader, opcode, header.length, total);
+        } else {
+            try self.retain(reader, @intCast(header.length));
+        }
+        self.received = total;
+        if (!header.final) return null;
+        return try self.complete(opcode);
+    }
+
+    fn retain(self: *Decoder, reader: *std.Io.Reader, length: usize) !void {
+        if (self.fragments.items.len == 0) {
+            try self.fragments.ensureTotalCapacityPrecise(self.allocator, length);
+        } else {
+            try self.fragments.ensureUnusedCapacity(self.allocator, length);
+        }
+        try reader.readSliceAll(self.fragments.unusedCapacitySlice()[0..length]);
+        self.fragments.items.len += length;
+    }
+
+    fn discard(
+        self: *Decoder,
+        reader: *std.Io.Reader,
+        opcode: Opcode,
+        length: u64,
+        total: u64,
+    ) !void {
+        const overflow = self.overflow orelse return error.MessageTooLarge;
+        if (opcode != .text or total > overflow.bytes_max) return error.MessageTooLarge;
+        if (!self.discarding) {
+            overflow.feed(overflow.context, self.fragments.items);
+            self.fragments.clearAndFree(self.allocator);
+            self.discarding = true;
+        }
+        var remaining = length;
+        while (remaining > 0) {
+            const buffered = try reader.peekGreedy(1);
+            const count: usize = @intCast(@min(buffered.len, remaining));
+            overflow.feed(overflow.context, buffered[0..count]);
+            reader.toss(count);
+            remaining -= count;
+        }
+    }
+
+    fn complete(self: *Decoder, opcode: Opcode) !Message {
+        self.fragmented_opcode = null;
+        if (self.discarding) {
+            self.discarding = false;
+            return .{
+                .allocator = self.allocator,
+                .opcode = opcode,
+                .bytes = &.{},
+                .oversized = self.received,
+            };
+        }
+        try validateText(opcode, self.fragments.items);
+        const bytes = try self.fragments.toOwnedSlice(self.allocator);
+        return .{ .allocator = self.allocator, .opcode = opcode, .bytes = bytes };
     }
 };
 
@@ -91,7 +141,7 @@ fn validateText(opcode: Opcode, bytes: []const u8) !void {
     if (opcode == .text and !std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
 }
 
-fn readFrame(a: std.mem.Allocator, reader: *std.Io.Reader, maximum: usize) !Frame {
+fn readHeader(reader: *std.Io.Reader) !Header {
     const head = try reader.takeArray(2);
     if (head[0] & 0x70 != 0) return error.ReservedBits;
     if (head[1] & 0x80 != 0) return error.MaskedServerFrame;
@@ -100,12 +150,7 @@ fn readFrame(a: std.mem.Allocator, reader: *std.Io.Reader, maximum: usize) !Fram
     const length = try frameLength(reader, head[1] & 0x7f);
     const control = @backingInt(opcode) >= 8;
     if (control and (!final or length > 125)) return error.InvalidControlFrame;
-    if (length > maximum) return error.MessageTooLarge;
-    const bytes = try a.alloc(u8, @intCast(length));
-    errdefer a.free(bytes);
-    try reader.readSliceAll(bytes);
-    if (opcode == .close) try validateClose(bytes);
-    return .{ .final = final, .opcode = opcode, .bytes = bytes };
+    return .{ .final = final, .opcode = opcode, .length = length };
 }
 
 fn frameLength(reader: *std.Io.Reader, short: u8) !u64 {

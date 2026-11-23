@@ -67,8 +67,8 @@ def inventory(zig, system, install, output, full):
         return [zig, "build", *args, "-Doptimize=safe", f"-j{build_jobs()}", "--summary", "all", "--prefix", install]
 
     def source_tests(log):
-        require(any(line.startswith("Build Summary:") and line.endswith("; 108/108 tests passed")
-                    for line in log.read_text(errors="replace").splitlines()), "expected 108 passing source tests")
+        require(any(line.startswith("Build Summary:") and line.endswith("; 111/111 tests passed")
+                    for line in log.read_text(errors="replace").splitlines()), "expected 111 passing source tests")
 
     target = ["-Dtarget=x86_64-linux-musl"] if linux else []
     assets = "-Demitted-application=app/emitted"

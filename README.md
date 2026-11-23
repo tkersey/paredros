@@ -48,7 +48,7 @@ zig build check -Dcheck-recovery=true
 
 Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
 essential set within one 600-second budget measured from the `zig build`
-invocation: TigerStyle over every tracked Zig file, the 108 source contracts, the
+invocation: TigerStyle over every tracked Zig file, the 111 source contracts, the
 emitted-application check, the native `providers` owner group, the installed
 product's smoke checks, twelve process-death cases, and historical namespace
 reopen and archive import. On macOS one build compiles every essential artifact
