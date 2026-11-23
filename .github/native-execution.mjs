@@ -5,7 +5,7 @@ const suites = {
     driver: group(21, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
     proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
       'control proposal consumer confirms each proposal once'),
-    controls: group(83, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
+    controls: group(85, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
