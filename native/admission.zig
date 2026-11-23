@@ -27,7 +27,10 @@ pub fn directiveDigest(
     operation: []const u8,
     request: t.Digest,
 ) !t.Digest {
-    return stableDigest(a, .{ .operation = t.OperationId{ .bytes = operation }, .request = request });
+    return stableDigest(a, .{
+        .operation = t.OperationId{ .bytes = operation },
+        .request = request,
+    });
 }
 
 pub fn admit(

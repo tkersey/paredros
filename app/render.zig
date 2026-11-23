@@ -293,20 +293,8 @@ fn selectNext(
         try measure(c, consider, BatchFact, fact),
     );
     const count = try add(c, consider, try b.field(prefix, "count"), try consider.constant(u64, 1));
-    const policies = try consider.field(
-        try consider.field(try consider.field(input, "head"), "specification"),
-        "policies",
-    );
-    const bound = try consider.field(policies, "render_input_bytes");
-    const framed = try add(c, consider, size, try natural(consider, count));
-    const oversized = try consider.less(
-        bound,
-        try add(c, consider, framed, try consider.field(prefix, "floor")),
-    );
-    const crowded = try consider.less(
-        bound,
-        try add(c, consider, framed, try consider.field(prefix, "state")),
-    );
+    const oversized = try exceeds(c, consider, input, prefix, size, count, "floor");
+    const crowded = try exceeds(c, consider, input, prefix, size, count, "state");
     const accepted = try consider.branch();
     const refused = try consider.branch();
     const revised = try accepted.update(prefix, .{
@@ -340,6 +328,26 @@ fn selectNext(
     );
     const selected = try consider.conditional(fit, try accepted.ret(next), try refused.ret(prefix));
     return b.conditional(boundary, try stop.ret(prefix), try consider.ret(selected));
+}
+
+fn exceeds(
+    c: protean.Context,
+    b: anytype,
+    input: a.Value(step.RenderInput),
+    prefix: a.Value(Prefix),
+    size: a.Value(u64),
+    count: a.Value(u64),
+    comptime reserve: []const u8,
+) !a.Value(bool) {
+    const policies = try b.field(
+        try b.field(try b.field(input, "head"), "specification"),
+        "policies",
+    );
+    const framed = try add(c, b, size, try natural(b, count));
+    return b.less(
+        try b.field(policies, "render_input_bytes"),
+        try add(c, b, framed, try b.field(prefix, reserve)),
+    );
 }
 
 fn validateBatch(
