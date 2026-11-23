@@ -347,6 +347,12 @@ test "native continuity global turns preserve frozen context and ingress identit
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
     try std.testing.expectEqual(0, bundle.value.lineages.items.len);
+    var moved = config();
+    moved.slack.?.channel = "D999";
+    try std.testing.expectError(
+        error.ContinuityResourceMismatch,
+        transfer.validateDestination(a, bundle.value, configuration.bindings(moved)),
+    );
     original.detach();
     try from.close();
     try to.init();
@@ -1602,4 +1608,148 @@ test "native continuity control monitor add retried under the import hold return
     try controlRefused(a, &destination, "monitor-reused", "watch", "OperationConflict");
     try std.testing.expectEqualDeep(imported, try controlTask(a, &destination, "monitor-retry"));
     try expectImportHold(a, &destination, true);
+}
+
+fn hopDriver(f: *Fixture, clock: *u8) !Driver {
+    var driver: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try driver.attach(f.arena.allocator());
+    return driver;
+}
+
+fn admittedTurn(a: std.mem.Allocator, driver: *Driver) !t.Turn {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    var found: ?t.Turn = null;
+    for (index.records) |record| {
+        if (record.input != .turn) continue;
+        try std.testing.expect(found == null);
+        found = record.input.turn;
+    }
+    return found orelse error.MissingTurn;
+}
+
+test "native continuity third hop maps an earlier hop's unfinished targeted turn" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var third: Fixture = .{};
+    defer third.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original = try hopDriver(&from, &clock);
+    _ = try original.turn(a, "targeted-unfinished-turn", origin, .{
+        .destination = contracts.specification().destination,
+        .text = .{ .bytes = "What changed on this obligation?" },
+        .target = target,
+    });
+    var first = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer first.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var middle = try hopDriver(&to, &clock);
+    try importDone(&to, &middle, first.value);
+    var second = try transfer.capture(&middle, a, source(&to), .snapshot);
+    defer second.deinit();
+    middle.detach();
+    try to.close();
+    try third.init();
+    var last = try hopDriver(&third, &clock);
+    defer last.detach();
+    const imported = try importAll(&third, &last, second.value);
+    try releaseImport(&third, &last);
+    try std.testing.expect(try last.importedTurns(a));
+    try std.testing.expectEqualDeep(imported, (try admittedTurn(a, &last)).target.?);
+    try std.testing.expect(!try last.importedTurns(a));
+}
+
+test "native continuity snapshot during partial control mapping keeps source order" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var third: Fixture = .{};
+    defer third.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original = try hopDriver(&from, &clock);
+    _ = try original.directive(a, "partial-pause", origin, target, .{ .pause = {} });
+    _ = try original.directive(a, "partial-resume", origin, target, .{ .@"resume" = {} });
+    var first = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer first.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var middle = try hopDriver(&to, &clock);
+    const carried = try importAll(&to, &middle, first.value);
+    const mapped = try transfer.admitPendingControls(&middle, a, carried, origin);
+    try std.testing.expectEqual(1, mapped.remaining);
+    try finish(&to, mapped.admitted.?);
+    var second = try transfer.capture(&middle, a, source(&to), .snapshot);
+    defer second.deinit();
+    const keys = second.value.lineages.items[0].pending_controls.items;
+    try std.testing.expectEqual(2, keys.len);
+    const leading = continuity.member(second.value, keys[0]).?;
+    try std.testing.expectEqualDeep(second.value.source.namespace, leading.data.source.namespace);
+    middle.detach();
+    try to.close();
+    try third.init();
+    var last = try hopDriver(&third, &clock);
+    defer last.detach();
+    try verifyImported(&third, &last, try importAll(&third, &last, second.value));
+}
+
+fn staleGenesis() t.Genesis {
+    var value = secondGenesis();
+    value.specification.destination.channel = .{ .bytes = "D999" };
+    return value;
+}
+
+test "native continuity import skips the bindings of a cancelled lineage" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const live = contracts.genesis();
+    const stale = staleGenesis();
+    _ = try from.execute(live.envelope.operation.bytes, .{ .genesis = live });
+    const cancelled = try from.execute(stale.envelope.operation.bytes, .{ .genesis = stale });
+    var clock: u8 = 0;
+    var original = try hopDriver(&from, &clock);
+    _ = try original.directive(a, "stale-cancel", origin, cancelled, .{ .cancel = {} });
+    try finish(&from, (try original.nextStep(a, cancelled)).?);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    var moved = config();
+    moved.slack.?.channel = "D999";
+    try std.testing.expectError(
+        error.ContinuityResourceMismatch,
+        transfer.validateDestination(a, bundle.value, configuration.bindings(moved)),
+    );
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination = try hopDriver(&to, &clock);
+    defer destination.detach();
+    try importDone(&to, &destination, bundle.value);
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(2, index.obligations.len);
+    var modes: [2]t.Mode = undefined;
+    for (&modes, index.obligations) |*mode, *obligation| mode.* = index.head(obligation).mode;
+    try std.testing.expect(modes[0] == .cancelled or modes[1] == .cancelled);
+    try std.testing.expect(modes[0] != .cancelled or modes[1] != .cancelled);
 }

@@ -386,10 +386,11 @@ pub fn validateDestination(
     bundle: Bundle,
     bindings: configuration.Bindings,
 ) !void {
-    try validateGlobalTurns(a, bundle, bindings);
+    try validatePendingTurns(a, bundle, bindings);
     for (bundle.lineages.items) |root| {
         var head = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
         defer head.deinit();
+        if (head.value.mode == .cancelled) continue;
         if (!try continuity.equal(
             a,
             t.Repository,
@@ -405,17 +406,18 @@ pub fn validateDestination(
     }
 }
 
-fn validateGlobalTurns(
+fn validatePendingTurns(
     a: std.mem.Allocator,
     bundle: Bundle,
     bindings: configuration.Bindings,
 ) !void {
-    for (bundle.members.items) |item| {
-        if (item.data.kind != .turn or !std.meta.eql(item.data.lineage, global())) continue;
-        var value = try continuity.decode(.turn, a, item.data);
-        defer value.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    for (try @import("continuity_turn.zig").pendingTurns(scratch, bundle)) |item| {
+        const value = try continuity.decode(.turn, scratch, item.data);
         if (!try continuity.equal(
-            a,
+            scratch,
             t.Destination,
             value.value.input.destination,
             bindings.destination,
@@ -796,29 +798,71 @@ fn pendingControlKeys(
     obligation: idx.Obligation,
 ) ![]const t.Digest {
     const a = builder.allocator;
-    var keys: std.ArrayList(t.Digest) = .empty;
-    if (continuity.findImport(index, obligation.task)) |imported| {
-        const root = continuity.lineage(imported.bundle, index.head(&obligation).lineage).?;
-        for (root.pending_controls.items) |key| {
-            if (try continuity.mappedControl(a, index, imported, key) == null)
-                try keys.append(a, key);
-        }
-    }
     const head = index.head(&obligation);
+    var inherited: std.ArrayList(t.Digest) = .empty;
+    var boundary = head.folded_directive_ordinal;
+    if (continuity.findImport(index, obligation.task)) |imported| {
+        const root = continuity.lineage(imported.bundle, head.lineage).?;
+        const mapped = try unmappedControls(a, index, imported, root, &inherited);
+        boundary = @max(boundary, mapped);
+    }
+    var keys: std.ArrayList(t.Digest) = .empty;
+    const folded = head.folded_directive_ordinal;
+    try localControls(builder, index, obligation, folded, boundary, &keys);
+    try keys.appendSlice(a, inherited.items);
+    try localControls(builder, index, obligation, boundary, std.math.maxInt(u64), &keys);
+    return keys.toOwnedSlice(a);
+}
+
+fn unmappedControls(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    imported: continuity.Imported,
+    root: continuity.Lineage,
+    keys: *std.ArrayList(t.Digest),
+) !u64 {
+    var boundary: u64 = 0;
+    var owed = false;
+    for (root.pending_controls.items) |key| {
+        const position = try continuity.mappedControl(a, index, imported, key) orelse {
+            var control = try continuity.decode(
+                .directive,
+                a,
+                continuity.member(imported.bundle, key).?.data,
+            );
+            defer control.deinit();
+            owed = owed or !continuity.historicalControl(control.value.body);
+            try keys.append(a, key);
+            continue;
+        };
+        if (owed) return error.ContinuityControlOrderMismatch;
+        boundary = @max(boundary, index.records[position].input.directive.ordinal);
+    }
+    return boundary;
+}
+
+fn localControls(
+    builder: *Builder,
+    index: *const idx.Index,
+    obligation: idx.Obligation,
+    after: u64,
+    through: u64,
+    keys: *std.ArrayList(t.Digest),
+) !void {
     for (obligation.directives) |position| {
         const record = index.records[position];
-        if (record.input.directive.ordinal <= head.folded_directive_ordinal) continue;
+        const ordinal = record.input.directive.ordinal;
+        if (ordinal <= after or ordinal > through) continue;
         var found = false;
         for (builder.members.items) |item| {
             if (item.data.kind == .directive and std.meta.eql(item.current.task, record.task)) {
-                try keys.append(a, item.identity);
+                try keys.append(builder.allocator, item.identity);
                 found = true;
                 break;
             }
         }
         if (!found) return error.MissingContinuityControl;
     }
-    return keys.toOwnedSlice(a);
 }
 
 pub const PendingControlProgress = struct {

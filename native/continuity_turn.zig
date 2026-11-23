@@ -94,6 +94,43 @@ pub fn validateBundle(a: std.mem.Allocator, bundle: continuity.Bundle) !void {
         if (item.data.kind != .turn) continue;
         _ = try originalEnvelope(arena.allocator(), bundle, item);
     }
+    for (try pendingTurns(arena.allocator(), bundle)) |item| {
+        try validateTarget(arena.allocator(), bundle, item);
+    }
+}
+
+pub fn pendingTurns(a: std.mem.Allocator, bundle: continuity.Bundle) ![]continuity.Member {
+    var replaced: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
+    for (bundle.members.items) |item| {
+        if (item.data.kind != .turn) continue;
+        const previous = try previousTurn(a, bundle, item) orelse continue;
+        try replaced.put(a, previous.identity, {});
+    }
+    var result: std.ArrayList(continuity.Member) = .empty;
+    for (bundle.members.items) |item| {
+        if (item.data.kind != .turn or replaced.contains(item.identity)) continue;
+        const value = try continuity.decode(.turn, a, item.data);
+        if (value.value.result == null) try result.append(a, item);
+    }
+    return result.toOwnedSlice(a);
+}
+
+fn validateTarget(a: std.mem.Allocator, bundle: continuity.Bundle, item: continuity.Member) !void {
+    const value = try continuity.decode(.turn, a, item.data);
+    const target = value.value.input.target orelse return;
+    if (continuity.lineage(bundle, item.data.lineage) == null)
+        return error.MissingContinuityTarget;
+    for (bundle.members.items) |source| {
+        if (source.data.kind != .settlement or
+            !std.meta.eql(source.data.source.namespace, item.data.source.namespace) or
+            !std.meta.eql(source.data.source.task, target)) continue;
+        const fact = try continuity.decode(.settlement, a, source.data);
+        const input = try continuity.sourceInput(a, fact.value.input);
+        if (input != .genesis or !std.meta.eql(input.genesis.lineage, item.data.lineage))
+            return error.InvalidContinuityTarget;
+        return;
+    }
+    return error.MissingContinuityTarget;
 }
 
 fn operation(a: std.mem.Allocator, bundle: t.Digest, identity: t.Digest) ![]u8 {
@@ -159,10 +196,10 @@ fn mappedInput(
     result.attempt = @min(try std.math.add(u32, result.attempt, 1), 2);
     result.ordinal = ordinal;
     result.model = model;
-    if (result.target) |target| result.target = try continuity.importedTarget(
+    if (result.target != null) result.target = try continuity.importedTarget(
         index,
         portable,
-        target,
+        item.data.lineage,
     );
     result.context_references.items = try a.dupe(
         t.RevisionReference,

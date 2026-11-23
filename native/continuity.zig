@@ -740,23 +740,34 @@ fn currentInput(a: std.mem.Allocator, bundle: Bundle, task: t.Id) !t.Input {
     return error.MissingContinuityFact;
 }
 
-fn inheritedPending(a: std.mem.Allocator, bundle: Bundle, root: Lineage) !usize {
+const Inherited = struct { start: usize = 0, end: usize = 0 };
+
+fn foreignBlock(bundle: Bundle, keys: []const t.Digest) !Inherited {
+    var block: ?Inherited = null;
+    for (keys, 0..) |key, i| {
+        const item = member(bundle, key) orelse return error.MissingContinuityControl;
+        if (std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
+        if (block) |*found| {
+            if (found.end != i) return error.ContinuityControlOrderMismatch;
+            found.end = i + 1;
+        } else block = .{ .start = i, .end = i + 1 };
+    }
+    return block orelse .{};
+}
+
+fn inheritedPending(a: std.mem.Allocator, bundle: Bundle, root: Lineage) !Inherited {
     const input = try currentInput(a, bundle, root.obligation);
     if (input != .genesis) return error.ContinuityLineageMismatch;
-    var inherited: usize = 0;
-    for (root.pending_controls.items) |key| {
-        const item = member(bundle, key) orelse return error.MissingContinuityControl;
-        if (std.meta.eql(item.data.source.namespace, bundle.source.namespace)) break;
-        inherited += 1;
-    }
-    if (inherited == 0) return 0;
+    const keys = root.pending_controls.items;
+    const block = try foreignBlock(bundle, keys);
+    if (block.start == block.end) return block;
     const imported = input.genesis.imported orelse return error.ContinuityControlOrderMismatch;
     const metadata = imported.continuity orelse return error.UnprovenContinuityImport;
-    for (root.pending_controls.items[0..inherited]) |key| {
+    for (keys[block.start..block.end]) |key| {
         if (try locallyAdmitted(a, bundle, metadata.bundle, key))
             return error.ContinuityControlOrderMismatch;
     }
-    return inherited;
+    return block;
 }
 
 fn locallyAdmitted(a: std.mem.Allocator, bundle: Bundle, imported: t.Digest, key: t.Digest) !bool {
@@ -783,14 +794,14 @@ fn validatePending(a: std.mem.Allocator, bundle: Bundle, root: Lineage, head: t.
         for (root.pending_controls.items[0..i]) |old|
             if (std.meta.eql(old, key)) return error.DuplicateContinuityControl;
         const control = try decode(.directive, scratch, item.data);
-        if (i < inherited) continue;
+        if (i >= inherited.start and i < inherited.end) continue;
         ordinal = try std.math.add(u64, ordinal, 1);
         if (!std.meta.eql(control.value.obligation, root.obligation) or
             control.value.ordinal != ordinal or
             !std.meta.eql(item.data.source.namespace, bundle.source.namespace))
             return error.ContinuityControlOrderMismatch;
     }
-    var count: usize = inherited;
+    var count: usize = inherited.end - inherited.start;
     for (bundle.members.items) |item| {
         if (item.data.kind != .directive or
             !std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
@@ -825,17 +836,12 @@ pub fn portableMember(index: anytype, local: t.Reference, kind: t.ContinuityKind
     return error.UnprovenContinuityMember;
 }
 
-pub fn importedTarget(index: anytype, portable: Portable, original: t.Id) !t.Id {
-    for (portable.bundle.lineages.items) |root| {
-        if (!std.meta.eql(root.obligation, original)) continue;
-        for (index.imports) |imported| {
-            if (std.meta.eql(imported.metadata.bundle, portable.metadata.bundle) and
-                std.meta.eql(
-                    index.record(imported.obligation).?.input.genesis.lineage,
-                    root.identity,
-                ))
-                return imported.obligation;
-        }
+pub fn importedTarget(index: anytype, portable: Portable, identity: t.Digest) !t.Id {
+    if (lineage(portable.bundle, identity) == null) return error.MissingContinuityTarget;
+    for (index.imports) |imported| {
+        if (std.meta.eql(imported.metadata.bundle, portable.metadata.bundle) and
+            std.meta.eql(index.record(imported.obligation).?.input.genesis.lineage, identity))
+            return imported.obligation;
     }
     return error.MissingContinuityTarget;
 }
