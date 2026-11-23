@@ -4,8 +4,6 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const app = @import("../native/application.zig");
 const github = @import("../native/github_external.zig");
-const slack = @import("../native/slack_external.zig");
-const notification = @import("../app/slack_contract.zig");
 const model = @import("../native/model_external.zig");
 const model_contract = @import("../app/model_contract.zig");
 const contract = @import("../app/github_contract.zig");
@@ -17,11 +15,9 @@ const Phase = enum {
     replacement_admitted,
     read_dispatched,
     read_captured,
-    write_admitted,
-    write_dispatched,
-    write_captured,
-    write_consumed,
-    write_completed,
+    delivery_admitted,
+    delivery_completed,
+    delivery_consumed,
     turn_admitted,
     model_dispatched,
     model_captured,
@@ -46,13 +42,20 @@ const Application = struct {
     fn declarationsValue() [app.Application.declarations.len]native.Declaration {
         var result: [app.Application.declarations.len]native.Declaration = undefined;
         @memcpy(&result, app.Application.declarations);
-        result[0].capture.?.acquire = acquire;
-        result[0].capture.?.interpret = interpret;
-        result[3].capture.?.acquire = acquireWrite;
-        result[3].capture.?.interpret = interpretWrite;
-        result[2].capture.?.acquire = acquireModel;
-        result[2].capture.?.interpret = interpretModel;
+        const read = position(contract.identity);
+        result[read].capture.?.acquire = acquire;
+        result[read].capture.?.interpret = interpret;
+        const inference = position(model_contract.P.identity);
+        result[inference].capture.?.acquire = acquireModel;
+        result[inference].capture.?.interpret = interpretModel;
         return result;
+    }
+
+    fn position(comptime identity: []const u8) usize {
+        for (app.Application.declarations, 0..) |declaration, index| {
+            if (std.mem.eql(u8, declaration.identity, identity)) return index;
+        }
+        @compileError("missing declaration " ++ identity);
     }
 };
 const Fixture = @import("native_fixture.zig").Fixture(t, Application);
@@ -100,53 +103,9 @@ fn clock(_: *anyopaque) !i64 {
     return now_ms;
 }
 
-fn acquireWrite(ctx: native.Context, bytes: []const u8) !native.registry.Acquisition {
-    if (verifying and phase != .write_admitted) return error.OriginalWriteRepeated;
-    var task: t.Id = undefined;
-    _ = try std.fmt.hexToBytes(&task, ctx.task_id);
-    var request = try c.decodeOwned(notification.Request, ctx.allocator, bytes);
-    defer request.deinit();
-    var wire = try slack.preparedWire(ctx.allocator, request.value, "B123");
-    defer wire.deinit();
-    acquisitions += 1;
-    try emit(.{
-        .acquired = "slack",
-        .task = task,
-        .key = request.value.key,
-        .payload_digest = request.value.payload.content_digest,
-    });
-    try stopAt(.write_dispatched);
-    const body = try std.json.Stringify.valueAlloc(ctx.allocator, .{
-        .ok = true,
-        .channel = request.value.destination.channel.bytes,
-        .ts = "1730000000.000001",
-        .message = .{ .text = "fixture accepted message", .metadata = @as(?u8, null) },
-    }, .{});
-    defer ctx.allocator.free(body);
-    var capture: @import("../native/http.zig").Capture = .{
-        .arena = .init(ctx.allocator),
-        .status = 200,
-        .headers = &.{},
-        .identity_encoding = true,
-        .body = body,
-    };
-    defer capture.deinit();
-    return .{ .captured = try slack.captureBytes(ctx.allocator, bytes, "B123", capture, 100) };
-}
-
-fn interpretWrite(
-    ctx: native.registry.ProjectionContext,
-    request: []const u8,
-    prepared: []const u8,
-    captured: []const u8,
-) !native.registry.Projection {
-    try stopAt(.write_captured);
-    return app.Application.declarations[3].capture.?.interpret(ctx, request, prepared, captured);
-}
-
-fn writes() bool {
-    return phase == .write_admitted or phase == .write_dispatched or
-        phase == .write_captured or phase == .write_consumed or phase == .write_completed;
+fn deliveries() bool {
+    return phase == .delivery_admitted or phase == .delivery_completed or
+        phase == .delivery_consumed;
 }
 
 fn models() bool {
@@ -213,23 +172,12 @@ fn remember(driver: *Driver, target: t.Id, subject: t.Id, predecessor: ?t.Id) !v
 fn drive(f: *Fixture, session: *native.Session(t), task: t.Id) !void {
     const a = f.arena.allocator();
     const deadline = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() + 90_000;
-    var cancelled = false;
     while (std.Io.Clock.awake.now(std.testing.io).toMilliseconds() < deadline) {
-        if (phase == .write_consumed and !verifying) {
-            _ = try session.collect(a, false);
-            const history = try f.service.?.notificationHistory(a, task, app.notification_identity);
-            if (!cancelled and history.captured != null and history.captured.?.reply != null) {
-                _ = try f.service.?.requestCancel(a, "crash-consume-cancel", task, "stop");
-                cancelled = true;
-            }
-        }
         _ = try session.tick(a);
         var state = try f.service.?.task(a, task);
         defer state.deinit();
-        if (cancelled and !state.value.terminal() and state.value.current_occurrence == null)
-            try stopAt(.write_consumed);
         if (state.value.terminal()) {
-            try stopAt(.write_completed);
+            try stopAt(.delivery_completed);
             return;
         }
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
@@ -242,7 +190,7 @@ fn createCut(f: *Fixture, driver: *Driver) !void {
     const initial = examples.genesis();
     const target = try f.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
     const origin: t.Origin = .{ .local = .{ .uid = 501 } };
-    if (writes()) return createWriteCut(f, driver, target);
+    if (deliveries()) return createDeliveryCut(f, driver, target);
     if (models()) return createModelCut(f, driver, target);
     if (phase == .control_admitted) {
         const pause = try driver.directive(a, "crash-pause", origin, target, .pause);
@@ -263,15 +211,35 @@ fn createCut(f: *Fixture, driver: *Driver) !void {
     return error.CrashBoundaryNotReached;
 }
 
-fn createWriteCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
-    const deliveries = try driver.deliveries(f.arena.allocator(), target);
-    try std.testing.expectEqual(1, deliveries.len);
-    try remember(driver, target, deliveries[0], null);
-    if (phase == .write_admitted) return stopAt(.write_admitted);
+fn createDeliveryCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
+    const a = f.arena.allocator();
+    const admitted = try driver.deliveries(a, target);
+    try std.testing.expectEqual(1, admitted.len);
+    try remember(driver, target, admitted[0], null);
+    if (phase == .delivery_admitted) return stopAt(.delivery_admitted);
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     try drive(f, &session, witness.subject);
+    try drive(f, &session, (try driver.nextStep(a, target)).?);
+    try std.testing.expectEqual(1, try consumptions(driver, a));
+    try stopAt(.delivery_consumed);
     return error.CrashBoundaryNotReached;
+}
+
+fn consumptions(driver: *Driver, a: std.mem.Allocator) !u32 {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const obligation = index.obligation(witness.target).?;
+    var count: u32 = 0;
+    for (obligation.chain) |position| {
+        const output = index.records[position].result.?;
+        const head = if (output == .genesis) output.genesis else output.step.head;
+        for (head.consumed.items) |fact| {
+            if (std.meta.eql(fact.task, witness.subject)) count += 1;
+        }
+    }
+    if (count == 1) try std.testing.expect(index.head(obligation).activation == null);
+    return count;
 }
 
 fn createModelCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
@@ -359,86 +327,33 @@ fn verifyRead(f: *Fixture, driver: *Driver) !void {
     }
 }
 
-fn verifyWrite(f: *Fixture, driver: *Driver) !void {
-    const a = f.arena.allocator();
-    var saved = try retained.load(&f.service.?, a, witness.subject, 128);
-    defer saved.deinit();
-    const sent = phase != .write_admitted;
-    try std.testing.expectEqual(
-        @as(usize, if (sent) 1 else 0),
-        saved.snapshot.value.attempts.items.len,
-    );
-    if (sent) try std.testing.expectEqual(
-        phase == .write_captured or phase == .write_consumed or phase == .write_completed,
-        saved.snapshot.value.attempts.items[0].capture != null,
-    );
-    const before = try f.service.?.notificationHistory(
-        a,
-        witness.subject,
-        app.notification_identity,
-    );
-    if (phase == .write_completed) {
-        var state = try f.service.?.task(a, witness.subject);
-        defer state.deinit();
-        try std.testing.expect(state.value.terminal());
-        try std.testing.expect(state.value.current_occurrence == null);
-        try std.testing.expect(before.captured.?.reply != null);
-    }
-    try std.testing.expectEqual(!sent, before.transmissionExcluded());
-    const repeated = try driver.deliveries(a, witness.target);
-    try std.testing.expectEqual(1, repeated.len);
-    try std.testing.expectEqualDeep(witness.subject, repeated[0]);
-    if (phase == .write_consumed) return verifyConsumed(f, driver);
-    const resumed = try driver.resumeRetained(a, 8);
-    try std.testing.expectEqual(
-        @as(u32, if (phase == .write_dispatched or phase == .write_completed) 0 else 1),
-        resumed,
-    );
-    var session = try native.Session(t).init(&f.service.?);
-    defer session.deinit() catch @panic("session left busy");
-    if (phase == .write_dispatched) {
-        for (0..8) |_| _ = try session.tick(a);
-        var state = try f.service.?.task(a, witness.subject);
-        defer state.deinit();
-        try std.testing.expectEqual(.unknown, try f.service.?.status(a, state.value));
-    } else {
-        try drive(f, &session, witness.subject);
-        const result = try f.output(witness.subject);
-        try std.testing.expect(result == .delivery and result.delivery == .confirmed);
-    }
-    const after = try f.service.?.notificationHistory(
-        a,
-        witness.subject,
-        app.notification_identity,
-    );
-    try std.testing.expectEqual(1, after.attempts);
-    try std.testing.expect(!after.transmissionExcluded());
-    try std.testing.expectEqual(@as(u32, if (phase == .write_admitted) 1 else 0), acquisitions);
-    const again = try driver.deliveries(a, witness.target);
-    try std.testing.expectEqual(1, again.len);
-    try std.testing.expectEqualDeep(witness.subject, again[0]);
-}
-
-fn verifyConsumed(f: *Fixture, driver: *Driver) !void {
+fn verifyDelivery(f: *Fixture, driver: *Driver) !void {
     const a = f.arena.allocator();
     var state = try f.service.?.task(a, witness.subject);
-    defer state.deinit();
-    try std.testing.expect(!state.value.terminal());
-    try std.testing.expect(state.value.current_occurrence == null);
-    try std.testing.expect(state.value.cancellation != null);
-    try std.testing.expect(!state.value.cancellation_applied);
-    try std.testing.expectEqual(0, try driver.resumeRetained(a, 8));
+    const completed = state.value.terminal();
+    state.deinit();
+    try std.testing.expectEqual(phase != .delivery_admitted, completed);
+    try std.testing.expectEqual(
+        @as(u32, if (phase == .delivery_consumed) 1 else 0),
+        try consumptions(driver, a),
+    );
+    const repeated = try driver.deliveries(a, witness.target);
+    if (phase == .delivery_consumed) {
+        for (repeated) |task| try std.testing.expect(!std.meta.eql(witness.subject, task));
+    } else {
+        try std.testing.expectEqual(1, repeated.len);
+        try std.testing.expectEqualDeep(witness.subject, repeated[0]);
+    }
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
-    for (0..8) |_| _ = try session.tick(a);
-    const history = try f.service.?.notificationHistory(
-        a,
-        witness.subject,
-        app.notification_identity,
-    );
-    try std.testing.expectEqual(1, history.attempts);
-    try std.testing.expect(history.captured.?.reply != null);
-    try std.testing.expect(!history.transmissionExcluded());
+    try drive(f, &session, witness.subject);
+    try std.testing.expectEqualDeep(t.Output{ .delivery = .{ .confirmed = .{
+        .timestamp = .{ .bytes = "local" },
+        .metadata_observed = true,
+    } } }, try f.output(witness.subject));
+    var saved = try retained.load(&f.service.?, a, witness.subject, 128);
+    defer saved.deinit();
+    try std.testing.expectEqual(0, saved.snapshot.value.attempts.items.len);
     try std.testing.expectEqual(0, acquisitions);
 }
 
@@ -495,11 +410,7 @@ test "process crash owner fixture" {
     var f: Fixture = .{};
     defer f.deinit();
     const binding = try @import("native_method.zig").configure(&f);
-    try f.initWithGrants(&.{
-        contract.identity,
-        app.notification_identity,
-        model_contract.P.identity,
-    });
+    try f.initWithGrants(&.{ contract.identity, model_contract.P.identity });
     try f.close();
     f.temporary.?.cleanup();
     f.temporary = null;
@@ -526,8 +437,8 @@ test "process crash owner fixture" {
     );
     if (models())
         try verifyModel(&f, &driver)
-    else if (writes())
-        try verifyWrite(&f, &driver)
+    else if (deliveries())
+        try verifyDelivery(&f, &driver)
     else if (phase == .control_admitted or phase == .replacement_admitted)
         try verifyControl(&f, &driver)
     else

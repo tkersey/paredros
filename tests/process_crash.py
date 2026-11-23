@@ -16,11 +16,9 @@ PHASES = (
     "replacement_admitted",
     "read_dispatched",
     "read_captured",
-    "write_admitted",
-    "write_dispatched",
-    "write_captured",
-    "write_consumed",
-    "write_completed",
+    "delivery_admitted",
+    "delivery_completed",
+    "delivery_consumed",
     "turn_admitted",
     "model_dispatched",
     "model_captured",
@@ -94,12 +92,10 @@ def verify(binary, phase, path, witness, deadline):
     if len(terminal) != 1:
         raise RuntimeError(f"{phase}: missing unique verification result")
     calls = [event for event in events if "acquired" in event]
-    expected = 1 if phase in (
-        "read_dispatched", "write_admitted", "turn_admitted", "model_dispatched"
-    ) else 0
+    expected = 1 if phase in ("read_dispatched", "turn_admitted", "model_dispatched") else 0
     if len(calls) != expected or terminal[0]["acquisitions"] != expected:
         raise RuntimeError(f"{phase}: unexpected external acquisition count")
-    if phase not in ("write_admitted", "turn_admitted") and any(
+    if phase != "turn_admitted" and any(
         event["task"] == witness["subject"] for event in calls
     ):
         raise RuntimeError(f"{phase}: original acquisition repeated")
@@ -130,8 +126,8 @@ def main():
                     raise RuntimeError(f"{phase}: {error}\n{detail}") from error
             calls = [event for event in original if "acquired" in event]
             expected = 1 if phase in (
-                "read_dispatched", "read_captured", "write_dispatched", "write_captured",
-                "write_consumed", "write_completed", "model_dispatched", "model_captured"
+                "read_dispatched", "read_captured", "delivery_consumed", "model_dispatched",
+                "model_captured"
             ) else 0
             if len(calls) != expected:
                 raise RuntimeError(f"{phase}: injection missed the external call boundary")
