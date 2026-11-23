@@ -39,7 +39,7 @@ fn local(
         .key = .{
             .lineage = @splat(8),
             .purpose = purpose,
-            .identity = @splat(@backingInt(purpose) + 20),
+            .identity = @splat(@as(u8, @backingInt(purpose)) + 20),
             .generation = 0,
         },
         .payload = .{
@@ -85,7 +85,7 @@ fn witness(a: std.mem.Allocator) !Witness {
     const stepped = try rows.row(a, 3, .{ .step = first }, rows.successor(first));
     var activation = try rows.pendingDelivery(a, rows.ref(initial));
     activation.key.purpose = .activation;
-    activation.payload.coverage = null;
+    activation.payload.logical.coverage = null;
     const possible = try inFlight(
         a,
         try rows.row(a, 4, .{ .delivery = try retire(a, activation) }, null),

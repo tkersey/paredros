@@ -1263,7 +1263,7 @@ test "native continuity import validates destination after manifest admission" {
     progress.deinit(a);
     try completeAdmissions(&to, &destination);
     var moved = config();
-    moved.slack.channel = "D999";
+    moved.slack.?.channel = "D999";
     for ([_][]const u8{ "bound-import", "rebound-import" }) |operation| {
         try std.testing.expectError(
             error.ContinuityResourceMismatch,

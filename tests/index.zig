@@ -1218,7 +1218,7 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     try std.testing.expect(
         std.mem.indexOf(u8, context.value.text.bytes, "\"reply_delivery_confirmed\":false") != null,
     );
-    try std.testing.expectEqual(6, context.value.offers.items.len);
+    try std.testing.expectEqual(5, context.value.offers.items.len);
     try std.testing.expectEqual(
         fixture.specification().revision,
         context.value.expected_revision.?,

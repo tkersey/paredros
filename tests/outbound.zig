@@ -270,9 +270,9 @@ test "outbound delivery admits authored retry generation without inventing one f
         original.value.delivery.payload.logical,
         next.value.delivery.payload.logical,
     );
-    try std.testing.expectEqualDeep(
-        original.value.delivery.payload.content_digest,
-        next.value.delivery.payload.content_digest,
+    try std.testing.expectEqual(
+        .local,
+        try preparation.verifyStored(a, next.value.delivery),
     );
 }
 

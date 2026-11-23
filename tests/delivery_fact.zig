@@ -287,7 +287,7 @@ test "delivery facts confirm completed local deliveries from the task result" {
     const receipt = result.value.?.receipt.?;
     try std.testing.expectEqualStrings("local", receipt.timestamp.bytes);
     try std.testing.expectEqual(.captured_response, receipt.basis);
-    const result = fixture.snapshot.result.?;
-    try std.testing.expectEqual(result.reference.digest, receipt.evidence.digest);
+    const published = fixture.snapshot.result.?;
+    try std.testing.expectEqual(published.reference.digest, receipt.evidence.digest);
     try std.testing.expectEqual(fixture.snapshot.task, receipt.evidence.task);
 }
