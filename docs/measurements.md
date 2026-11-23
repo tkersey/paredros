@@ -1,7 +1,7 @@
 # Offline measurements
 
 These measurements use synthetic provider responses and real native task storage.
-They do not qualify Slack, GitHub service latency, paid inference, or deployment.
+They do not qualify GitHub service latency, paid inference, or deployment.
 The implementation and final dependency selection remain under qualification.
 
 ## Threaded LLVM build on Apple Silicon, November 17

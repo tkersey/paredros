@@ -11,13 +11,5 @@
     "owner": "owner",
     "name": "repository",
     "ref": "refs/heads/main"
-  },
-  "slack": {
-    "account": "slack-owner",
-    "app": "A1",
-    "workspace": "T1",
-    "operator": "U1",
-    "channel": "D1",
-    "bot_id": "B1"
   }
 }

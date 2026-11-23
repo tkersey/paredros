@@ -7,8 +7,6 @@
   "mode": "live",
   "grants": {
     "github_read": true,
-    "slack_history": true,
-    "slack_write": true,
     "model": true
   },
   "interval_ms": 900000,
@@ -19,17 +17,7 @@
     "name": "REPLACE_WITH_REPOSITORY_NAME",
     "ref": "refs/heads/main"
   },
-  "slack": {
-    "account": "slack-owner",
-    "app": "A_REPLACE_WITH_APP_ID",
-    "workspace": "T_REPLACE_WITH_WORKSPACE_ID",
-    "operator": "U_REPLACE_WITH_OPERATOR_ID",
-    "channel": "D_REPLACE_WITH_OWNER_DM_ID",
-    "bot_id": "B_REPLACE_WITH_BOT_ID"
-  },
   "github_credential_file": "/etc/paredros/secrets/github-token",
-  "slack_bot_credential_file": "/etc/paredros/secrets/slack-bot-token",
-  "slack_app_credential_file": "/etc/paredros/secrets/slack-app-token",
   "model": {
     "account": "REPLACE_WITH_MODEL_ACCOUNT",
     "slug": "REPLACE_WITH_MODEL_SLUG",

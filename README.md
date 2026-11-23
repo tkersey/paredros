@@ -2,10 +2,11 @@
 
 PAREDROS is a personal assistant built as a Zig application on Protean. It watches
 a configured GitHub branch, retains acquired evidence, prepares commit digests,
-and delivers them to one configured owner's Slack DM. Conversation, local control,
-recovery, and retained method experiments use the same durable task history.
+and records them as local messages that its one owner reads through the local
+CLI. Conversation, local control, recovery, and retained method experiments use
+the same durable task history.
 
-The application is under qualification. Live Slack installation and paid model
+The application is under qualification. Live provider and paid model
 qualification have not been performed.
 
 ## Build
@@ -35,9 +36,8 @@ with its namespace when retaining the original execution history.
 
 ## Offline checks
 
-Run `zig build check` after editing GitHub or Slack protocol handling. It exercises
-normalization, evidence digests, pagination, Slack delivery classification, and
-other provider assertions. The check compiles a small host test executable and
+Run `zig build check` after editing GitHub protocol handling. It exercises
+normalization, evidence digests, pagination, and other provider assertions. The check compiles a small host test executable and
 executes it on each invocation. For a change to native GitHub capture or
 recovery, add the real parked-page, reopen, and resume check.
 
@@ -48,9 +48,9 @@ zig build check -Dcheck-recovery=true
 
 Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
 essential set within one 600-second budget measured from the `zig build`
-invocation: TigerStyle over every tracked Zig file, the 111 source contracts, the
+invocation: TigerStyle over every tracked Zig file, the source contracts, the
 emitted-application check, the native `providers` owner group, the installed
-product's smoke checks, twelve process-death cases, and historical namespace
+product's smoke checks, ten process-death cases, and historical namespace
 reopen and archive import. On macOS one build compiles every essential artifact
 concurrently. The product and native tests embed the committed emitted application in
 `app/emitted/`, so they compile alongside Protean's emitter instead of after it.
@@ -97,9 +97,9 @@ again with the same producer resumes at the saved batch.
 For individual diagnostics, `zig build test` runs the source contracts.
 `zig build test-native -Dnative-tests=true -Dnative-group=NAME -Doptimize=safe`
 runs native suites; repeat `-Dnative-group` to select several. The process-death
-controller uses local fixtures, kills the process at named admission, dispatch, or
-capture boundaries, and checks retained state and acquisition counts in a fresh
-process.
+controller uses local fixtures, kills the process at named admission, dispatch,
+capture, completion, or consumption boundaries, and checks retained state and
+acquisition counts in a fresh process.
 
 CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
 two lanes, source with the emitted-application check and providers, and must pass
@@ -124,11 +124,16 @@ and landing. Application qualification and reviews must cover this selected pin;
 upstream verification alone does not qualify PAREDROS. Live-provider qualification
 remains deferred.
 
-By owner decision this release omits three specified behaviors: GitHub transport
-health in `status` (control replies carry Slack transport health when Slack is
-configured); the single announcement for a reference that returns `404` on
-consecutive checks (A65), whose head field would make existing namespaces
-unreadable; and the visible storage hold for exhausted storage. When SQLite reports
+By owner decision this release ships without the specified Slack integration.
+Outputs the specification sends to the owner's Slack DM are recorded as local
+messages and read with `messages`; owner input arrives only through the local CLI
+and control socket. There is no Slack ingress, button, history or lineage audit,
+marker reconciliation, or recovery-candidate scan.
+[The implementation specification](docs/implementation-spec.md) is left as
+originally written. The release also omits three other specified behaviors:
+GitHub transport health in `status`; the single announcement for a reference that
+returns `404` on consecutive checks (A65), whose head field would make existing
+namespaces unreadable; and the visible storage hold for exhausted storage. When SQLite reports
 a full database, Protean fences the store (`StorageUnavailable`); the `storage`
 delivery-hold variant stays reserved in the schema but is never produced.
 
@@ -148,6 +153,7 @@ runs, and reclaims a socket left by a killed daemon only while holding that lock
 paredros --config /absolute/config.json serve
 paredros --config /absolute/config.json status
 paredros --config /absolute/config.json monitor add --wording 'Report new commits.'
+paredros --config /absolute/config.json messages OBLIGATION_ID
 paredros --config /absolute/config.json ask 'What are you watching?'
 paredros --config /absolute/config.json monitor pause OBLIGATION_ID
 ```
@@ -155,7 +161,7 @@ paredros --config /absolute/config.json monitor pause OBLIGATION_ID
 `--help` lists the typed commands. `stdio` accepts one JSON request per line over
 the same authenticated local socket. Mutations accept `--operation ID`; reuse an
 ID only for the same request. An admission response means the operation is
-durable. It does not mean a remote message was delivered.
+durable. It does not mean the resulting message has been recorded yet.
 
 `status` reports the running daemon's application version and executable SHA-256
 under `data.daemon`. `data.namespace_bytes` sums the logical lengths of the live
@@ -174,32 +180,70 @@ to the owner. `backlog.oldest` identifies the first outstanding sequence, its
 retained task/result reference, acquisition time, and coverage. A positive count
 with a null oldest record exposes missing evidence at that sequence.
 
-Monitor views report reconciliation as `pending`, `qualified`, or `degraded`,
-with retained readback references in `reconciliation_evidence`. A successful
-readback does not hide a failed audit whose order cannot be established. These
-observations never clear a digest or recovery hold.
-
-`recovery candidates [AFTER LIMIT]` pages authenticated same-lineage Slack markers
-from retained history captures, including markers whose delivery intent is absent
-from the restored state. Results retain their source namespace, task, and capture
-references and identify incomplete scans. New scans use a moving window without
-a local-clock upper bound and remain inconclusive when traversal ends. Candidates
-require owner disposition; they do not advance observed or told progress.
-
 Proposal confirmations use the exact `REQUEST_DIGEST:ATTEMPT:ORDINAL` identity.
-`proposal show` returns the complete retained proposal. Slack offers a button only
-when the complete description fits its bounded presentation.
+`proposal show` returns the complete retained proposal.
 
 For provider access, explicitly select `mode: "live"`, grant the required
-capabilities, and supply protected credential-file references. Configure exact
-GitHub repository/ref and Slack account/app/workspace/operator/DM bindings. Model
-access additionally requires the selected model account, slug, effort, and
-absolute SIWC executable and authentication-directory paths. Credentials stay in
-the launch environment; they are excluded from application inputs and snapshots.
+capabilities, and supply protected credential-file references. Configure the exact
+GitHub repository and ref. Model access additionally requires the selected model
+account, slug, effort, and absolute SIWC executable and authentication-directory
+paths. Credentials stay in the launch environment; they are excluded from
+application inputs and snapshots.
 
-[Installation and service configuration](docs/setup.md) includes the Slack app
-manifest, live configuration template, credential-file rules, and pending live
-qualification scenario.
+[Installation and service configuration](docs/setup.md) includes the live
+configuration template, credential-file rules, and pending live qualification
+scenario.
+
+## Reading updates
+
+Every output for the owner is a local message: the activation notice, commit
+digests, questions, failure notices, and control notices. A message is recorded
+when its `delivery` task completes. That task performs no external write; the next
+step folds its confirmation once and advances the told frontier.
+
+```sh
+paredros --config /absolute/config.json messages OBLIGATION_ID
+paredros --config /absolute/config.json messages OBLIGATION_ID --after ORDINAL --limit N
+```
+
+`messages` is read-only and returns a bounded page. It orders one obligation's
+messages by producer head sequence, then purpose, then key, so an ordinal cursor
+stays valid as messages are added; continue from the last ordinal until the next
+cursor is null. Each item carries its task, purpose, key, issue, superseded key,
+covered sequence range, text, links, and choices, with a state of `delivered`,
+`pending`, `legacy_delivered`, `legacy_unsent`, or `legacy_possibly_sent`.
+
+A question's choices include the command that answers it, `question answer ID
+QUESTION_DIGEST CHOICE`; `monitor show` also reports the open question. `proposal
+show` and `proposal confirm` handle proposals, and `ask` waits for and prints the
+conversation reply. A held digest is inspected with `delivery show KEY_JSON` and
+released with `delivery release ID KEY_JSON`.
+
+## Upgrading a Slack-era namespace
+
+A namespace created by an earlier build keeps its Slack identity. Keep its
+configuration's `slack` section (`account`, `app`, `workspace`, `operator`,
+`channel`, `bot_id`) unchanged: it is read only as the namespace's owner binding,
+which fixes the tenant and the destination that retained tasks, imports, and
+recovery release are checked against. Without it, or with any value changed,
+existing tasks belong to a different owner and are refused. Remove
+`grants.slack_history`, `grants.slack_write`, `slack_bot_credential_file`, and
+`slack_app_credential_file`; a configuration that still sets them is refused with
+`SlackRemoved`. A configuration without `slack` binds a new namespace to the local
+owner.
+
+Reopening an old namespace writes nothing by itself. Retained Slack deliveries,
+button interactions, and audit records keep validating against their stored
+digests and stay readable; audit and lineage-audit tasks are never dispatched
+again. A commit digest that was never sent is reissued as a local message with the
+next generation. A digest whose Slack write may have been sent is held as an
+uncertain transmission; `delivery release` issues a local replacement that warns
+the earlier copy may also have arrived. Activation notices, questions, control
+notices, and conversation replies addressed to Slack stay as history, listed by
+`messages` with a legacy state, and are not reissued. A Slack-origin conversation
+turn whose reply was never delivered gets a local message. Importing a Slack-era
+bundle requires the same `slack` section in the importing configuration; its
+unresolved deliveries arrive held and are reissued locally after release.
 
 ## Recovery and handoff
 
@@ -234,14 +278,14 @@ the file is written, it prints that operation; rerun the same export command wit
 Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's
 manifest; the daemon then materializes its members and lineages in bounded steps,
-including across a restart, while other control and Slack ingress waits. Repeat
+including across a restart, while other control ingress waits. Repeat
 `transfer import PATH` to observe progress; exit 75 means the daemon is still
 materializing. Reusing an import operation for a different file is refused as an
 operation conflict. Import preserves portable observations, pending controls,
 method source, and unresolved delivery evidence. Imported output, including
 imported conversation turns, remains held; `recovery status` reports `import_hold`.
-While it is held, `ask`, `monitor add`, monitor proposals, and Slack messages are
-refused with `ContinuityImportHeld`, and live-model experiments wait. Neither
+While it is held, `ask`, `monitor add`, and monitor proposals are refused with
+`ContinuityImportHeld`, and live-model experiments wait. Neither
 `recovery begin` nor `serve --recover` opens a boundary before the import is
 materialized (`ContinuityImportPending`); run `serve` to finish it. Establish
 that the original source cannot run again, then declare exclusive ownership when
@@ -249,8 +293,8 @@ releasing: run `recovery begin`, take TASK and DIGEST from `recovery status`, an
 run `recovery release TASK DIGEST --exclusive-owner`.
 
 After a known filesystem rollback, start with `serve --recover`. Inspect
-`recovery status`, perform read-only `delivery audit KEY_JSON` operations, and
-make explicit dispositions for uncertain outputs. `recovery status` prints the
+`recovery status` and `delivery show KEY_JSON`, and make explicit dispositions for
+uncertain outputs with `delivery release`. `recovery status` prints the
 current boundary as hex `data.recovery.task` and `data.recovery.digest`, which
 `recovery release` accepts unchanged, with the size and SHA-256 of the
 cumulative recovery cut rather than its entries. To release a recovery boundary:
@@ -261,8 +305,8 @@ paredros --config /absolute/config.json recovery release TASK DIGEST --exclusive
 
 The task and digest come from `recovery status`. Release checks current resource
 bindings and preserves individual uncertainty holds. It cannot reopen a namespace
-fenced for transfer. A negative Slack history scan never proves that a prior write
-was not sent. A rollback that the operator does not identify cannot be detected
+fenced for transfer. Local messages leave no external evidence, so an output held
+after a rollback is resolved only by an explicit `delivery release`. A rollback that the operator does not identify cannot be detected
 reliably from stale local state; there is no exactly-once promise across rollback.
 
 ## Service operation

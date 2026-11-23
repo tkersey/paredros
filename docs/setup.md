@@ -4,52 +4,17 @@ The implementation remains under qualification. The steps below prepare a live
 installation; the external-service scenario at the end has not been executed.
 Use the [offline example](config.example.json) for local checks without credentials.
 
-## Slack installation
-
-Create a dedicated internal Slack app from
-[the supplied manifest](../packaging/slack-manifest.json). It enables Socket Mode,
-interactive buttons, a writable Messages tab, and `message.im` events. Its bot
-scopes are `chat:write` and `im:history`. These settings follow Slack's
-[manifest reference](https://docs.slack.dev/reference/app-manifest/) and
-[Messages tab guidance](https://docs.slack.dev/surfaces/app-home/).
-
-Install the app in the selected workspace and retain its bot token. Separately
-create an app-level token with `connections:write` in Basic Information. Socket
-Mode uses that token to open its WebSocket; it does not require a public request
-URL. See [Slack's Socket Mode setup](https://docs.slack.dev/tools/python-slack-sdk/socket-mode/).
-PAREDROS does not implement OAuth token rotation; refresh protected token files
-and restart under the same configured account when needed.
-
-Record the app, workspace, operator, bot, and owner-DM channel IDs from the actual
-installation. The DM channel starts with `D`; the bot ID is distinct from its user
-ID. Configure the owner explicitly. Keep other Socket Mode consumers disconnected
-from this dedicated app because Slack can distribute events across its connections.
-Only top-level owner text and supported buttons in the bound DM receive authority.
-
-Socket Mode messages up to 128 KiB are classified in full. A larger text message
-up to 16 MiB is streamed without being retained: PAREDROS acknowledges it by its
-top-level `envelope_id`, ignores it as oversized, counts it in the `ignored`
-transport health, and logs the size. A larger message that is not valid JSON or
-lacks a unique string `envelope_id` is ignored without acknowledgment. Slack caps
-message text at 40,000 characters. Four fully escaped copies of that text (`text`
-and rich-text `blocks`, for the current and previous message of an edit) take
-about 2 MB, so 16 MiB leaves eightfold room for formatting, attachments, and
-metadata. A message above 16 MiB ends the connection as a transport protocol
-failure without acknowledgment, and PAREDROS reconnects with backoff.
-
-Audits retrieve metadata using `conversations.history` with
-`include_all_metadata=true`. They do not subscribe to metadata Events API events.
-Validate that this installation returns the complete activation marker before
-relying on reconciliation. See Slack's
-[metadata retrieval contract](https://docs.slack.dev/messaging/message-metadata/).
-
 ## Bindings and credentials
 
 Copy [the live example](config.live.example.json) and replace every placeholder,
 the numeric repository ID, UID, ref, paths, and model selection. The `account`
 fields are stable local binding names. Use a GitHub credential authorized for
 read-only repository contents and metadata on the selected repository. An account
-label alone grants no remote capability: the four explicit `grants` select access.
+label alone grants no remote capability: the two explicit `grants` select access.
+A new installation omits the `slack` section and binds its namespace to the local
+owner. An installation upgraded from a Slack-era build keeps that section unchanged
+and drops the Slack grants and credential files, as the README's upgrade section
+describes.
 
 Install the selected `siwc` executable and prepare its model account under the
 service UID. Set its exact account, supported model slug and effort, and protected
@@ -85,9 +50,8 @@ old executable and namespace until the transfer and recovery hold are resolved.
 
 ## Pending live qualification
 
-With explicitly selected test resources, verify a confirmed activation notice
-and metadata readback, a new branch commit producing one confirmed digest, a
-bound button confirmation, duplicate ingress returning its original admission,
-and a deliberately lost send response resolved by audit without resending.
-Record observed acknowledgment latency and known/unknown model usage. Offline
-fixtures and successful installation do not discharge this live operational gate.
+With explicitly selected test resources, verify an activation message readable
+with `messages`, a new branch commit producing one confirmed digest, a question
+answered with `question answer`, and duplicate ingress returning its original
+admission. Record known/unknown model usage. Offline fixtures and successful
+installation do not discharge this live operational gate.
