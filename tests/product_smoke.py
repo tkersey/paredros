@@ -40,8 +40,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
     config=base/'config.json'
     value={'version':1,'current_uid':os.geteuid(),'namespace_path':str(base/'state'),
       'control_socket_path':str(base/'control'),
-      'repository':{'account':'offline','id':1,'owner':'fixture','name':'repository','ref':'refs/heads/main'},
-      'slack':{'account':'offline','app':'A1','workspace':'T1','operator':'U1','channel':'D1','bot_id':'B1'}}
+      'repository':{'account':'offline','id':1,'owner':'fixture','name':'repository','ref':'refs/heads/main'}}
     config.write_text(json.dumps(value))
     socket=pathlib.Path(value['control_socket_path'])
     log=open(base/'daemon.log','w+')
@@ -90,6 +89,11 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
             if shown.returncode==0: break
             assert time.monotonic()<deadline,(shown.stdout,shown.stderr)
             time.sleep(.1)
+        while True:
+            items=json.loads(run(['messages',task],config=config).stdout)['data']['items']
+            if any(item['purpose']=='activation' for item in items): break
+            assert time.monotonic()<deadline,items
+            time.sleep(.1)
         measurements['rss_samples_kib'].append({'phase':'one_active_offline_monitor','kib':int(subprocess.check_output(['ps','-o','rss=','-p',str(process.pid)],text=True))})
         paused=json.loads(run(['monitor','pause',task,'--operation','smoke-pause'],config=config).stdout)
         assert paused['status']=='admitted'
@@ -98,8 +102,8 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
         relay=run(['stdio'],config=config,input=json.dumps(request)+'\n'+json.dumps(invalid)+'\n',allowed=(1,))
         responses=[json.loads(line) for line in relay.stdout.splitlines()]
         assert responses[0]['status']=='observed' and responses[1]['status']=='rejected'
-        live={**value,'mode':'live','grants':{'github_read':True,'slack_history':True,'slack_write':True,'model':True},
-          'github_credential_file':'/definitely-not-present/github','slack_bot_credential_file':'/definitely-not-present/slack',
+        live={**value,'mode':'live','grants':{'github_read':True,'model':True},
+          'github_credential_file':'/definitely-not-present/github',
           'model':{'account':'offline','slug':'fixture-model','effort':'medium','siwc_bin':'/definitely-not-present/siwc','auth_dir':'/definitely-not-present/auth'}}
         live_path=base/'client-only.json';live_path.write_text(json.dumps(live))
         assert json.loads(run(['status'],config=live_path).stdout)['status']=='observed'
@@ -129,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
             answer_value=json.loads(answer.stdout)
             assert answer_value['status']=='observed'
             assert answer_value['data']['task_status'] in {'completed','failed','cancelled','waiting_input','parked','blocked','unknown'}
-        results.append('offline daemon status, idempotent monitor, durable pause, JSON relay'
+        results.append('offline daemon status, idempotent monitor, local activation message, durable pause, JSON relay'
                        + ('' if args.essential else ', and ask settlement'))
         results.append('client-only live metadata does not read unavailable secrets or execute helper')
     finally:

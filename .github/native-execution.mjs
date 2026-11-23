@@ -2,14 +2,14 @@ const group = (count, ...filters) => ({count, filters});
 
 const suites = {
   authority: {
-    driver: group(21, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
+    driver: group(17, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
     proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
       'control proposal consumer confirms each proposal once'),
-    controls: group(88, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
+    controls: group(85, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
-      'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
+      'tests.outbound.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
-  providers: 41,
+  providers: 30,
   'transitions-first': 15,
   'transitions-second': {
     receipts: group(1, 'native settlements retain deliveries with mismatched admissions or receipts'),
@@ -30,8 +30,8 @@ const suites = {
     escaping: group(1, 'native render frame budgets hostile escaping'),
     proposal: group(1, 'native conversation retains maximal exact proposal body'),
     multibyte: group(1, 'native conversation retains full multibyte'),
-    publication: group(21, 'native render frame keeps Unicode', 'native render frame empty evidence',
-      'native conversation describes exact hostile Unicode', 'tests.native_check_publish.', 'tests.native_audit.', 'tests.native_step.'),
+    publication: group(11, 'native render frame keeps Unicode', 'native render frame empty evidence',
+      'native conversation describes exact hostile Unicode', 'tests.native_check_publish.', 'tests.native_step.'),
     bytes: group(4, 'native ordinary render chooses an exact', 'native ordinary render bounds its exact',
       'native ordinary render bounds its prefix'),
     coverage: group(5, 'native ordinary render keeps oversized', 'native ordinary render stops at an accepted gap',
@@ -53,10 +53,10 @@ const suites = {
       'tests.experiment.', 'tests.native_genesis.', 'tests.contracts.'),
   },
   'continuity-first': 8,
-  'continuity-second': 24,
+  'continuity-second': 19,
   'continuity-third': 31,
   product: 5,
-  crash: 12,
+  crash: 10,
 };
 
 const include = [];

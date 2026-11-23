@@ -11,16 +11,12 @@ const continuity_control = @import("continuity_control.zig");
 const transfer = @import("transfer.zig");
 const restore = @import("restore.zig");
 const ingress_policy = @import("ingress_policy.zig");
+const messages = @import("messages.zig");
 
 pub const frame_bytes_max: u32 = 4 * 1024 * 1024;
-pub const decoration_reserve: struct { bytes: u32, tokens: u32 } = .{
-    .bytes = 16 * 1024,
-    .tokens = 512,
-};
 pub const capacity_rejection =
     \\{"error":"Capacity","schema":"paredros.control.v1","status":"rejected"}
 ;
-pub const Decoration = struct { name: []const u8, value: native.json.Value };
 const frame_limits: native.json.Limits = .{ .bytes = frame_bytes_max };
 
 pub const Request = struct {
@@ -31,6 +27,7 @@ pub const Request = struct {
         monitor_add: struct { wording: t.Text, interval_ms: ?u64 },
         monitor_show: t.Id,
         monitor_directives: struct { target: t.Id, after: ?u64, limit: u32 },
+        messages: struct { target: t.Id, after: ?u64, limit: u32 },
         directive: struct { target: t.Id, body: t.DirectiveBody },
         ask: struct { text: t.Text, target: ?t.Id },
         proposal_confirm: commands.ProposalSelector,
@@ -39,10 +36,8 @@ pub const Request = struct {
         experiment_show: t.Digest,
         task_show: t.Id,
         delivery_show: t.DeliveryKey,
-        audit_delivery: t.DeliveryKey,
         method_show: t.Id,
         recovery_status: void,
-        recovery_candidates: struct { after: ?u64, limit: u32 },
         recovery_begin: void,
         recovery_release: recovery_control.Release,
         transfer_export: continuity_control.Export,
@@ -86,37 +81,12 @@ pub fn dispatchWithIndex(
     environment: ?continuity_control.Environment,
     index: ?*const idx.Index,
 ) ![]const u8 {
-    return dispatchDecorated(a, driver, config, uid, bytes, environment, index, null);
-}
-
-pub fn dispatchDecorated(
-    a: std.mem.Allocator,
-    driver: anytype,
-    config: configuration.Config,
-    uid: u32,
-    bytes: []const u8,
-    environment: ?continuity_control.Environment,
-    index: ?*const idx.Index,
-    decoration: ?Decoration,
-) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
     const response = execute(scratch, driver, config, uid, bytes, environment, index) catch |err|
         try rejected(scratch, err);
-    return frame(a, try decorate(scratch, response, decoration)) catch |err|
-        frame(a, try decorate(scratch, try rejected(scratch, err), decoration)) catch |last|
-        frame(a, try rejected(scratch, last));
-}
-
-fn decorate(
-    a: std.mem.Allocator,
-    value: native.json.Value,
-    decoration: ?Decoration,
-) !native.json.Value {
-    var result = value;
-    if (decoration) |extra| try native.json.put(a, &result, extra.name, extra.value);
-    return result;
+    return frame(a, response) catch |err| frame(a, try rejected(scratch, err));
 }
 
 fn frame(a: std.mem.Allocator, value: native.json.Value) ![]u8 {
@@ -142,10 +112,7 @@ const Extent = struct {
     }
 };
 
-const content: Extent = .{
-    .bytes = frame_bytes_max - decoration_reserve.bytes,
-    .tokens = frame_limits.tokens - decoration_reserve.tokens,
-};
+const content: Extent = .{ .bytes = frame_bytes_max, .tokens = frame_limits.tokens };
 const separator: Extent = .{ .bytes = 1, .tokens = 0 };
 
 fn extent(a: std.mem.Allocator, value: native.json.Value) !Extent {
@@ -239,8 +206,7 @@ fn execute(
         );
     }
     const operation_id = try operation(request);
-    if (request.command != .transfer_export and request.command != .transfer_import and
-        request.command != .audit_delivery)
+    if (request.command != .transfer_export and request.command != .transfer_import)
         try admissionOpen(a, driver, operation_id, request.command == .ask);
     var response = if (request.command == .transfer_export or request.command == .transfer_import)
         try continuityCommand(a, driver, config, origin, request, environment)
@@ -274,13 +240,13 @@ fn readOnly(request: Request) bool {
         .status,
         .monitor_show,
         .monitor_directives,
+        .messages,
         .task_show,
         .delivery_show,
         .method_show,
         .proposal_show,
         .experiment_show,
         .recovery_status,
-        .recovery_candidates,
         => true,
         else => false,
     };
@@ -328,7 +294,7 @@ fn admitCommand(
             operation_id,
             origin,
             .{
-                .destination = config.slack.destination(),
+                .destination = configuration.bindings(config).destination,
                 .text = value.text,
                 .target = value.target,
                 .anchor_template = true,
@@ -351,13 +317,6 @@ fn admitCommand(
             value,
         ),
         .recovery_begin => return restore.begin(driver, a, operation_id, origin),
-        .audit_delivery => |value| return @import("audit_control.zig").request(
-            driver,
-            a,
-            operation_id,
-            origin,
-            value,
-        ),
         .recovery_release => |value| return recovery_control.release(
             a,
             driver,
@@ -491,7 +450,7 @@ fn specification(
     return .{
         .revision = 0,
         .repository = config.repository.value(),
-        .destination = config.slack.destination(),
+        .destination = configuration.bindings(config).destination,
         .interval_ms = interval_ms,
         .anchor_ms = 0,
         .wording = wording,
@@ -524,6 +483,7 @@ fn inspect(
             page.after,
             page.limit,
         ),
+        .messages => |page| try messagePage(a, index, page.target, page.after, page.limit),
         .task_show => |id| try task(a, index, id),
         .method_show => |id| try native.values.toJson(
             t.Method,
@@ -534,11 +494,6 @@ fn inspect(
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
         .recovery_status => try recoveryStatus(a, index),
-        .recovery_candidates => |value| try native.values.toJson(
-            @import("history_evidence.zig").Page,
-            a,
-            try @import("history_evidence.zig").page(a, index, null, value.after, value.limit),
-        ),
         else => return error.InvalidReadCommand,
     };
     return reply(a, "observed", data);
@@ -559,12 +514,6 @@ fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Va
     const cut = try hexText(a, &try cutDigest(a, index.restore_cut));
     try native.json.put(a, &result, "restore_cut_digest", native.json.string(cut));
     try native.json.put(a, &result, "recovery", try boundary(a, index.recovery));
-    const history = @import("history_evidence.zig");
-    try native.json.put(a, &result, "external_history", try native.values.toJson(
-        history.Page,
-        a,
-        try history.page(a, index, null, null, 16),
-    ));
     return result;
 }
 
@@ -753,15 +702,6 @@ fn monitorHead(
         a,
         try materialize.backlog(a, index, obligation),
     ));
-    const reconciliation = try @import("reconciliation.zig").inspect(a, index, obligation.task);
-    try native.json.put(a, &result, "reconciliation", native.json.string(
-        @tagName(reconciliation.capability),
-    ));
-    try native.json.put(a, &result, "reconciliation_evidence", try native.values.toJson(
-        @TypeOf(reconciliation),
-        a,
-        reconciliation,
-    ));
     return result;
 }
 
@@ -777,6 +717,26 @@ fn pendingDirectives(
     const page = try appendPending(a, index, obligation, after, limit, &result, try dataRoom(a));
     if (page == null or (page.?.clipped and page.?.shown == 0)) return error.Capacity;
     return result;
+}
+
+fn messagePage(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    target: t.Id,
+    after: ?u64,
+    limit: u32,
+) !native.json.Value {
+    if (limit == 0 or limit > 64) return error.InvalidPageLimit;
+    const room = try dataRoom(a);
+    var bounded = limit;
+    for (0..7) |_| {
+        const page = try messages.page(a, index, target, after, bounded);
+        const value = try native.values.toJson(messages.Page, a, page);
+        if ((try extent(a, value)).within(room)) return value;
+        if (bounded == 1) break;
+        bounded /= 2;
+    }
+    return error.Capacity;
 }
 
 fn appendPending(

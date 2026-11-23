@@ -13,15 +13,15 @@ pub const help =
     \\  monitor list | show ID | check ID | pause ID | resume ID | cancel ID
     \\  monitor directives ID [--after ORDINAL] [--limit N]
     \\  monitor amend ID REVISION [--interval-ms N] [--wording TEXT]
+    \\  messages ID [--after ORDINAL] [--limit N]  Read local updates
     \\  question answer ID QUESTION_DIGEST CHOICE
     \\  proposal show | confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
     \\  task show ID                     Inspect admitted input and result
-    \\  delivery show KEY_JSON | audit ID KEY_JSON | release ID KEY_JSON
-    \\  delivery audit KEY_JSON            Audit even while final or recovering
+    \\  delivery show KEY_JSON | release ID KEY_JSON
     \\  method show ID | revert ID REVISION | adopt ID REVISION METHOD_JSON
     \\  experiment run CAMPAIGN ATTEMPT PLAN_JSON [--live] | show CAMPAIGN
     \\  namespace check | describe-build | licenses
-    \\  recovery status | candidates [AFTER LIMIT] | begin | release TASK DIGEST --exclusive-owner
+    \\  recovery status | begin | release TASK DIGEST --exclusive-owner
     \\  transfer export NAME [--snapshot]
     \\  transfer import PATH [--bytes-max N]
     \\  request JSON | stdio              Machine-readable daemon access
@@ -89,13 +89,13 @@ pub fn request(
         .status,
         .monitor_show,
         .monitor_directives,
+        .messages,
         .task_show,
         .delivery_show,
         .method_show,
         .proposal_show,
         .experiment_show,
         .recovery_status,
-        .recovery_candidates,
         => false,
         else => true,
     };
@@ -112,6 +112,7 @@ fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (same(name, "status")) return status(args[1..]);
     if (same(name, "monitor")) return monitor(a, args[1..]);
     if (same(name, "ask")) return ask(args[1..]);
+    if (same(name, "messages")) return messagePage(args[1..]);
     if (same(name, "task") and args.len == 3 and same(args[1], "show"))
         return .{ .task_show = try hex(t.Id, args[2]) };
     if (same(name, "proposal")) return proposal(args[1..]);
@@ -130,14 +131,6 @@ fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
 
 fn recovery(args: []const []const u8) !Command {
     if (args.len == 1 and same(args[0], "status")) return .recovery_status;
-    if (args.len >= 1 and same(args[0], "candidates")) {
-        if (args.len == 1) return .{ .recovery_candidates = .{ .after = null, .limit = 16 } };
-        if (args.len != 3) return error.InvalidArguments;
-        return .{ .recovery_candidates = .{
-            .after = try number(u64, args[1]),
-            .limit = try number(u32, args[2]),
-        } };
-    }
     if (args.len == 1 and same(args[0], "begin")) return .recovery_begin;
     if (args.len != 4 or !same(args[0], "release") or
         !same(args[3], "--exclusive-owner")) return error.InvalidArguments;
@@ -259,8 +252,16 @@ fn monitor(a: std.mem.Allocator, args: []const []const u8) !Command {
 }
 
 fn directivePage(args: []const []const u8) !Command {
+    return .{ .monitor_directives = try page(@FieldType(Command, "monitor_directives"), args) };
+}
+
+fn messagePage(args: []const []const u8) !Command {
+    return .{ .messages = try page(@FieldType(Command, "messages"), args) };
+}
+
+fn page(comptime Page: type, args: []const []const u8) !Page {
     if (args.len == 0) return error.InvalidArguments;
-    var value: @FieldType(Command, "monitor_directives") = .{
+    var value: Page = .{
         .target = try hex(t.Id, args[0]),
         .after = null,
         .limit = 16,
@@ -276,7 +277,7 @@ fn directivePage(args: []const []const u8) !Command {
             seen_limit = true;
         } else return error.InvalidArguments;
     }
-    return .{ .monitor_directives = value };
+    return value;
 }
 
 fn add(args: []const []const u8) !Command {
@@ -344,14 +345,10 @@ fn amend(a: std.mem.Allocator, args: []const []const u8) !Command {
 fn delivery(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (args.len == 2 and same(args[0], "show"))
         return .{ .delivery_show = try decode(t.DeliveryKey, a, args[1]) };
-    if (args.len == 2 and same(args[0], "audit"))
-        return .{ .audit_delivery = try decode(t.DeliveryKey, a, args[1]) };
-    if (args.len != 3) return error.InvalidArguments;
-    const key = try decode(t.DeliveryKey, a, args[2]);
-    const target = try hex(t.Id, args[1]);
-    if (same(args[0], "audit")) return directive(target, .{ .audit = .{ .key = key } });
-    if (same(args[0], "release")) return directive(target, .{ .release = .{ .key = key } });
-    return error.InvalidArguments;
+    if (args.len != 3 or !same(args[0], "release")) return error.InvalidArguments;
+    return directive(try hex(t.Id, args[1]), .{ .release = .{
+        .key = try decode(t.DeliveryKey, a, args[2]),
+    } });
 }
 
 fn method(a: std.mem.Allocator, args: []const []const u8) !Command {

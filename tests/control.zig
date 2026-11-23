@@ -181,6 +181,8 @@ test "control protocol freezes activation retry and acknowledges persisted restr
     try std.testing.expect(backlog.oldest == null);
     try std.testing.expectEqual(1, data.object.get("pending_directives").?.array.items.len);
     try std.testing.expect(!data.object.get("ordinary_dispatch").?.bool);
+    try std.testing.expect(data.object.get("reconciliation") == null);
+    try std.testing.expect(data.object.get("reconciliation_evidence") == null);
     const denied = try dispatch(frame, &driver, pause, 502);
     try std.testing.expectEqualStrings(
         "PermissionDenied",
@@ -322,26 +324,6 @@ fn admitLarge(
     }
 }
 
-fn decorated(
-    frame: std.mem.Allocator,
-    driver: *Driver,
-    request: []const u8,
-    value: native.json.Value,
-) ![]const u8 {
-    const bytes = try control.dispatchDecorated(
-        frame,
-        driver,
-        configuration(),
-        501,
-        request,
-        null,
-        null,
-        .{ .name = "slack_transport", .value = value },
-    );
-    try std.testing.expect(bytes.len <= control.frame_bytes_max);
-    return bytes;
-}
-
 fn statusPage(frame: std.mem.Allocator, driver: *Driver, after: ?t.Id) !native.json.Value {
     const bytes = try control.dispatch(frame, driver, configuration(), 501, try control.encode(
         frame,
@@ -377,25 +359,7 @@ fn expectStatusPages(frame: std.mem.Allocator, driver: *Driver, expected: usize)
     try std.testing.expectEqual(expected, seen);
 }
 
-fn widestHealth(frame: std.mem.Allocator) !native.json.Value {
-    const transport = @import("../native/slack_transport.zig");
-    const widest = std.math.maxInt(u64);
-    return native.values.toJson(transport.Health, frame, .{
-        .state = .stopped,
-        .last_failure = .acknowledgement_deadline,
-        .connections = widest,
-        .received = widest,
-        .acknowledged = widest,
-        .ignored = widest,
-        .admission_failures = widest,
-        .deadline_misses = widest,
-        .reconnects = widest,
-        .last_received_ms = std.math.minInt(i64),
-        .last_acknowledged_ms = std.math.minInt(i64),
-    });
-}
-
-test "control pages pending directives and status within one decorated frame" {
+test "control pages pending directives and status within one frame" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -421,42 +385,74 @@ test "control pages pending directives and status within one decorated frame" {
         try admitLarge(frame, &driver, id.*, wording, count);
     }
     try expectStatusPages(frame, &driver, ids.len);
-    const health = try widestHealth(frame);
-    try std.testing.expect(try native.json.fits(frame, health, .{
-        .bytes = control.decoration_reserve.bytes,
-        .tokens = control.decoration_reserve.tokens,
-    }));
     const hex_id = std.fmt.bytesToHex(ids[0], .lower);
     const request = try cli.request(frame, &.{
         "monitor", "directives", &hex_id, "--limit", "64",
     }, "unused");
-    const full = try decodeFrame(frame, try decorated(frame, &driver, request, health));
-    const data = full.object.get("data").?;
+    const bytes = try control.dispatch(frame, &driver, configuration(), 501, request);
+    try std.testing.expect(bytes.len <= control.frame_bytes_max);
+    const data = (try decodeFrame(frame, bytes)).object.get("data").?;
     const shown = data.object.get("pending_directives").?.array.items.len;
     try std.testing.expect(shown > 16 and shown < 44);
     try std.testing.expect(data.object.get("pending_directives_next").? != .null);
-    try std.testing.expect(full.object.get("slack_transport") != null);
-    const crowding = try frame.alloc(u8, control.frame_bytes_max / 2);
-    @memset(crowding, 'x');
-    const refused = try decodeFrame(frame, try decorated(
+}
+
+test "control reads messages without admission and refuses removed Slack commands" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const id = try taskId(try dispatch(frame, &driver, try cli.request(
         frame,
-        &driver,
-        request,
-        native.json.string(crowding),
-    ));
+        &.{ "monitor", "add" },
+        "messages-monitor",
+    ), 501));
+    try finish(&fixture, id);
+    const hex_id = std.fmt.bytesToHex(id, .lower);
+    const wire = try cli.request(frame, &.{
+        "messages", &hex_id, "--after", "3", "--limit", "5", "--operation", "ignored",
+    }, "unused");
+    const parsed = try native.values.fromJson(control.Request, frame, try decode(frame, wire));
+    try std.testing.expect(parsed.operation == null);
+    try std.testing.expectEqualDeep(id, parsed.command.messages.target);
+    try std.testing.expectEqual(3, parsed.command.messages.after.?);
+    try std.testing.expectEqual(5, parsed.command.messages.limit);
+    var before = try driver.rebuild(frame);
+    const records = before.records.len;
+    before.deinit();
+    const read = try cli.request(frame, &.{ "messages", &hex_id }, "unused");
+    const bytes = try control.dispatch(frame, &driver, configuration(), 501, read);
+    try std.testing.expect(bytes.len <= control.frame_bytes_max);
     try std.testing.expectEqualStrings(
-        "Capacity",
-        try native.json.text(refused.object.get("error").?),
+        "observed",
+        try native.json.text((try decodeFrame(frame, bytes)).object.get("status").?),
     );
-    try std.testing.expect(refused.object.get("slack_transport") != null);
-    const oversized = try frame.alloc(u8, control.frame_bytes_max);
-    @memset(oversized, 'x');
-    try std.testing.expectEqualStrings(control.capacity_rejection, try decorated(
-        frame,
-        &driver,
-        request,
-        native.json.string(oversized),
-    ));
+    for ([_][]const u8{ "0", "65" }) |limit| {
+        const request = try cli.request(frame, &.{ "messages", &hex_id, "--limit", limit }, "unused");
+        const response = try dispatch(frame, &driver, request, 501);
+        try std.testing.expectEqualStrings(
+            "InvalidPageLimit",
+            try native.json.text(response.object.get("error").?),
+        );
+    }
+    var after = try driver.rebuild(frame);
+    defer after.deinit();
+    try std.testing.expectEqual(records, after.records.len);
+    const key = "{}";
+    for ([_][]const []const u8{
+        &.{ "messages", &hex_id, "--after", "1", "--after", "2" },
+        &.{ "delivery", "audit", key },
+        &.{ "delivery", "audit", &hex_id, key },
+        &.{ "recovery", "candidates" },
+        &.{ "recovery", "candidates", "0", "16" },
+    }) |args| try std.testing.expectError(error.InvalidArguments, cli.request(frame, args, "id"));
 }
 
 test "control malformed and unsupported frames are rejected without admission" {

@@ -55,7 +55,7 @@ def inventory(zig, system, install, output, full):
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
-        counts = {"authority": 111, "providers": 41, "transitions": 50, "rendering": 68, "continuity": 61}
+        counts = {"authority": 104, "providers": 30, "transitions": 50, "rendering": 58, "continuity": 56}
         matrix = [dict(name=name, part=name, count=n) for name, n in counts.items()] + [
             row for row in matrix if row["part"] in ("methods", "product", "crash")
         ]
@@ -67,8 +67,8 @@ def inventory(zig, system, install, output, full):
         return [zig, "build", *args, "-Doptimize=safe", f"-j{build_jobs()}", "--summary", "all", "--prefix", install]
 
     def source_tests(log):
-        require(any(line.startswith("Build Summary:") and line.endswith("; 111/111 tests passed")
-                    for line in log.read_text(errors="replace").splitlines()), "expected 111 passing source tests")
+        require(any(line.startswith("Build Summary:") and line.endswith("; 76/76 tests passed")
+                    for line in log.read_text(errors="replace").splitlines()), "expected 76 passing source tests")
 
     target = ["-Dtarget=x86_64-linux-musl"] if linux else []
     assets = "-Demitted-application=app/emitted"
