@@ -6,6 +6,13 @@ const outbound = @import("../native/outbound.zig");
 const eligibility = @import("../native/eligibility.zig");
 const preparation = @import("../native/delivery_prepare.zig");
 const examples = @import("contracts.zig");
+const Native = @import("protean_native");
+const rows = @import("index.zig");
+const driver = @import("../native/driver.zig");
+const continuation = @import("../native/continuation_recovery.zig");
+const materialize = @import("../native/materialize.zig");
+const retained = @import("../native/retained.zig");
+const delivery_target = @import("../native/delivery_target.zig");
 const a = std.testing.allocator;
 
 const Store = struct {
@@ -469,7 +476,7 @@ test "outbound Slack conversation replies need no obligation and reuse exact pro
     defer store.deinit();
     fixture.index.records[2] = turnRecord(null);
     fixture.index.obligations = &.{};
-    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(first);
     try std.testing.expectEqual(1, first.len);
     var saved = try store.read(0);
@@ -479,13 +486,13 @@ test "outbound Slack conversation replies need no obligation and reuse exact pro
         saved.value.delivery.envelope.origin.derived.predecessor,
     );
     try fixture.addDelivery(saved.value.delivery, first[0]);
-    const again = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const again = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(again);
     try std.testing.expectEqualSlices(t.Id, first, again);
     fixture.index.records[2].result_digest = @splat(90);
     try std.testing.expectError(
         error.OperationConflict,
-        outbound.admitTurnDeliveries(&store, a, &fixture.index),
+        outbound.admitTurnDeliveries(&store, a, &fixture.index, 200),
     );
 }
 
@@ -496,14 +503,14 @@ test "outbound keeps local turns local and admits replies about cancelled obliga
     defer store.deinit();
     fixture.index.records[2] = turnRecord(fixture.target);
     fixture.index.obligations[0].effective_mode = .cancelled;
-    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(first);
     try std.testing.expectEqual(1, first.len);
     var saved = try store.read(0);
     defer saved.deinit();
     try fixture.addDelivery(saved.value.delivery, first[0]);
     fixture.index.records[2].input.turn.envelope.origin = .{ .local = .{ .uid = 501 } };
-    const local = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const local = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(local);
     try std.testing.expectEqual(0, local.len);
     try std.testing.expectEqual(1, store.entries.items.len);
@@ -515,26 +522,26 @@ test "outbound fences superseded replies before replacement result and rejects r
     var store: Store = .{};
     defer store.deinit();
     fixture.index.records[2] = turnRecord(null);
-    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const first = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(first);
     var saved = try store.read(0);
     defer saved.deinit();
     try fixture.addDelivery(saved.value.delivery, first[0]);
     fixture.index.records[2].superseded = true;
-    const superseded = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
+    const superseded = try outbound.admitTurnDeliveries(&store, a, &fixture.index, 200);
     defer a.free(superseded);
     try std.testing.expectEqual(0, superseded.len);
     fixture.index.records[2].superseded = false;
     fixture.index.records[2].input.turn.envelope.origin.slack.channel.bytes = "Dother";
     try std.testing.expectError(
         error.UnauthorizedIntent,
-        outbound.admitTurnDeliveries(&store, a, &fixture.index),
+        outbound.admitTurnDeliveries(&store, a, &fixture.index, 200),
     );
     fixture.index.records[2] = turnRecord(null);
     fixture.index.records[2].result.?.turn.delivery.?.destination.channel.bytes = "Dother";
     try std.testing.expectError(
         error.UnauthorizedIntent,
-        outbound.admitTurnDeliveries(&store, a, &fixture.index),
+        outbound.admitTurnDeliveries(&store, a, &fixture.index, 200),
     );
 }
 
@@ -552,7 +559,7 @@ fn gatedFixture() !Fixture {
 fn admitAll(fixture: *Fixture, store: *Store) ![2]usize {
     const deliveries = try outbound.admitDeliveries(store, a, &fixture.index, fixture.target, 200);
     defer a.free(deliveries);
-    const replies = try outbound.admitTurnDeliveries(store, a, &fixture.index);
+    const replies = try outbound.admitTurnDeliveries(store, a, &fixture.index, 200);
     defer a.free(replies);
     return .{ deliveries.len, replies.len };
 }
@@ -650,4 +657,262 @@ test "outbound returns a retained legacy delivery without rendering or resubmitt
     try std.testing.expectEqualSlices(t.Id, &.{@as(t.Id, @splat(50))}, tasks);
     try std.testing.expectEqual(0, store.submits);
     try std.testing.expectEqual(1, store.entries.items.len);
+}
+
+test "outbound admits a released imported digest under its local obligation" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    const source: t.Id = @splat(70);
+    var imported = fixture.head().*;
+    imported.digest.?.delivery.payload.obligation = source;
+    fixture.index.records[0].input.genesis.imported = .{
+        .source = .{ .task = source, .digest = @splat(71) },
+        .head = imported,
+        .exclusive_owner = true,
+    };
+    try fixture.index.lineages.put(fixture.index.arena.allocator(), @splat(8), 0);
+    fixture.head().digest.?.delivery.payload.obligation = source;
+    fixture.head().digest.?.delivery.key.identity = @splat(5);
+    const released = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
+    defer a.free(released);
+    try std.testing.expectEqual(1, released.len);
+    var saved = try store.read(0);
+    defer saved.deinit();
+    try std.testing.expectEqualDeep(
+        @as(?t.Id, fixture.target),
+        delivery_target.resolve(&fixture.index, saved.value.delivery),
+    );
+    fixture.head().digest.?.delivery.payload.obligation = @splat(72);
+    fixture.head().digest.?.delivery.key.identity = @splat(6);
+    try std.testing.expectError(
+        error.UnrelatedIntent,
+        outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200),
+    );
+}
+
+const Parked = struct {
+    resumed: u32 = 0,
+    cancelled: u32 = 0,
+
+    const Blocker = enum { incompatible_profile, observation_blocked, waiting_workspace };
+    const Saved = struct {
+        value: struct {
+            revision: u64 = 5,
+            blocker: ?Blocker = null,
+            current_occurrence: ?t.Digest = null,
+        },
+        pub fn deinit(_: *Saved) void {}
+    };
+    const Receipt = struct {
+        pub fn deinit(_: *Receipt) void {}
+    };
+
+    pub fn task(_: *Parked, _: std.mem.Allocator, _: t.Id) !Saved {
+        return .{ .value = .{} };
+    }
+
+    pub fn status(_: *Parked, _: std.mem.Allocator, _: anytype) !Native.tasks.Status {
+        return .parked;
+    }
+
+    pub fn operationLookup(_: *Parked, _: std.mem.Allocator, _: []const u8) !?Receipt {
+        return null;
+    }
+
+    pub fn resumeTask(
+        self: *Parked,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: t.Id,
+        _: u64,
+    ) error{ IncompatibleProfile, OutOfMemory }!void {
+        self.resumed += 1;
+    }
+
+    pub fn requestCancel(
+        self: *Parked,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: t.Id,
+        _: []const u8,
+    ) !void {
+        self.cancelled += 1;
+    }
+};
+
+const Resumer = struct {
+    service: *Parked,
+    rows: []const idx.Row,
+    adjust: *const fn (*idx.Index) anyerror!void = keep,
+    attached: bool = true,
+    clock: driver.Clock = .{ .context = undefined, .now = now },
+
+    fn now(_: *anyopaque) anyerror!i64 {
+        return 200;
+    }
+
+    fn keep(_: *idx.Index) anyerror!void {}
+
+    pub fn rebuild(self: *Resumer, allocator: std.mem.Allocator) !idx.Index {
+        var index = try idx.Index.init(Native, allocator, self.rows, &.{});
+        errdefer index.deinit();
+        try self.adjust(&index);
+        return index;
+    }
+
+    fn advance(self: *Resumer, allocator: std.mem.Allocator) !u32 {
+        return continuation.advance(self, allocator, 8);
+    }
+};
+
+fn parkedRows(allocator: std.mem.Allocator, retired: bool) ![2]idx.Row {
+    var head = rows.head();
+    head.digest = .{ .delivery = intent(.digest, 0), .hold = .none, .not_before_ms = 0 };
+    const initial = try rows.row(allocator, 1, .{ .genesis = examples.genesis() }, .{
+        .genesis = head,
+    });
+    const frozen = try preparation.materialize(
+        allocator,
+        intent(.digest, 0),
+        rows.ref(initial),
+        @splat(7),
+    );
+    var delivery = frozen.value;
+    if (retired) delivery = try @import("messages.zig").retire(allocator, delivery);
+    return .{ try rows.row(allocator, 2, .{ .delivery = delivery }, null), initial };
+}
+
+fn gateHold(index: *idx.Index) anyerror!void {
+    index.recovery_hold = true;
+}
+
+fn gateTransfer(index: *idx.Index) anyerror!void {
+    index.recovery_purpose = .transfer;
+}
+
+fn gateCut(index: *idx.Index) anyerror!void {
+    const parked = index.record(@splat(2)).?;
+    index.restore_cut = try index.arena.allocator().dupe(t.InputReference, &.{.{
+        .task = parked.task,
+        .digest = parked.input_digest,
+    }});
+}
+
+fn gatePause(index: *idx.Index) anyerror!void {
+    index.obligations[0].effective_mode = .paused;
+}
+
+fn gateObsolete(index: *idx.Index) anyerror!void {
+    index.records[index.tasks.get(@splat(1)).?].result.?.genesis.digest = null;
+}
+
+test "outbound resumes a parked delivery only while admission would permit it now" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const current = try parkedRows(scratch, false);
+    var service: Parked = .{};
+    var resumer: Resumer = .{ .service = &service, .rows = &current };
+    const Gate = *const fn (*idx.Index) anyerror!void;
+    for ([_]Gate{ gateHold, gateTransfer, gateCut, gatePause, gateObsolete }) |gate| {
+        resumer.adjust = gate;
+        try std.testing.expectEqual(0, try resumer.advance(scratch));
+    }
+    try std.testing.expectEqual(0, service.resumed);
+    const retired = try parkedRows(scratch, true);
+    resumer = .{ .service = &service, .rows = &retired };
+    try std.testing.expectEqual(0, try resumer.advance(scratch));
+    try std.testing.expectEqual(0, service.resumed);
+    resumer = .{ .service = &service, .rows = &current };
+    try std.testing.expectEqual(1, try resumer.advance(scratch));
+    try std.testing.expectEqual(1, service.resumed);
+    try std.testing.expectEqual(0, service.cancelled);
+}
+
+fn revise(value: idx.Row, revision: u64) idx.Row {
+    var result = value;
+    result.input.revision = revision;
+    result.owner_snapshot.?.revision = revision;
+    result.owner_snapshot.?.event_cut = revision;
+    result.owner_evidence.?.input.revision = revision;
+    return result;
+}
+
+const Folded = struct { row: idx.Row, head: t.Head };
+
+fn folding(
+    allocator: std.mem.Allocator,
+    task: u8,
+    before: t.Head,
+    predecessor: idx.Row,
+    facts: []const t.Settlement,
+) !Folded {
+    var value = rows.step(before, rows.ref(predecessor), if (task == 3) "fold-one" else "fold-two");
+    value.facts.items = facts;
+    var output = rows.successor(value);
+    var consumed: std.ArrayList(t.RevisionReference) = .empty;
+    for (facts) |fact| try consumed.append(allocator, fact.reference);
+    output.step.head.consumed.items = consumed.items;
+    return .{
+        .row = try rows.row(allocator, task, .{ .step = value }, output),
+        .head = output.step.head,
+    };
+}
+
+fn needs(allocator: std.mem.Allocator, values: []const idx.Row) !bool {
+    var index = try idx.Index.init(Native, allocator, values, &.{});
+    defer index.deinit();
+    index.obligations[0].effective_mode = .paused;
+    return driver.needsStep(&index, &index.obligations[0], 100);
+}
+
+fn pendingFact(allocator: std.mem.Allocator, source: idx.Row) !t.Settlement {
+    const bytes = try c.encodeOwned(retained.Snapshot, allocator, source.owner_snapshot.?);
+    return .{
+        .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
+        .owner_snapshot = .{ .bytes = bytes },
+        .kind = .delivery,
+        .accounting = .{},
+        .delivery = null,
+    };
+}
+
+test "outbound retires a pre-removal unsettled legacy digest and settles it once" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const initial = try rows.genesis(scratch);
+    const admitted = try rows.legacyDelivery(scratch, rows.ref(initial));
+    const legacy = try rows.row(scratch, 2, .{ .delivery = admitted }, null);
+    const pending = try pendingFact(scratch, legacy);
+    const first = try folding(scratch, 3, rows.head(), initial, &.{pending});
+    const stale = [_]idx.Row{ first.row, legacy, initial };
+    var service: Parked = .{};
+    var resumer: Resumer = .{ .service = &service, .rows = &stale };
+    try std.testing.expect(!try needs(scratch, &stale));
+    try std.testing.expectEqual(1, try resumer.advance(scratch));
+    try std.testing.expectEqual(1, service.cancelled);
+    try std.testing.expectEqual(0, service.resumed);
+    const cancelled = [_]idx.Row{ first.row, revise(legacy, 6), initial };
+    try std.testing.expect(try needs(scratch, &cancelled));
+    var index = try idx.Index.init(Native, scratch, &cancelled, &.{});
+    const settled = try materialize.step(scratch, &index, @splat(1), 100, null);
+    var found: ?t.Settlement = null;
+    for (settled.value.facts.items) |item| {
+        if (!std.meta.eql(item.reference.task, legacy.input.task)) continue;
+        try std.testing.expect(found == null);
+        found = item;
+    }
+    const fact = found.?;
+    const outcome = fact.delivery.?.outcome;
+    try std.testing.expectEqualStrings("slack_removed", outcome.rejected.code.bytes);
+    const second = try folding(scratch, 4, first.head, first.row, &.{fact});
+    const later = [_]idx.Row{ second.row, first.row, revise(legacy, 7), initial };
+    try std.testing.expect(!try needs(scratch, &later));
+    resumer.rows = &later;
+    try std.testing.expectEqual(0, try resumer.advance(scratch));
+    try std.testing.expectEqual(1, service.cancelled);
+    try std.testing.expectEqual(0, service.resumed);
 }

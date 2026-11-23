@@ -27,7 +27,7 @@ pub const Request = struct {
         monitor_add: struct { wording: t.Text, interval_ms: ?u64 },
         monitor_show: t.Id,
         monitor_directives: struct { target: t.Id, after: ?u64, limit: u32 },
-        messages: struct { target: t.Id, after: ?u64, limit: u32 },
+        messages: struct { target: ?t.Id, after: ?u64, limit: u32 },
         directive: struct { target: t.Id, body: t.DirectiveBody },
         ask: struct { text: t.Text, target: ?t.Id },
         proposal_confirm: commands.ProposalSelector,
@@ -722,7 +722,7 @@ fn pendingDirectives(
 fn messagePage(
     a: std.mem.Allocator,
     index: *const idx.Index,
-    target: t.Id,
+    target: ?t.Id,
     after: ?u64,
     limit: u32,
 ) !native.json.Value {

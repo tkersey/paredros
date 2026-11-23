@@ -131,7 +131,12 @@ pub fn Driver(comptime Types: type) type {
             if (!self.attached) return error.DriverDetached;
             var index = try self.rebuild(a);
             defer index.deinit();
-            return outbound.admitTurnDeliveries(self.service, a, &index);
+            return outbound.admitTurnDeliveries(
+                self.service,
+                a,
+                &index,
+                try self.clock.now(self.clock.context),
+            );
         }
 
         pub fn deliveries(self: *Self, a: std.mem.Allocator, target: t.Id) ![]t.Id {
@@ -321,17 +326,7 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
         const target = materialize.factTarget(index, record) orelse continue;
         if (!std.meta.eql(target, obligation.task)) continue;
         if (record.input == .audit and record.result == null) continue;
-        if (!materialize.readyFact(record)) continue;
-        var consumed = false;
-        for (obligation.chain) |position| {
-            const output = index.records[position].result.?;
-            const prior = if (output == .genesis) output.genesis else output.step.head;
-            for (prior.consumed.items) |fact|
-                if (std.meta.eql(fact.task, record.task) and fact.revision == record.revision) {
-                    consumed = true;
-                };
-        }
-        if (!consumed) return true;
+        if (materialize.unsettled(index, obligation, record)) return true;
     }
     if (!obligation.ordinaryDispatch()) return false;
     if (clock_ms >= head.next_due_ms and clock_ms >= head.source_not_before_ms) return true;

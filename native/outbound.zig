@@ -6,6 +6,7 @@ const preparation = @import("delivery_prepare.zig");
 const admission = @import("admission.zig");
 const eligibility = @import("eligibility.zig");
 const restore_eligibility = @import("restore_eligibility.zig");
+const delivery_target = @import("delivery_target.zig");
 
 const Wanted = struct { intent: t.DeliveryIntent, producer: t.Reference };
 
@@ -18,12 +19,12 @@ pub fn admitDeliveries(
 ) ![]t.Id {
     const obligation = index.obligation(target) orelse return error.UnknownObligation;
     if (!admissible(index)) return &.{};
-    const wanted = try collect(a, index, obligation, clock_ms);
+    const wanted = try collect(a, index, obligation);
     defer a.free(wanted);
     var tasks: std.ArrayList(t.Id) = .empty;
     errdefer tasks.deinit(a);
     for (wanted) |value| {
-        if (!restore_eligibility.allowsKey(index, value.intent.key)) continue;
+        if (!try permitted(a, index, obligation, value.intent, clock_ms)) continue;
         try tasks.append(a, try admitDelivery(service, a, index, obligation, value));
     }
     return tasks.toOwnedSlice(a);
@@ -33,29 +34,73 @@ pub fn admissible(index: *const idx.Index) bool {
     return !index.outputHeld() and index.recovery_purpose != .transfer;
 }
 
+pub fn permitted(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    obligation: ?*const idx.Obligation,
+    intent: t.DeliveryIntent,
+    clock_ms: i64,
+) !bool {
+    if (!admissible(index) or !restore_eligibility.allowsKey(index, intent.key)) return false;
+    if (intent.key.purpose == .turn or intent.key.purpose == .control) return true;
+    const selected = obligation orelse return false;
+    if (!selected.ordinaryDispatch()) return false;
+    const head = index.head(selected);
+    return switch (intent.key.purpose) {
+        .activation => if (head.activation) |activation|
+            try equal(a, t.DeliveryIntent, activation, intent)
+        else
+            false,
+        .digest => if (head.digest) |digest|
+            digest.hold == .none and clock_ms >= digest.not_before_ms and
+                try equal(a, t.DeliveryIntent, digest.delivery, intent)
+        else
+            false,
+        .question => if (head.question) |question|
+            question.specification_revision == head.specification.revision and
+                question.prompt.payload.specification_revision ==
+                    head.specification.revision and
+                try equal(a, t.DeliveryIntent, question.prompt, intent)
+        else
+            false,
+        .control, .turn, .failure => false,
+    };
+}
+
+pub fn resumable(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    delivery: t.Delivery,
+    clock_ms: i64,
+) !bool {
+    if (delivery.payload.renderer_version == preparation.legacy_renderer_version or
+        delivery.envelope.origin != .derived) return false;
+    const intent = preparation.projectIntent(delivery);
+    const owner = if (delivery_target.resolve(index, delivery)) |id| index.obligation(id) else null;
+    if (!try permitted(a, index, owner, intent, clock_ms)) return false;
+    const producer = delivery.envelope.origin.derived.predecessor;
+    authorizeDelivery(a, index, owner, intent, producer) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    return true;
+}
+
 fn collect(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
-    clock_ms: i64,
 ) ![]Wanted {
     var wanted: std.ArrayList(Wanted) = .empty;
     errdefer wanted.deinit(a);
     const head = index.head(obligation);
     const current = index.reference(obligation.chain[obligation.chain.len - 1]);
-    if (obligation.ordinaryDispatch()) {
-        if (head.activation) |activation|
-            try append(a, &wanted, .{ .intent = activation, .producer = current });
-        if (head.digest) |digest| {
-            if (digest.hold == .none and clock_ms >= digest.not_before_ms)
-                try append(a, &wanted, .{ .intent = digest.delivery, .producer = current });
-        }
-        if (head.question) |question| {
-            if (question.specification_revision == head.specification.revision and
-                question.prompt.payload.specification_revision == head.specification.revision)
-                try append(a, &wanted, .{ .intent = question.prompt, .producer = current });
-        }
-    }
+    if (head.activation) |activation|
+        try append(a, &wanted, .{ .intent = activation, .producer = current });
+    if (head.digest) |digest|
+        try append(a, &wanted, .{ .intent = digest.delivery, .producer = current });
+    if (head.question) |question|
+        try append(a, &wanted, .{ .intent = question.prompt, .producer = current });
     for (obligation.chain) |position| {
         const record = index.records[position];
         if (!record.selected or record.superseded) return error.UnselectedProducer;
@@ -100,6 +145,7 @@ pub fn admitTurnDeliveries(
     service: anytype,
     a: std.mem.Allocator,
     index: *const idx.Index,
+    clock_ms: i64,
 ) ![]t.Id {
     if (!admissible(index)) return &.{};
     var tasks: std.ArrayList(t.Id) = .empty;
@@ -109,7 +155,7 @@ pub fn admitTurnDeliveries(
             record.result.? != .turn or record.result_digest == null or
             record.input.turn.envelope.origin != .slack) continue;
         const intent = record.result.?.turn.delivery orelse continue;
-        if (!restore_eligibility.allowsKey(index, intent.key)) continue;
+        if (!try permitted(a, index, null, intent, clock_ms)) continue;
         try tasks.append(a, try admitDelivery(service, a, index, null, .{
             .intent = intent,
             .producer = index.reference(position),
@@ -192,8 +238,8 @@ fn authorizeDelivery(
         return;
     }
     const selected = obligation orelse return error.UnknownObligation;
-    if (intent.key.purpose != .activation and (intent.payload.obligation == null or
-        !std.meta.eql(intent.payload.obligation.?, selected.task))) return error.UnrelatedIntent;
+    if (intent.key.purpose != .activation and !owns(index, selected, intent))
+        return error.UnrelatedIntent;
     const record = try source(index, selected, producer);
     const result = record.result.?;
     const head = if (result == .genesis) result.genesis else if (result == .step)
@@ -214,6 +260,16 @@ fn authorizeDelivery(
             if (try equal(a, t.DeliveryIntent, intent, notice)) return;
     }
     return error.UnauthorizedIntent;
+}
+
+fn owns(
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+    intent: t.DeliveryIntent,
+) bool {
+    const claimed = intent.payload.obligation orelse return false;
+    const resolved = delivery_target.owner(index, claimed, intent.key.lineage) orelse return false;
+    return std.meta.eql(resolved, obligation.task);
 }
 
 fn manifest(

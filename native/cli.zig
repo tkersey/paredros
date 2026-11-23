@@ -13,7 +13,7 @@ pub const help =
     \\  monitor list | show ID | check ID | pause ID | resume ID | cancel ID
     \\  monitor directives ID [--after ORDINAL] [--limit N]
     \\  monitor amend ID REVISION [--interval-ms N] [--wording TEXT]
-    \\  messages ID [--after ORDINAL] [--limit N]  Read local updates
+    \\  messages [ID] [--after ORDINAL] [--limit N]  Read local updates
     \\  question answer ID QUESTION_DIGEST CHOICE
     \\  proposal show | confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
     \\  task show ID                     Inspect admitted input and result
@@ -256,18 +256,23 @@ fn directivePage(args: []const []const u8) !Command {
 }
 
 fn messagePage(args: []const []const u8) !Command {
-    return .{ .messages = try page(@FieldType(Command, "messages"), args) };
+    if (args.len % 2 == 1) return .{ .messages = try page(@FieldType(Command, "messages"), args) };
+    const cursor = try paging(args);
+    return .{ .messages = .{ .target = null, .after = cursor.after, .limit = cursor.limit } };
 }
 
 fn page(comptime Page: type, args: []const []const u8) !Page {
     if (args.len == 0) return error.InvalidArguments;
-    var value: Page = .{
-        .target = try hex(t.Id, args[0]),
-        .after = null,
-        .limit = 16,
-    };
+    const cursor = try paging(args[1..]);
+    return .{ .target = try hex(t.Id, args[0]), .after = cursor.after, .limit = cursor.limit };
+}
+
+const Cursor = struct { after: ?u64 = null, limit: u32 = 16 };
+
+fn paging(args: []const []const u8) !Cursor {
+    var value: Cursor = .{};
     var seen_limit = false;
-    var i: usize = 1;
+    var i: usize = 0;
     while (i < args.len) : (i += 2) {
         if (i + 1 == args.len) return error.InvalidArguments;
         if (same(args[i], "--after") and value.after == null) {

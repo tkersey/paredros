@@ -686,7 +686,7 @@ pub fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery 
     return delivery.value;
 }
 
-fn legacyDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
+pub fn legacyDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
     var delivery = try pendingDelivery(a, producer);
     delivery.payload.renderer_version = preparation.legacy_renderer_version;
     delivery.payload.wire_json = .{ .bytes = "{\"channel\":\"D1\",\"metadata\":{}}" };

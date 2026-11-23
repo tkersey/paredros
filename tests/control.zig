@@ -457,6 +457,36 @@ test "control reads messages without admission and refuses removed Slack command
     }) |args| try std.testing.expectError(error.InvalidArguments, cli.request(frame, args, "id"));
 }
 
+test "control reads messages addressed to no obligation without an ID" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const wire = try cli.request(frame, &.{ "messages", "--after", "2", "--limit", "3" }, "x");
+    const parsed = try native.values.fromJson(control.Request, frame, try decode(frame, wire));
+    try std.testing.expectEqual(@as(?t.Id, null), parsed.command.messages.target);
+    try std.testing.expectEqual(2, parsed.command.messages.after.?);
+    try std.testing.expectEqual(3, parsed.command.messages.limit);
+    const response = try dispatch(frame, &driver, try cli.request(frame, &.{"messages"}, "x"), 501);
+    try std.testing.expectEqualStrings(
+        "observed",
+        try native.json.text(response.object.get("status").?),
+    );
+    const data = response.object.get("data").?.object;
+    try std.testing.expectEqual(0, data.get("messages").?.array.items.len);
+    try std.testing.expectError(
+        error.InvalidArguments,
+        cli.request(frame, &.{ "messages", "--after", "1", "--after", "2" }, "x"),
+    );
+}
+
 test "control malformed and unsupported frames are rejected without admission" {
     var fixture: Fixture = .{};
     defer fixture.deinit();

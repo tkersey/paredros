@@ -187,13 +187,46 @@ fn facts(
     }.less);
     for (ordered.items) |position| {
         const record = index.records[position];
-        if (!readyFact(record)) continue;
-        const previous = priorFact(index, obligation, record.task);
-        if (previous != null and previous.?.reference.revision == record.revision) continue;
+        if (!unsettled(index, obligation, record)) continue;
         if (result.items.len == 128) break;
+        const previous = priorFact(index, obligation, record.task);
         try result.append(a, try settlement(a, index, record, previous));
     }
     return result.toOwnedSlice(a);
+}
+
+pub fn unsettled(
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+    record: idx.Record,
+) bool {
+    if (!readyFact(record)) return false;
+    const previous = priorFact(index, obligation, record.task) orelse return true;
+    if (previous.reference.revision == record.revision) return false;
+    return record.input != .delivery or !delivery.retiredDigest(record.input.delivery) or
+        !settledBefore(index, obligation, record.task);
+}
+
+pub fn retirable(index: *const idx.Index, record: idx.Record) bool {
+    if (record.input != .delivery or !delivery.retiredDigest(record.input.delivery)) return false;
+    const snapshot = record.owner_snapshot orelse return false;
+    if (snapshot.outcome == .completed or snapshot.outcome == .failed or
+        snapshot.outcome == .cancelled) return false;
+    const target = factTarget(index, record) orelse return false;
+    const obligation = index.obligation(target) orelse return false;
+    const previous = priorFact(index, obligation, record.task) orelse return false;
+    return previous.reference.revision == record.revision and previous.delivery == null;
+}
+
+fn settledBefore(index: *const idx.Index, obligation: *const idx.Obligation, task: t.Id) bool {
+    for (obligation.chain) |position| {
+        const input = index.records[position].input;
+        if (input != .step) continue;
+        for (input.step.facts.items) |fact| {
+            if (std.meta.eql(fact.reference.task, task) and fact.delivery != null) return true;
+        }
+    }
+    return false;
 }
 
 pub fn readyFact(record: idx.Record) bool {
