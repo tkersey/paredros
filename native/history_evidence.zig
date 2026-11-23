@@ -97,7 +97,7 @@ pub fn page(
     };
     errdefer collector.values.deinit(a);
     for (index.records) |record| {
-        if (record.input != .audit and record.input != .lineage_audit) continue;
+        if (!try selected(&collector, record.input)) continue;
         if (record.owner_snapshot == null or record.owner_evidence == null) {
             collector.scans += 1;
             collector.incomplete += 1;
@@ -166,15 +166,7 @@ fn collect(
     snapshot: retained.Snapshot,
     attempts: []const retained.AttemptEvidence,
 ) !void {
-    const lineage = switch (input) {
-        .audit => |value| value.delivery.key.lineage,
-        .lineage_audit => |value| value.lineage,
-        else => return,
-    };
-    if (collector.target) |target| {
-        const obligation = collector.index.obligation(target) orelse return error.UnknownObligation;
-        if (!std.meta.eql(collector.index.head(obligation).lineage, lineage)) return;
-    }
+    if (!try selected(collector, input)) return;
     collector.scans += 1;
     const complete = (switch (input) {
         .audit => |value| walk(false, collector, namespace, value, snapshot, attempts),
@@ -185,6 +177,21 @@ fn collect(
         else => false,
     };
     if (!complete) collector.incomplete += 1;
+}
+
+fn scanned(input: t.Input) ?t.Digest {
+    return switch (input) {
+        .audit => |value| value.delivery.key.lineage,
+        .lineage_audit => |value| value.lineage,
+        else => null,
+    };
+}
+
+fn selected(collector: *const Collector, input: t.Input) !bool {
+    const lineage = scanned(input) orelse return false;
+    const target = collector.target orelse return true;
+    const obligation = collector.index.obligation(target) orelse return error.UnknownObligation;
+    return std.meta.eql(collector.index.head(obligation).lineage, lineage);
 }
 
 fn walk(

@@ -277,6 +277,33 @@ test "history projection requires the prepared payload and authenticated capture
     try std.testing.expect(fixture.index.recovery_hold);
 }
 
+test "history evidence counts only incomplete scans of the target lineage" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var audit = fixture.audit;
+    audit.obligation = @splat(4);
+    audit.lineage = @splat(0x42);
+    var foreign = fixture.index.records[1];
+    foreign.task = @splat(4);
+    foreign.input = .{ .lineage_audit = audit };
+    foreign.owner_snapshot = null;
+    foreign.owner_evidence = null;
+    const records = try allocator.alloc(idx.Record, 3);
+    @memcpy(records[0..2], fixture.index.records);
+    records[2] = foreign;
+    fixture.index.records = records;
+    const all = try evidence.page(allocator, &fixture.index, null, null, 16);
+    try std.testing.expectEqual(2, all.scans);
+    try std.testing.expectEqual(1, all.incomplete_scans);
+    const target = try evidence.page(allocator, &fixture.index, @splat(1), null, 16);
+    try std.testing.expectEqual(1, target.total);
+    try std.testing.expectEqual(1, target.scans);
+    try std.testing.expectEqual(0, target.incomplete_scans);
+}
+
 fn importedEvidence(allocator: std.mem.Allocator, record: idx.Record) !continuity.Imported {
     const snapshot = record.owner_snapshot.?;
     const raw = record.owner_evidence.?;

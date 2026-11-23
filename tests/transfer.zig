@@ -1658,3 +1658,101 @@ test "native continuity export retries resume the pending cut for one name" {
     });
     try std.testing.expectEqualStrings("transfer-first", resumed.operation.bytes);
 }
+
+const commands = @import("../native/commands.zig");
+const Monitored = struct { bundle: transfer.OwnedBundle, local: t.Genesis };
+
+fn monitoredSource(f: *Fixture, clock: *u8) !Monitored {
+    const a = f.arena.allocator();
+    var original: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try original.attach(a);
+    defer original.detach();
+    const spec = contracts.specification();
+    const target = try commands.monitor(&original, a, "monitor-retry", origin, spec);
+    try finish(f, target);
+    try std.testing.expectEqualDeep(
+        target,
+        try commands.monitor(&original, a, "monitor-retry", origin, spec),
+    );
+    var index = try original.rebuild(a);
+    defer index.deinit();
+    const bytes = try c.encodeOwned(t.Genesis, a, index.record(target).?.input.genesis);
+    return .{
+        .bundle = try transfer.capture(&original, a, source(f), .snapshot),
+        .local = (try c.decodeOwned(t.Genesis, a, bytes)).value,
+    };
+}
+
+fn expectOneLineage(driver: *Driver, a: std.mem.Allocator, imported: t.Id) !void {
+    try std.testing.expectEqualDeep(
+        imported,
+        try commands.monitor(driver, a, "monitor-retry", origin, contracts.specification()),
+    );
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(1, index.obligations.len);
+    try std.testing.expectEqualDeep(imported, index.obligations[0].task);
+}
+
+test "native continuity monitor add retried after import returns the imported obligation" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var clock: u8 = 0;
+    var source_state = try monitoredSource(&from, &clock);
+    defer source_state.bundle.deinit();
+    try from.close();
+    try to.init();
+    const a = to.arena.allocator();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, source_state.bundle.value);
+    try expectOneLineage(&destination, a, imported);
+    try expectOneLineage(&destination, a, imported);
+    try std.testing.expect(try to.service.?.operationLookup(a, "monitor-retry") == null);
+    _ = try destination.directive(a, "monitor-retry", origin, imported, .{ .pause = {} });
+    try std.testing.expectError(
+        error.OperationConflict,
+        commands.monitor(&destination, a, "monitor-retry", origin, contracts.specification()),
+    );
+}
+
+test "native continuity rebuild keeps the imported lineage over an exact local replay" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var clock: u8 = 0;
+    var source_state = try monitoredSource(&from, &clock);
+    defer source_state.bundle.deinit();
+    try from.close();
+    try to.init();
+    const a = to.arena.allocator();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, source_state.bundle.value);
+    const replay = try to.execute("monitor-retry", .{ .genesis = source_state.local });
+    try std.testing.expect(!std.meta.eql(replay, imported));
+    try expectOneLineage(&destination, a, imported);
+    var forked = source_state.local;
+    forked.envelope.operation = .{ .bytes = "monitor-fork" };
+    _ = try to.execute("monitor-fork", .{ .genesis = forked });
+    try std.testing.expectError(error.DuplicateLineage, destination.rebuild(a));
+}

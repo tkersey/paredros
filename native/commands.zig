@@ -117,12 +117,7 @@ fn admitGenesis(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
-            const envelope: t.Envelope = .{
-                .operation = .{ .bytes = requested.operation },
-                .stable_request = requested.digest,
-                .origin = requested.origin,
-                .ingress = requested.ingress,
-            };
+            const envelope = genesisEnvelope(requested);
             const clock_ms = try self.driver.clock.now(self.driver.clock.context);
             var frozen = self.specification;
             if (self.anchor_now) frozen.anchor_ms = clock_ms;
@@ -135,12 +130,42 @@ fn admitGenesis(
             } };
         }
     };
+    var index = try driver.rebuild(scratch);
+    defer index.deinit();
+    if (try importedGenesis(scratch, &index, request)) |task| return task;
     const result = try admission.admit(driver.service, scratch, request, Materializer{
         .driver = driver,
         .specification = specification,
         .anchor_now = anchor_now,
     });
     return result.receipt.task;
+}
+
+fn genesisEnvelope(request: admission.Request) t.Envelope {
+    return .{
+        .operation = .{ .bytes = request.operation },
+        .stable_request = request.digest,
+        .origin = request.origin,
+        .ingress = request.ingress,
+    };
+}
+
+fn importedGenesis(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    request: admission.Request,
+) !?t.Id {
+    const lineage = try admission.stableDigest(a, genesisEnvelope(request));
+    const position = index.lineages.get(lineage) orelse return null;
+    const existing = index.records[position].input.genesis;
+    if (std.mem.eql(u8, existing.envelope.operation.bytes, request.operation)) return null;
+    if (existing.imported == null) return error.DuplicateLineage;
+    if (index.operations.get(request.operation)) |other| {
+        const value = index.records[other].input;
+        if (value != .genesis or !std.meta.eql(value.genesis.lineage, lineage))
+            return error.OperationConflict;
+    }
+    return index.records[position].task;
 }
 
 pub fn turn(
@@ -303,7 +328,7 @@ pub fn confirmed(
 fn confirmedGenesis(index: *const idx.Index, digest: t.Digest) ?t.Id {
     for (index.records) |record| switch (record.input) {
         .genesis => |value| if (std.meta.eql(value.envelope.stable_request, digest))
-            return record.task,
+            return index.records[index.lineages.get(value.lineage).?].task,
         else => {},
     };
     return null;

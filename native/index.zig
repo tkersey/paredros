@@ -6,6 +6,7 @@ const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
 const restore = @import("restore.zig");
 const interaction = @import("interaction_evidence.zig");
+const admission = @import("admission.zig");
 
 pub const Encoding = enum { contract, json };
 pub const Value = struct {
@@ -162,6 +163,7 @@ pub const Index = struct {
         try validateTurns(self, cancellations);
         for (self.records, 0..) |item, position| {
             if (item.input != .genesis or recordHead(item) == null) continue;
+            if (self.lineages.get(item.input.genesis.lineage).? != position) continue;
             try obligations.append(scratch, try buildObligation(self, position, cancellations));
         }
         self.obligations = try obligations.toOwnedSlice(scratch);
@@ -307,12 +309,31 @@ fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
         const entry = try self.operations.getOrPut(a, envelope.operation.bytes);
         if (entry.found_existing) return error.OperationConflict;
         entry.value_ptr.* = position;
-        if (item.input == .genesis) {
-            const lineage = try self.lineages.getOrPut(a, item.input.genesis.lineage);
-            if (lineage.found_existing) return error.DuplicateLineage;
-            lineage.value_ptr.* = position;
-        }
+        if (item.input == .genesis) try addLineage(self, a, position);
     }
+}
+
+fn addLineage(self: *Index, a: std.mem.Allocator, position: usize) !void {
+    const entry = try self.lineages.getOrPut(a, self.records[position].input.genesis.lineage);
+    entry.value_ptr.* = if (entry.found_existing)
+        try replayedLineage(a, self.records, entry.value_ptr.*, position)
+    else
+        position;
+}
+
+fn replayedLineage(
+    a: std.mem.Allocator,
+    records: []const Record,
+    first: usize,
+    second: usize,
+) !usize {
+    const left = records[first].input.genesis;
+    const right = records[second].input.genesis;
+    if ((left.imported == null) == (right.imported == null)) return error.DuplicateLineage;
+    const local = if (left.imported == null) left else right;
+    const derived = try admission.stableDigest(a, local.envelope);
+    if (!std.meta.eql(derived, local.lineage)) return error.DuplicateLineage;
+    return if (left.imported == null) second else first;
 }
 
 fn validateTurns(self: *Index, receipts: []const Cancellation) !void {
