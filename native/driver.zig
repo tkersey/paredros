@@ -71,7 +71,7 @@ pub fn Driver(comptime Types: type) type {
             const self: *Self = @ptrCast(@alignCast(context));
             var index = try self.rebuild(a);
             defer index.deinit();
-            return eligibility.permits(a, &index, request, try self.clock.now(self.clock.context));
+            return eligibility.permits(&index, request);
         }
 
         pub fn genesis(
@@ -161,19 +161,6 @@ pub fn Driver(comptime Types: type) type {
                 record.input.genesis.envelope.origin,
             );
             return progress.admitted != null;
-        }
-
-        pub fn audits(self: *Self, a: std.mem.Allocator, target: t.Id) ![]t.Id {
-            if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            return outbound.admitAudits(
-                self.service,
-                a,
-                &index,
-                target,
-                try self.clock.now(self.clock.context),
-            );
         }
 
         pub fn directive(

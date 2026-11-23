@@ -3,7 +3,8 @@ const c = @import("protean_contracts");
 const native = @import("protean_native");
 const horos = @import("horos");
 const t = @import("application_types");
-const contract = @import("../app/slack_contract.zig");
+const legacy = @import("legacy.zig");
+const preparation = @import("delivery_prepare.zig");
 const retained = @import("retained.zig");
 
 pub const Result = struct {
@@ -43,7 +44,7 @@ fn inspectIn(
             snapshot.outcome == .cancelled,
     };
     for (snapshot.attempts.items) |attempt| {
-        if (!std.mem.eql(u8, attempt.capability.bytes, contract.notification_identity)) continue;
+        if (!std.mem.eql(u8, attempt.capability.bytes, legacy.notification_identity)) continue;
         try inspectAttempt(a, snapshot.task, raw, attempt, &result);
     }
     if (snapshot.result) |value| {
@@ -66,14 +67,22 @@ fn inspectIn(
     return result;
 }
 
+pub const Law = enum { current, before_removal };
+
+pub fn retiredDigest(delivery: t.Delivery) bool {
+    return delivery.key.purpose == .digest and
+        delivery.payload.renderer_version == preparation.legacy_renderer_version;
+}
+
 pub fn settlement(
     a: std.mem.Allocator,
     snapshot: retained.Snapshot,
     raw: retained.Evidence,
+    law: Law,
 ) !c.Decoded(@FieldType(t.Settlement, "delivery")) {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
-    const result = try settlementIn(arena.allocator(), snapshot, raw);
+    const result = try settlementIn(arena.allocator(), snapshot, raw, law);
     return .{ .arena = arena, .value = result };
 }
 
@@ -81,10 +90,12 @@ fn settlementIn(
     a: std.mem.Allocator,
     snapshot: retained.Snapshot,
     raw: retained.Evidence,
+    law: Law,
 ) !@FieldType(t.Settlement, "delivery") {
     const evidence = try inspectIn(a, snapshot, raw);
     const dead_unknown = raw.status == .unknown and !evidence.transmission_excluded;
-    if (!evidence.terminal and !dead_unknown and
+    const retired = law == .current and !evidence.terminal and retiredDigest(evidence.admitted);
+    if (!evidence.terminal and !dead_unknown and !retired and
         (evidence.outcome == null or evidence.outcome.? != .confirmed)) return null;
     const outcome = if (evidence.outcome != null and evidence.outcome.? == .confirmed)
         evidence.outcome.?
@@ -92,7 +103,7 @@ fn settlementIn(
         t.DeliveryOutcome{ .indeterminate = .{ .bytes = "possibly_transmitted" } }
     else
         evidence.outcome orelse t.DeliveryOutcome{ .rejected = .{
-            .code = .{ .bytes = "no_transmitted_write" },
+            .code = .{ .bytes = if (retired) "slack_removed" else "no_transmitted_write" },
             .retryable = true,
         } };
     const receipt: ?t.Receipt = if (outcome == .confirmed) .{

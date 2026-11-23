@@ -99,10 +99,12 @@ test "native source publication binds and preserves questions until condition ch
         first.head.question.?.prompt,
         .{ .task = @splat(7), .digest = @splat(8) },
         @splat(9),
-        "B1",
     );
     defer sealed.deinit();
-    try preparation.verifyStored(std.testing.allocator, sealed.value);
+    try std.testing.expectEqual(
+        .local,
+        try preparation.verifyStored(std.testing.allocator, sealed.value),
+    );
     const repeat = try fixture.output(
         try fixture.execute("same-condition", input(first.head, rejected, 7)),
     );

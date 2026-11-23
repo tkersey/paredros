@@ -7,7 +7,7 @@ const preparation = @import("../native/delivery_prepare.zig");
 const fixture = @import("contracts.zig");
 const retained_views = @import("../native/retained.zig");
 
-fn head() t.Head {
+pub fn head() t.Head {
     return .{
         .obligation = .{ .self = {} },
         .lineage = @splat(8),
@@ -48,7 +48,7 @@ fn envelope(operation: []const u8) t.Envelope {
     return value;
 }
 
-fn row(a: std.mem.Allocator, task: u8, input: t.Input, output: ?t.Output) !idx.Row {
+pub fn row(a: std.mem.Allocator, task: u8, input: t.Input, output: ?t.Output) !idx.Row {
     const bytes = try c.encodeOwned(t.Input, a, input);
     var result: ?idx.Value = null;
     if (output) |value| {
@@ -112,11 +112,11 @@ fn snapshotBytes(a: std.mem.Allocator, value: idx.Row) ![]const u8 {
     return c.encodeOwned(retained_views.Snapshot, a, value.owner_snapshot.?);
 }
 
-fn genesis(a: std.mem.Allocator) !idx.Row {
+pub fn genesis(a: std.mem.Allocator) !idx.Row {
     return row(a, 1, .{ .genesis = fixture.genesis() }, .{ .genesis = head() });
 }
 
-fn ref(value: idx.Row) t.Reference {
+pub fn ref(value: idx.Row) t.Reference {
     return .{ .task = value.input.task, .digest = value.result.?.digest };
 }
 
@@ -139,7 +139,7 @@ fn directive(
     };
 }
 
-fn step(previous: t.Head, reference: t.Reference, operation: []const u8) t.Step {
+pub fn step(previous: t.Head, reference: t.Reference, operation: []const u8) t.Step {
     return .{
         .envelope = envelope(operation),
         .obligation = @splat(1),
@@ -156,7 +156,7 @@ fn step(previous: t.Head, reference: t.Reference, operation: []const u8) t.Step 
     };
 }
 
-fn successor(value: t.Step) t.Output {
+pub fn successor(value: t.Step) t.Output {
     var output = value.previous;
     output.obligation = .{ .task = value.obligation };
     output.predecessor = value.predecessor;
@@ -656,7 +656,7 @@ test "index copied batches must be the contiguous outstanding prefix" {
     }
 }
 
-fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
+pub fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
     const delivery = try preparation.materialize(a, .{
         .destination = fixture.specification().destination,
         .key = .{
@@ -682,8 +682,25 @@ fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
             .prompt = null,
             .supersedes = null,
         },
-    }, producer, @splat(7), "B1");
+    }, producer, @splat(7));
     return delivery.value;
+}
+
+fn legacyDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
+    var delivery = try pendingDelivery(a, producer);
+    delivery.payload.renderer_version = preparation.legacy_renderer_version;
+    delivery.payload.wire_json = .{ .bytes = "{\"channel\":\"D1\",\"metadata\":{}}" };
+    const request = try c.encodeOwned(struct {
+        destination: t.Destination,
+        key: t.DeliveryKey,
+        payload: t.DeliveryPayload,
+    }, a, .{
+        .destination = delivery.destination,
+        .key = delivery.key,
+        .payload = delivery.payload,
+    });
+    delivery.envelope.stable_request = preparation.hash(request);
+    return delivery;
 }
 
 test "index authenticates copied delivery input and outcome before settlement" {
@@ -1085,19 +1102,19 @@ test "index dispatch gate fences a selected step immediately after restrictive a
     };
     var ordinary = try idx.Index.init(Native, a, &.{ live, initial }, &.{});
     defer ordinary.deinit();
-    try std.testing.expect(try gate.permits(a, &ordinary, request, 100));
+    try std.testing.expect(gate.permits(&ordinary, request));
     const pause = directive("pause-before-dispatch", 1, null, .{ .pause = {} });
     const pending = try row(a, 3, .{ .directive = pause }, null);
     var restricted = try idx.Index.init(Native, a, &.{ pending, live, initial }, &.{});
     defer restricted.deinit();
-    try std.testing.expect(!try gate.permits(a, &restricted, request, 100));
+    try std.testing.expect(!gate.permits(&restricted, request));
     try std.testing.expectEqual(
         t.Mode.active,
         restricted.head(restricted.obligation(initial.input.task).?).mode,
     );
     var unsupported = request;
     unsupported.kind = .placement_move;
-    try std.testing.expect(!try gate.permits(a, &ordinary, unsupported, 100));
+    try std.testing.expect(!gate.permits(&ordinary, unsupported));
 }
 
 test "index replacement binds current cancelled admission and preserves predecessor sequence" {
@@ -1256,52 +1273,31 @@ test "index driver admits a clock regression before the stale due instant" {
 const message_ts = "1700000000.000001";
 
 fn clicked(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Directive {
-    const slack = @import("../native/slack.zig");
+    const legacy = @import("../native/legacy.zig");
     const destination = admitted.destination;
     const button = admitted.payload.logical.buttons.items[0];
-    const binding: slack.Binding = .{
-        .app_id = destination.app.bytes,
-        .team_id = destination.workspace.bytes,
-        .operator_id = destination.operator.bytes,
-        .channel_id = destination.channel.bytes,
-        .bot_id = "B1",
-    };
+    const origin: t.Origin = .{ .slack = .{
+        .app = destination.app,
+        .workspace = destination.workspace,
+        .user = destination.operator,
+        .channel = destination.channel,
+    } };
     const action_ts = "1700000000.000009";
-    const identity = slack.interactionDigest(
-        binding,
+    const identity = legacy.interactionDigest(
+        origin.slack,
         message_ts,
         action_ts,
         button.block_id.bytes,
         button.action_id.bytes,
         button.value.bytes,
     );
-    const wire = try std.json.parseFromSlice(
-        std.json.Value,
-        a,
-        admitted.payload.wire_json.bytes,
-        .{},
-    );
-    const message = try std.json.Stringify.valueAlloc(a, .{
-        .bot_id = "B1",
-        .app_id = binding.app_id,
-        .team = binding.team_id,
-        .ts = message_ts,
-        .text = "Provider rendered text",
-        .blocks = wire.value.object.get("blocks").?,
-        .metadata = wire.value.object.get("metadata").?,
-    }, .{});
     var value = directive("unused", 1, null, .{ .pause = {} });
     value.envelope = .{
         .operation = .{ .bytes = try std.fmt.allocPrint(a, "slack:{s}", .{
             std.fmt.bytesToHex(identity, .lower),
         }) },
         .stable_request = identity,
-        .origin = .{ .slack = .{
-            .app = destination.app,
-            .workspace = destination.workspace,
-            .user = destination.operator,
-            .channel = destination.channel,
-        } },
+        .origin = origin,
         .ingress = .{
             .stable_request = identity,
             .timestamp = .{ .bytes = action_ts },
@@ -1312,7 +1308,7 @@ fn clicked(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Direc
                 .action_id = button.action_id,
                 .value = button.value,
                 .bot_id = .{ .bytes = "B1" },
-                .message = .{ .bytes = message },
+                .message = .{ .bytes = "{}" },
             },
         },
     };
@@ -1329,7 +1325,7 @@ fn captured(a: std.mem.Allocator, admitted: t.Delivery, timestamp: []const u8) !
 fn interactionFact(a: std.mem.Allocator, rows: []const idx.Row, click: idx.Row) !t.Settlement {
     const index = try a.create(idx.Index);
     index.* = try idx.Index.init(Native, a, rows, &.{});
-    const bound = try @import("../native/interaction_evidence.zig").settlement(
+    const bound = try @import("../native/legacy.zig").interaction(
         a,
         index,
         index.record(click.input.task).?.*,
@@ -1363,7 +1359,7 @@ test "index rebuilds an interaction folded before its delivery capture became kn
     defer arena.deinit();
     const a = arena.allocator();
     const initial = try genesis(a);
-    const admitted = try pendingDelivery(a, ref(initial));
+    const admitted = try legacyDelivery(a, ref(initial));
     const pending = try row(a, 2, .{ .delivery = admitted }, null);
     const click = try row(a, 4, .{ .directive = try clicked(a, pending, admitted) }, null);
     const early = try interactionFact(a, &.{ click, pending, initial }, click);
@@ -1392,7 +1388,7 @@ fn notificationAttempt(id: u8, reply: ?[]const u8) retained_views.Attempt {
     return .{
         .id = @splat(id),
         .occurrence = @splat(id),
-        .capability = .{ .bytes = @import("../app/slack_contract.zig").notification_identity },
+        .capability = .{ .bytes = @import("../native/legacy.zig").notification_identity },
         .inference = false,
         .request = object("request"),
         .prepared = object("prepared"),
@@ -1461,5 +1457,34 @@ test "index rebuilds an unsettled delivery fact after its task status becomes un
     source.owner_evidence.?.status = null;
     try rebuildFolded(a, &.{ source, initial }, fact, null);
     fact.delivery.?.outcome = .{ .rejected = .{ .code = .{ .bytes = "ratelimited" } } };
+    try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
+}
+
+test "index keeps folded pre-removal facts and settles an unsent retired digest once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try genesis(a);
+    const admitted = try legacyDelivery(a, ref(initial));
+    const source = try row(a, 2, .{ .delivery = admitted }, null);
+    const bytes = try snapshotBytes(a, source);
+    var fact: t.Settlement = .{
+        .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
+        .owner_snapshot = .{ .bytes = bytes },
+        .kind = .delivery,
+        .accounting = .{},
+        .delivery = null,
+    };
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    const index = try idx.Index.init(Native, a, &.{ source, initial }, &.{});
+    const materialize = @import("../native/materialize.zig");
+    try std.testing.expect(materialize.readyFact(index.record(source.input.task).?.*));
+    const folded = try materialize.step(a, &index, @splat(1), 0, null);
+    const settled = folded.value.facts.items[0].delivery.?;
+    try std.testing.expectEqualStrings("slack_removed", settled.outcome.rejected.code.bytes);
+    try std.testing.expect(settled.outcome.rejected.retryable);
+    fact.delivery = settled;
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    fact.delivery.?.outcome.rejected.code.bytes = "no_transmitted_write";
     try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
 }

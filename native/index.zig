@@ -5,7 +5,7 @@ const preparation = @import("delivery_prepare.zig");
 const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
 const restore = @import("restore.zig");
-const interaction = @import("interaction_evidence.zig");
+const legacy = @import("legacy.zig");
 const admission = @import("admission.zig");
 
 pub const Encoding = enum { contract, json };
@@ -150,7 +150,7 @@ pub const Index = struct {
         const scratch = self.arena.allocator();
         var obligations: std.ArrayList(Obligation) = .empty;
         try validateOperations(self, scratch);
-        for (self.records) |item| _ = try interaction.settlement(scratch, self, item);
+        for (self.records) |item| _ = try legacy.interaction(scratch, self, item);
         const recovery_view = try restore.inspect(scratch, self);
         self.recovery = recovery_view.recovery;
         self.recovery_hold = recovery_view.recovery_hold;
@@ -291,8 +291,8 @@ fn decodeRow(
 fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
     for (self.records, 0..) |item, position| {
         switch (item.input) {
-            .delivery => |delivery| try preparation.verifyStored(a, delivery),
-            .audit => |audit| try preparation.verifyStored(a, audit.delivery),
+            .delivery => |delivery| _ = try preparation.verifyStored(a, delivery),
+            .audit => |audit| _ = try preparation.verifyStored(a, audit.delivery),
             .directive => |directive| try restore.validateRetainedDirective(
                 self,
                 directive.obligation,
@@ -849,7 +849,7 @@ fn validateDeliveryFact(
         const claimed = fact.delivery orelse return error.CopiedInteractionMismatch;
         if (claimed.outcome != .confirmed) return error.CopiedInteractionMismatch;
         const metadata = claimed.outcome.confirmed.metadata_observed;
-        const expected = try interaction.copied(a, self, item, metadata);
+        const expected = try legacy.copiedInteraction(a, self, item, metadata);
         if (expected == null or !try sameValue(
             a,
             @FieldType(t.Settlement, "delivery"),
@@ -869,7 +869,12 @@ fn validateDeliveryFact(
             if (claimed.outcome == .indeterminate) .unknown else null
         else
             null;
-        var expected = try @import("delivery_fact.zig").settlement(a, snapshot, evidence);
+        var expected = try @import("delivery_fact.zig").settlement(
+            a,
+            snapshot,
+            evidence,
+            if (fact.delivery == null) .before_removal else .current,
+        );
         defer expected.deinit();
         if ((fact.delivery == null) != (expected.value == null))
             return error.CopiedDeliveryMismatch;

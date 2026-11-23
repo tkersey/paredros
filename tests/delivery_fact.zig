@@ -1,11 +1,12 @@
 const std = @import("std");
 const c = @import("protean_contracts");
 const horos = @import("horos");
+const native = @import("protean_native");
 const t = @import("application_types");
 const retained = @import("../native/retained.zig");
 const facts = @import("../native/delivery_fact.zig");
 const index = @import("../native/index.zig");
-const contract = @import("../app/slack_contract.zig");
+const legacy = @import("../native/legacy.zig");
 const examples = @import("contracts.zig");
 const a = std.testing.allocator;
 
@@ -23,7 +24,7 @@ const Fixture = struct {
             .destination = examples.specification().destination,
             .key = .{
                 .lineage = @splat(1),
-                .purpose = .digest,
+                .purpose = .activation,
                 .identity = @splat(2),
                 .generation = 0,
             },
@@ -83,6 +84,37 @@ const Fixture = struct {
         };
     }
 
+    fn retarget(self: *Fixture, purpose: @FieldType(t.DeliveryKey, "purpose"), renderer: u32) !void {
+        const allocator = self.arena.allocator();
+        var input = try c.decodeOwned(t.Input, allocator, self.evidence.input.bytes);
+        input.value.delivery.key.purpose = purpose;
+        input.value.delivery.payload.renderer_version = renderer;
+        const bytes = try c.encodeOwned(t.Input, allocator, input.value);
+        self.snapshot.input.reference = object(bytes);
+        self.evidence.input.digest = self.snapshot.input.reference.digest;
+        self.evidence.input.bytes = bytes;
+    }
+
+    fn complete(self: *Fixture, outcome: t.DeliveryOutcome) !void {
+        const allocator = self.arena.allocator();
+        const output = try native.values.toJson(t.Output, allocator, .{ .delivery = outcome });
+        const bytes = try std.json.Stringify.valueAlloc(allocator, output, .{});
+        self.snapshot.outcome = .completed;
+        self.snapshot.result = .{
+            .schema_id = .{ .bytes = t.output_schema_id },
+            .encoding = .json,
+            .reference = object(bytes),
+        };
+        self.evidence.result = .{
+            .task = @splat(1),
+            .revision = 1,
+            .digest = self.snapshot.result.?.reference.digest,
+            .schema_id = t.output_schema_id,
+            .encoding = .json,
+            .bytes = bytes,
+        };
+    }
+
     fn addReply(self: *Fixture, outcome: t.DeliveryOutcome) !void {
         const allocator = self.arena.allocator();
         const value = try c.encodeOwned(t.DeliveryOutcome, allocator, outcome);
@@ -113,7 +145,7 @@ fn attempt(id: u8, disposition: ?@FieldType(retained.Capture, "disposition")) re
     return .{
         .id = @splat(id),
         .occurrence = @splat(id),
-        .capability = .{ .bytes = contract.notification_identity },
+        .capability = .{ .bytes = legacy.notification_identity },
         .inference = false,
         .request = object("request"),
         .prepared = object("prepared"),
@@ -130,32 +162,32 @@ fn attempt(id: u8, disposition: ?@FieldType(retained.Capture, "disposition")) re
 test "delivery facts distinguish live queued and dispatching from terminal non transmission" {
     var fixture = try Fixture.init();
     defer fixture.arena.deinit();
-    var live = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var live = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer live.deinit();
     try std.testing.expect(live.value == null);
     fixture.snapshot.attempts.items = &.{attempt(1, null)};
-    var dispatching = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var dispatching = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer dispatching.deinit();
     try std.testing.expect(dispatching.value == null);
     fixture.evidence.status = .unknown;
-    var lost = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var lost = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer lost.deinit();
     try std.testing.expect(lost.value.?.outcome == .indeterminate);
     fixture.evidence.status = null;
     fixture.snapshot.outcome = .failed;
     fixture.snapshot.attempts.items = &.{};
-    var terminal = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var terminal = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer terminal.deinit();
     try std.testing.expect(terminal.value.?.outcome.rejected.retryable);
     fixture.snapshot.attempts.items = &.{
         attempt(1, .definitely_not_sent),
         attempt(2, .definitely_not_sent),
     };
-    var excluded = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var excluded = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer excluded.deinit();
     try std.testing.expect(excluded.value.?.outcome.rejected.retryable);
     fixture.snapshot.attempts.items = &.{ attempt(1, null), attempt(2, .definitely_not_sent) };
-    var unknown = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var unknown = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer unknown.deinit();
     try std.testing.expect(unknown.value.?.outcome == .indeterminate);
 }
@@ -167,7 +199,7 @@ test "delivery facts reuse retained confirmed write reply before terminal public
         .timestamp = .{ .bytes = "1700000000.000001" },
         .metadata_observed = true,
     } });
-    var result = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var result = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer result.deinit();
     try std.testing.expect(result.value.?.outcome == .confirmed);
     try std.testing.expectEqualDeep(result.value.?.admitted.key, result.value.?.receipt.?.key);
@@ -180,7 +212,7 @@ test "delivery facts reuse retained confirmed write reply before terminal public
     fixture.snapshot.attempts.items = &.{altered};
     try std.testing.expectError(
         error.DeliveryProjectionMismatch,
-        facts.settlement(a, fixture.snapshot, fixture.evidence),
+        facts.settlement(a, fixture.snapshot, fixture.evidence, .current),
     );
 }
 
@@ -192,16 +224,65 @@ test "delivery facts retain provider rejection only when all write history exclu
         .retryable = true,
         .retry_after = .{ .bytes = "30" },
     } });
-    var pending = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var pending = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer pending.deinit();
     try std.testing.expect(pending.value == null);
     fixture.snapshot.outcome = .completed;
-    var rejected = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var rejected = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer rejected.deinit();
     try std.testing.expectEqualStrings("30", rejected.value.?.outcome.rejected.retry_after.?.bytes);
     const history = [_]retained.Attempt{ fixture.snapshot.attempts.items[0], attempt(2, .unknown) };
     fixture.snapshot.attempts.items = &history;
-    var unknown = try facts.settlement(a, fixture.snapshot, fixture.evidence);
+    var unknown = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
     defer unknown.deinit();
     try std.testing.expect(unknown.value.?.outcome == .indeterminate);
+}
+
+test "delivery facts settle retired digests once without a Slack write" {
+    var fixture = try Fixture.init();
+    defer fixture.arena.deinit();
+    try fixture.retarget(.digest, 1);
+    var unsent = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
+    defer unsent.deinit();
+    const rejected = unsent.value.?.outcome.rejected;
+    try std.testing.expectEqualStrings("slack_removed", rejected.code.bytes);
+    try std.testing.expect(rejected.retryable);
+    try std.testing.expect(unsent.value.?.receipt == null);
+    var historical = try facts.settlement(
+        a,
+        fixture.snapshot,
+        fixture.evidence,
+        .before_removal,
+    );
+    defer historical.deinit();
+    try std.testing.expect(historical.value == null);
+    fixture.snapshot.attempts.items = &.{attempt(1, null)};
+    var possible = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
+    defer possible.deinit();
+    try std.testing.expectEqualStrings(
+        "possibly_transmitted",
+        possible.value.?.outcome.indeterminate.bytes,
+    );
+    fixture.snapshot.attempts.items = &.{};
+    try fixture.retarget(.digest, 2);
+    var local = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
+    defer local.deinit();
+    try std.testing.expect(local.value == null);
+}
+
+test "delivery facts confirm completed local deliveries from the task result" {
+    var fixture = try Fixture.init();
+    defer fixture.arena.deinit();
+    try fixture.retarget(.digest, 2);
+    try fixture.complete(.{ .confirmed = .{
+        .timestamp = .{ .bytes = "local" },
+        .metadata_observed = true,
+    } });
+    var result = try facts.settlement(a, fixture.snapshot, fixture.evidence, .current);
+    defer result.deinit();
+    const receipt = result.value.?.receipt.?;
+    try std.testing.expectEqualStrings("local", receipt.timestamp.bytes);
+    try std.testing.expectEqual(.captured_response, receipt.basis);
+    try std.testing.expectEqual(fixture.snapshot.result.?.reference.digest, receipt.evidence.digest);
+    try std.testing.expectEqual(fixture.snapshot.task, receipt.evidence.task);
 }

@@ -26,7 +26,6 @@ pub fn Daemon(comptime Types: type) type {
             import_controls: t.Id,
             step: t.Id,
             deliveries: t.Id,
-            audits: t.Id,
         };
         pub const Handler = struct {
             context: *anyopaque,
@@ -244,11 +243,6 @@ pub fn Daemon(comptime Types: type) type {
                 },
                 .deliveries => |target| {
                     const changed = try self.outputs(a, .{ .deliveries = target });
-                    self.scheduling = .{ .audits = target };
-                    return changed;
-                },
-                .audits => |target| {
-                    const changed = try self.outputs(a, .{ .audits = target });
                     self.scheduling = .retained;
                     return changed;
                 },
@@ -258,14 +252,13 @@ pub fn Daemon(comptime Types: type) type {
         fn outputs(
             self: *Self,
             a: std.mem.Allocator,
-            selection: union(enum) { turns, deliveries: t.Id, audits: t.Id },
+            selection: union(enum) { turns, deliveries: t.Id },
         ) !bool {
             var index = try self.driver.rebuild(a);
             defer index.deinit();
             const tasks = switch (selection) {
                 .turns => try self.driver.turnDeliveries(a),
                 .deliveries => |target| try self.driver.deliveries(a, target),
-                .audits => |target| try self.driver.audits(a, target),
             };
             defer a.free(tasks);
             for (tasks) |task| if (index.record(task) == null) return true;

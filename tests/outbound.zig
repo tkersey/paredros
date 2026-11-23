@@ -7,13 +7,11 @@ const eligibility = @import("../native/eligibility.zig");
 const preparation = @import("../native/delivery_prepare.zig");
 const examples = @import("contracts.zig");
 const a = std.testing.allocator;
-const audit_control = @import("../native/audit_control.zig");
 
 const Store = struct {
     owner_epoch: t.Digest = @splat(1),
     entries: std.ArrayList(Entry) = .empty,
     submits: u32 = 0,
-    cancellations: std.ArrayList(t.Id) = .empty,
     const Entry = struct { operation: []u8, bytes: []u8, task: t.Id };
     const Receipt = struct {
         value: struct { task: t.Id },
@@ -29,59 +27,12 @@ const Store = struct {
         }
     };
 
-    const Task = struct {
-        value: State = .{},
-        const State = struct {
-            schedule: enum { queued, parked } = .queued,
-            revision: u64 = 1,
-            pub fn terminal(_: State) bool {
-                return false;
-            }
-        };
-        pub fn deinit(_: *Task) void {}
-    };
-
-    pub fn task(_: *Store, _: std.mem.Allocator, _: t.Id) !Task {
-        return .{};
-    }
-    pub fn status(_: *Store, _: std.mem.Allocator, _: Task.State) !enum { ready, unknown } {
-        return .ready;
-    }
-    pub fn resumeTask(
-        _: *Store,
-        _: std.mem.Allocator,
-        _: []const u8,
-        _: t.Id,
-        _: u64,
-    ) anyerror!void {}
-
-    pub fn notificationHistory(
-        _: *Store,
-        _: std.mem.Allocator,
-        _: t.Id,
-        _: []const u8,
-    ) !@import("protean_native").tasks.NotificationHistory {
-        return .{ .complete = true };
-    }
-    pub fn requestCancel(
-        self: *Store,
-        _: std.mem.Allocator,
-        _: []const u8,
-        id: t.Id,
-        _: []const u8,
-    ) !void {
-        for (self.cancellations.items) |existing|
-            if (std.meta.eql(existing, id)) return;
-        try self.cancellations.append(a, id);
-    }
-
     fn deinit(self: *Store) void {
         for (self.entries.items) |entry| {
             a.free(entry.operation);
             a.free(entry.bytes);
         }
         self.entries.deinit(a);
-        self.cancellations.deinit(a);
     }
 
     pub fn operationLookup(self: *Store, _: std.mem.Allocator, operation: []const u8) !?Receipt {
@@ -341,7 +292,7 @@ test "outbound digest keeps its frozen payload across a specification amendment"
     const amended = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300);
     defer a.free(amended);
     try std.testing.expectEqualSlices(t.Id, first, amended);
-    try std.testing.expect(try permits(&fixture, first[0]));
+    try std.testing.expect(!dispatched(&fixture, first[0]));
     try std.testing.expectEqual(1, store.entries.items.len);
 }
 
@@ -425,333 +376,6 @@ test "outbound rejects reused operation with changed logical payload or original
     try std.testing.expectEqual(1, store.entries.items.len);
 }
 
-test "outbound audit requires admitted delivery and creates an honest moving window" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    const requests = [_]t.AuditRequest{.{ .delivery = intent(.digest, 0).key }};
-    fixture.index.records[1].result.?.step.audit_requests.items = &requests;
-    try std.testing.expectError(
-        error.MissingAdmittedDelivery,
-        outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200),
-    );
-    const delivery = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(delivery);
-    var frozen = try store.read(0);
-    defer frozen.deinit();
-    try fixture.addDelivery(frozen.value.delivery, delivery[0]);
-    const audits = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(audits);
-    try std.testing.expectEqual(1, audits.len);
-    try std.testing.expectEqual(2, store.entries.items.len);
-    var admitted = try store.read(1);
-    defer admitted.deinit();
-    try std.testing.expect(admitted.value.audit.latest == null);
-    try std.testing.expectEqualStrings("0.0", admitted.value.audit.oldest.bytes);
-}
-
-fn savedAudit(fixture: *Fixture, store: *Store, delivery: t.Delivery) !t.Id {
-    const producer = fixture.index.reference(1);
-    const operation = try outbound.auditOperation(a, producer, 1, delivery.key);
-    defer a.free(operation);
-    var audit: t.Audit = .{
-        .envelope = .{
-            .operation = .{ .bytes = operation },
-            .stable_request = @splat(0),
-            .origin = .{ .derived = .{ .predecessor = producer } },
-        },
-        .delivery = delivery,
-        .ordinal = 1,
-        .oldest = .{ .bytes = "1700000000.000001" },
-        .latest = .{ .bytes = "1700001000.000000" },
-        .page_limit = 4,
-        .canary = null,
-    };
-    audit.envelope.stable_request = try outbound.auditStableDigest(a, audit);
-    return (try store.submit(a, operation, .{ .audit = audit })).receipt.task;
-}
-
-test "outbound audit reuses original admitted window without widening after head advance" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    fixture.index.records[1].result.?.step.audit_requests.items =
-        &.{.{ .delivery = intent(.digest, 0).key }};
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    const task = try savedAudit(&fixture, &store, delivery.value.delivery);
-    const bytes = try a.dupe(u8, store.entries.items[1].bytes);
-    defer a.free(bytes);
-    try fixture.advance();
-    const repeated = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(repeated);
-    try std.testing.expectEqualSlices(t.Id, &.{task}, repeated);
-    try std.testing.expectEqualSlices(u8, bytes, store.entries.items[1].bytes);
-    try std.testing.expectEqual(2, store.entries.items.len);
-}
-
-test "outbound audit rejects changed retained window seal and delivery binding" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    fixture.index.records[1].result.?.step.audit_requests.items =
-        &.{.{ .delivery = intent(.digest, 0).key }};
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    _ = try savedAudit(&fixture, &store, delivery.value.delivery);
-    var audit = try store.read(1);
-    defer audit.deinit();
-    audit.value.audit.latest.?.bytes = "1700002000.000000";
-    const altered = try c.encodeOwned(t.Input, a, audit.value);
-    a.free(store.entries.items[1].bytes);
-    store.entries.items[1].bytes = altered;
-    try std.testing.expectError(
-        error.OperationConflict,
-        outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200),
-    );
-    audit.value.audit.envelope.stable_request =
-        try outbound.auditStableDigest(a, audit.value.audit);
-    audit.value.audit.delivery.destination.channel.bytes = "Dother";
-    const redirected = try c.encodeOwned(t.Input, a, audit.value);
-    a.free(store.entries.items[1].bytes);
-    store.entries.items[1].bytes = redirected;
-    try std.testing.expectError(
-        error.OperationConflict,
-        outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200),
-    );
-}
-
-test "outbound audit canary must be an admitted delivery with an owner retained receipt" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    fixture.index.records[1].result.?.step.audit_requests.items =
-        &.{.{ .delivery = intent(.digest, 0).key }};
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    _ = try savedAudit(&fixture, &store, delivery.value.delivery);
-    var audit = try store.read(1);
-    defer audit.deinit();
-    const receipt: t.Receipt = .{
-        .key = delivery.value.delivery.key,
-        .destination = delivery.value.delivery.destination,
-        .timestamp = audit.value.audit.oldest,
-        .payload_digest = delivery.value.delivery.payload.content_digest,
-        .evidence = .{ .task = sent[0], .digest = @splat(88) },
-        .basis = .captured_response,
-    };
-    audit.value.audit.canary = .{ .receipt = receipt, .admitted = delivery.value.delivery };
-    audit.value.audit.envelope.stable_request =
-        try outbound.auditStableDigest(a, audit.value.audit);
-    const frozen = try c.encodeOwned(t.Input, a, audit.value);
-    a.free(store.entries.items[1].bytes);
-    store.entries.items[1].bytes = frozen;
-    try std.testing.expectError(
-        error.UnprovenCanary,
-        outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200),
-    );
-    fixture.head().told_receipt = receipt;
-    const repeated = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(repeated);
-    try std.testing.expectEqualSlices(t.Id, &.{store.entries.items[1].task}, repeated);
-    try wrongCanaryPair(&fixture, &store, audit.value.audit);
-}
-
-fn wrongCanaryPair(fixture: *Fixture, store: *Store, original: t.Audit) !void {
-    var audit_value = original;
-    audit_value.canary.?.receipt.key.generation += 1;
-    fixture.head().told_receipt = audit_value.canary.?.receipt;
-    audit_value.envelope.stable_request = try outbound.auditStableDigest(a, audit_value);
-    const bytes = try c.encodeOwned(t.Input, a, .{ .audit = audit_value });
-    a.free(store.entries.items[1].bytes);
-    store.entries.items[1].bytes = bytes;
-    try std.testing.expectError(error.InvalidCanary, outbound.admitAudits(
-        store,
-        a,
-        &fixture.index,
-        fixture.target,
-        200,
-    ));
-}
-
-fn unknownFact(delivery: t.Delivery, task: t.Id) t.Settlement {
-    return .{
-        .reference = .{ .task = task, .revision = 1, .digest = @splat(90) },
-        .kind = .delivery,
-        .accounting = .{},
-        .delivery = .{
-            .admitted = delivery,
-            .outcome = .{ .indeterminate = .{ .bytes = "lost_response" } },
-            .receipt = null,
-        },
-    };
-}
-
-test "outbound automatic unknown audit waits two minutes after first fold and stays unique" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    const fact = unknownFact(delivery.value.delivery, sent[0]);
-    fixture.index.records[1].input.step.facts.items = &.{fact};
-    fixture.index.obligations[0].effective_mode = .paused;
-    fixture.index.obligations[0].recovery_hold = true;
-    const before = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 120_199);
-    defer a.free(before);
-    try std.testing.expectEqual(0, before.len);
-    const due = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 120_200);
-    defer a.free(due);
-    try std.testing.expectEqual(1, due.len);
-    var first = try store.read(1);
-    defer first.deinit();
-    try std.testing.expectEqual(0, first.value.audit.ordinal);
-    try std.testing.expect(first.value.audit.latest == null);
-    try std.testing.expect(!try audit_control.permits(
-        a,
-        &fixture.index,
-        first.value.audit,
-        120_199,
-    ));
-    try std.testing.expect(try audit_control.permits(
-        a,
-        &fixture.index,
-        first.value.audit,
-        120_200,
-    ));
-    try fixture.advance();
-    fixture.index.records[2].input.step.facts.items = &.{fact};
-    const again = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 300_000);
-    defer a.free(again);
-    try std.testing.expectEqualSlices(t.Id, due, again);
-    try std.testing.expectEqual(2, store.entries.items.len);
-}
-
-test "outbound confirmed activation schedules readback without unknown quiescence" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    fixture.head().digest = null;
-    fixture.head().activation = @import("native_genesis.zig").expectedFresh(
-        examples.genesis(),
-    ).activation;
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    var fact = unknownFact(delivery.value.delivery, sent[0]);
-    fact.delivery.?.outcome = .{ .confirmed = .{
-        .timestamp = .{ .bytes = "100.000001" },
-        .metadata_observed = false,
-    } };
-    fact.delivery.?.receipt = .{
-        .key = delivery.value.delivery.key,
-        .destination = delivery.value.delivery.destination,
-        .timestamp = .{ .bytes = "100.000001" },
-        .payload_digest = delivery.value.delivery.payload.content_digest,
-        .evidence = .{ .task = sent[0], .digest = @splat(91) },
-        .basis = .captured_response,
-    };
-    fixture.index.records[1].input.step.facts.items = &.{fact};
-    const tasks = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(tasks);
-    try std.testing.expectEqual(1, tasks.len);
-    var saved = try store.read(1);
-    defer saved.deinit();
-    try std.testing.expect(try audit_control.permits(a, &fixture.index, saved.value.audit, 200));
-}
-
-const AuditDriver = struct {
-    attached: bool = true,
-    service: *Store,
-    index: *idx.Index,
-
-    pub fn rebuild(self: *@This(), allocator: std.mem.Allocator) !idx.Index {
-        var borrowed = self.index.*;
-        borrowed.arena = std.heap.ArenaAllocator.init(allocator);
-        return borrowed;
-    }
-};
-
-test "outbound explicit audit remains read only for final and recovery held obligations" {
-    var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    const sent = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
-    defer a.free(sent);
-    var delivery = try store.read(0);
-    defer delivery.deinit();
-    try fixture.addDelivery(delivery.value.delivery, sent[0]);
-    fixture.head().mode = .cancelled;
-    fixture.index.obligations[0].effective_mode = .cancelled;
-    fixture.index.obligations[0].recovery_hold = true;
-    fixture.index.recovery_hold = true;
-    var driver: AuditDriver = .{ .service = &store, .index = &fixture.index };
-    const origin: t.Origin = .{ .local = .{ .uid = 501 } };
-    const task = try audit_control.request(
-        &driver,
-        a,
-        "explicit-one",
-        origin,
-        delivery.value.delivery.key,
-    );
-    var admitted = try store.read(1);
-    defer admitted.deinit();
-    try std.testing.expect(admitted.value.audit.latest == null);
-    try std.testing.expect(try audit_control.permits(
-        a,
-        &fixture.index,
-        admitted.value.audit,
-        -999_999,
-    ));
-    try std.testing.expectEqualDeep(task, try audit_control.request(
-        &driver,
-        a,
-        "explicit-one",
-        origin,
-        delivery.value.delivery.key,
-    ));
-    const second = try audit_control.request(
-        &driver,
-        a,
-        "explicit-two",
-        origin,
-        delivery.value.delivery.key,
-    );
-    try std.testing.expect(!std.meta.eql(task, second));
-    var wrong = origin;
-    wrong.local.uid = 502;
-    try std.testing.expectError(error.OperationConflict, audit_control.request(
-        &driver,
-        a,
-        "explicit-one",
-        wrong,
-        delivery.value.delivery.key,
-    ));
-    try std.testing.expectEqual(.cancelled, fixture.head().mode);
-    try std.testing.expect(fixture.index.recovery_hold);
-}
-
 fn turnRecord(target: ?t.Id) idx.Record {
     const destination = examples.specification().destination;
     var delivery = intent(.turn, 0);
@@ -789,13 +413,13 @@ fn turnRecord(target: ?t.Id) idx.Record {
     return result;
 }
 
-fn permits(fixture: *Fixture, task: t.Id) !bool {
-    return eligibility.permits(a, &fixture.index, .{
+fn dispatched(fixture: *Fixture, task: t.Id) bool {
+    return eligibility.permits(&fixture.index, .{
         .task = task,
         .identity = @splat(9),
         .kind = .acquisition,
-        .capability = @import("../app/slack_contract.zig").notification_identity,
-    }, 300);
+        .capability = "agent.notification.deliver.v1.slack",
+    });
 }
 
 test "outbound activation follows current selected intent and ordinary dispatch admission" {
@@ -814,25 +438,27 @@ test "outbound activation follows current selected intent and ordinary dispatch 
     defer saved.deinit();
     try std.testing.expectEqual(@as(?t.Id, null), saved.value.delivery.payload.logical.obligation);
     try fixture.addDelivery(saved.value.delivery, first[0]);
-    try std.testing.expect(try permits(&fixture, first[0]));
     try fixture.advance();
     const again = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300);
     defer a.free(again);
     try std.testing.expectEqualSlices(t.Id, first, again);
-    fixture.head().activation.?.payload.frozen_text.bytes = "changed producer payload";
-    try std.testing.expect(!try permits(&fixture, first[0]));
-    fixture.head().activation = fixture.index.records[2].result.?.step.head.activation;
     fixture.index.obligations[0].recovery_hold = true;
-    try std.testing.expect(!try permits(&fixture, first[0]));
+    const recovering = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300);
+    defer a.free(recovering);
+    try std.testing.expectEqual(0, recovering.len);
     fixture.index.obligations[0].recovery_hold = false;
     fixture.index.obligations[0].effective_mode = .paused;
     const held = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300);
     defer a.free(held);
     try std.testing.expectEqual(0, held.len);
-    try std.testing.expect(!try permits(&fixture, first[0]));
     fixture.index.obligations[0].effective_mode = .active;
-    fixture.index.records[2].result.?.step.head.activation = null;
-    try std.testing.expect(!try permits(&fixture, first[0]));
+    fixture.index.records[2].result.?.step.head.activation.?.payload.frozen_text.bytes =
+        "changed producer payload";
+    try std.testing.expectError(
+        error.OperationConflict,
+        outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300),
+    );
+    try std.testing.expect(!dispatched(&fixture, first[0]));
     try std.testing.expectEqual(1, store.entries.items.len);
 }
 
@@ -853,19 +479,17 @@ test "outbound Slack conversation replies need no obligation and reuse exact pro
         saved.value.delivery.envelope.origin.derived.predecessor,
     );
     try fixture.addDelivery(saved.value.delivery, first[0]);
-    try std.testing.expect(try permits(&fixture, first[0]));
     const again = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
     defer a.free(again);
     try std.testing.expectEqualSlices(t.Id, first, again);
     fixture.index.records[2].result_digest = @splat(90);
-    try std.testing.expect(!try permits(&fixture, first[0]));
     try std.testing.expectError(
         error.OperationConflict,
         outbound.admitTurnDeliveries(&store, a, &fixture.index),
     );
 }
 
-test "outbound keeps local turns local and permits replies about cancelled obligations" {
+test "outbound keeps local turns local and admits replies about cancelled obligations" {
     var fixture = try Fixture.init();
     defer fixture.index.deinit();
     var store: Store = .{};
@@ -878,12 +502,10 @@ test "outbound keeps local turns local and permits replies about cancelled oblig
     var saved = try store.read(0);
     defer saved.deinit();
     try fixture.addDelivery(saved.value.delivery, first[0]);
-    try std.testing.expect(try permits(&fixture, first[0]));
     fixture.index.records[2].input.turn.envelope.origin = .{ .local = .{ .uid = 501 } };
     const local = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
     defer a.free(local);
     try std.testing.expectEqual(0, local.len);
-    try std.testing.expect(!try permits(&fixture, first[0]));
     try std.testing.expectEqual(1, store.entries.items.len);
 }
 
@@ -899,114 +521,133 @@ test "outbound fences superseded replies before replacement result and rejects r
     defer saved.deinit();
     try fixture.addDelivery(saved.value.delivery, first[0]);
     fixture.index.records[2].superseded = true;
-    try std.testing.expect(!try permits(&fixture, first[0]));
     const superseded = try outbound.admitTurnDeliveries(&store, a, &fixture.index);
     defer a.free(superseded);
     try std.testing.expectEqual(0, superseded.len);
     fixture.index.records[2].superseded = false;
     fixture.index.records[2].input.turn.envelope.origin.slack.channel.bytes = "Dother";
-    try std.testing.expect(!try permits(&fixture, first[0]));
     try std.testing.expectError(
         error.UnauthorizedIntent,
         outbound.admitTurnDeliveries(&store, a, &fixture.index),
     );
     fixture.index.records[2] = turnRecord(null);
     fixture.index.records[2].result.?.turn.delivery.?.destination.channel.bytes = "Dother";
-    try std.testing.expect(!try permits(&fixture, first[0]));
     try std.testing.expectError(
         error.UnauthorizedIntent,
         outbound.admitTurnDeliveries(&store, a, &fixture.index),
     );
 }
 
-test "frontier audit scans a lineage with no admitted delivery and preserves the head" {
+fn gatedFixture() !Fixture {
     var fixture = try Fixture.init();
-    defer fixture.index.deinit();
-    var store: Store = .{};
-    defer store.deinit();
-    const before = fixture.head().*;
-    const requests = [_]t.AuditRequest{.{ .frontier = {} }};
-    fixture.index.records[1].result.?.step.audit_requests.items = &requests;
-    const tasks = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, -200_000);
-    defer a.free(tasks);
-    try std.testing.expectEqual(1, tasks.len);
-    var saved = try store.read(0);
-    defer saved.deinit();
-    try std.testing.expect(saved.value == .lineage_audit);
-    try std.testing.expectEqualDeep(before, fixture.head().*);
-    const scan = saved.value.lineage_audit;
-    try std.testing.expectEqualSlices(u8, &before.lineage, &scan.lineage);
-    try std.testing.expect(scan.latest == null);
-    const checker = @import("../native/lineage_audit.zig");
-    try std.testing.expect(try checker.permits(a, &fixture.index, scan));
-    var forged = scan;
-    forged.destination.channel.bytes = "D456";
-    forged.envelope.stable_request = try checker.stableDigest(a, forged);
-    try std.testing.expect(!try checker.permits(a, &fixture.index, forged));
-    forged = scan;
-    forged.latest = .{ .bytes = "200.000000" };
-    forged.envelope.stable_request = try checker.stableDigest(a, forged);
-    try std.testing.expect(!try checker.permits(a, &fixture.index, forged));
-    const repeated = try outbound.admitAudits(&store, a, &fixture.index, fixture.target, 300_000);
-    defer a.free(repeated);
-    try std.testing.expectEqualSlices(t.Id, tasks, repeated);
-    try std.testing.expectEqual(1, store.submits);
+    errdefer fixture.index.deinit();
+    var notice = intent(.control, 0);
+    notice.key.identity = @splat(4);
+    fixture.index.records[1].result.?.step.notices.items =
+        try fixture.index.arena.allocator().dupe(t.DeliveryIntent, &.{notice});
+    fixture.index.records[2] = turnRecord(null);
+    return fixture;
 }
 
-test "activation reconciliation needs retained readback and never releases digest holds" {
+fn admitAll(fixture: *Fixture, store: *Store) ![2]usize {
+    const deliveries = try outbound.admitDeliveries(store, a, &fixture.index, fixture.target, 200);
+    defer a.free(deliveries);
+    const replies = try outbound.admitTurnDeliveries(store, a, &fixture.index);
+    defer a.free(replies);
+    return .{ deliveries.len, replies.len };
+}
+
+test "outbound admits no delivery while a recovery hold covers the namespace" {
+    var fixture = try gatedFixture();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    fixture.index.recovery_hold = true;
+    try std.testing.expectEqual([2]usize{ 0, 0 }, try admitAll(&fixture, &store));
+    try std.testing.expectEqual(0, store.submits);
+    fixture.index.recovery_hold = false;
+    try std.testing.expectEqual([2]usize{ 2, 1 }, try admitAll(&fixture, &store));
+}
+
+test "outbound admits no delivery while imported output is held" {
+    var fixture = try gatedFixture();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    fixture.index.import_hold = true;
+    try std.testing.expectEqual([2]usize{ 0, 0 }, try admitAll(&fixture, &store));
+    try std.testing.expectEqual(0, store.submits);
+    fixture.index.import_hold = false;
+    try std.testing.expectEqual([2]usize{ 2, 1 }, try admitAll(&fixture, &store));
+}
+
+test "outbound admits no delivery in a transferred namespace" {
+    var fixture = try gatedFixture();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    fixture.index.recovery_purpose = .transfer;
+    try std.testing.expectEqual([2]usize{ 0, 0 }, try admitAll(&fixture, &store));
+    try std.testing.expectEqual(0, store.submits);
+    fixture.index.recovery_purpose = .rollback;
+    try std.testing.expectEqual([2]usize{ 2, 1 }, try admitAll(&fixture, &store));
+}
+
+test "outbound admits no delivery whose key the restore cut contains" {
+    var fixture = try gatedFixture();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    const step_cut = [_]t.InputReference{.{ .task = @splat(2), .digest = @splat(2) }};
+    fixture.index.restore_cut = &step_cut;
+    try std.testing.expectEqual([2]usize{ 0, 1 }, try admitAll(&fixture, &store));
+    try std.testing.expectEqual(1, store.entries.items.len);
+    var reply = try store.read(0);
+    defer reply.deinit();
+    try std.testing.expectEqual(.turn, reply.value.delivery.key.purpose);
+    const turn_cut = [_]t.InputReference{
+        .{ .task = @splat(2), .digest = @splat(2) },
+        .{ .task = @splat(3), .digest = @splat(3) },
+    };
+    fixture.index.restore_cut = &turn_cut;
+    try std.testing.expectEqual([2]usize{ 0, 0 }, try admitAll(&fixture, &store));
+    const forged = [_]t.InputReference{.{ .task = @splat(2), .digest = @splat(99) }};
+    fixture.index.restore_cut = &forged;
+    try std.testing.expectEqual([2]usize{ 0, 0 }, try admitAll(&fixture, &store));
+    fixture.index.restore_cut = &.{};
+    try std.testing.expectEqual([2]usize{ 2, 1 }, try admitAll(&fixture, &store));
+}
+
+test "outbound returns a retained legacy delivery without rendering or resubmitting it" {
     var fixture = try Fixture.init();
     defer fixture.index.deinit();
     var store: Store = .{};
     defer store.deinit();
-    fixture.head().digest.?.hold = .uncertain_transmission;
-    fixture.head().activation = @import("native_genesis.zig").expectedFresh(
-        examples.genesis(),
-    ).activation;
-    const pending = fixture.head().*;
-    const view = @import("../native/reconciliation.zig");
-    try std.testing.expectEqual(.pending, try view.capability(a, &fixture.index, fixture.target));
+    var local = try preparation.materialize(
+        a,
+        intent(.digest, 0),
+        fixture.index.reference(1),
+        @splat(0),
+    );
+    defer local.deinit();
+    var retired = local.value;
+    retired.payload.renderer_version = preparation.legacy_renderer_version;
+    retired.payload.wire_json.bytes = "{\"channel\":\"D1\"}";
+    const request = try c.encodeOwned(struct {
+        destination: t.Destination,
+        key: t.DeliveryKey,
+        payload: t.DeliveryPayload,
+    }, a, .{ .destination = retired.destination, .key = retired.key, .payload = retired.payload });
+    defer a.free(request);
+    retired.envelope.stable_request = preparation.hash(request);
+    const bytes = try c.encodeOwned(t.Input, a, .{ .delivery = retired });
+    errdefer a.free(bytes);
+    const operation = try a.dupe(u8, retired.envelope.operation.bytes);
+    errdefer a.free(operation);
+    try store.entries.append(a, .{ .operation = operation, .bytes = bytes, .task = @splat(50) });
     const tasks = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
     defer a.free(tasks);
-    var saved = try store.read(0);
-    defer saved.deinit();
-    try fixture.addDelivery(saved.value.delivery, tasks[0]);
-    fixture.index.records[3].result = .{ .delivery = .{ .confirmed = .{
-        .timestamp = .{ .bytes = "100.0" },
-        .metadata_observed = true,
-    } } };
-    try std.testing.expectEqual(.pending, try view.capability(a, &fixture.index, fixture.target));
-    fixture.index.records[3].result.?.delivery.confirmed.metadata_observed = false;
-    try std.testing.expectEqual(.degraded, try view.capability(a, &fixture.index, fixture.target));
-    fixture.index.records[3].input = .{ .audit = .{
-        .envelope = saved.value.delivery.envelope,
-        .delivery = saved.value.delivery,
-        .ordinal = 0,
-        .oldest = .{ .bytes = "0.0" },
-        .latest = null,
-        .page_limit = 10,
-        .canary = null,
-    } };
-    fixture.index.records[3].result = .{ .audit = .{ .found = .{
-        .timestamp = .{ .bytes = "100.0" },
-    } } };
-    try std.testing.expectEqual(.qualified, try view.capability(a, &fixture.index, fixture.target));
-    const successful = fixture.index.records[3];
-    fixture.index.records[2] = successful;
-    fixture.index.records[2].task = @splat(3);
-    fixture.index.records[2].result.?.audit = .{ .inconclusive = .{ .bytes = "missing history" } };
-    const mixed = try view.inspect(a, &fixture.index, fixture.target);
-    try std.testing.expectEqual(.degraded, mixed.capability);
-    try std.testing.expect(mixed.previously_qualified);
-    try std.testing.expectEqual(.unknown, mixed.readback_order);
-    try std.testing.expectEqual(.inconclusive, mixed.failed_readback.?.outcome);
-    std.mem.swap(idx.Record, &fixture.index.records[2], &fixture.index.records[3]);
-    try std.testing.expectEqual(.degraded, try view.capability(a, &fixture.index, fixture.target));
-    fixture.index.records[2] = successful;
-    fixture.index.records[3].input = saved.value;
-    fixture.index.records[3].result = .{ .delivery = .{ .confirmed = .{
-        .timestamp = .{ .bytes = "100.0" },
-        .metadata_observed = false,
-    } } };
-    try std.testing.expectEqual(.qualified, try view.capability(a, &fixture.index, fixture.target));
-    try std.testing.expectEqualDeep(pending, fixture.head().*);
+    try std.testing.expectEqualSlices(t.Id, &.{@as(t.Id, @splat(50))}, tasks);
+    try std.testing.expectEqual(0, store.submits);
+    try std.testing.expectEqual(1, store.entries.items.len);
 }

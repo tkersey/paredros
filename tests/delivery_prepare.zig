@@ -36,13 +36,13 @@ fn materialization(allocator: std.mem.Allocator) !void {
     var first = try prepare.materialize(allocator, intent(), .{
         .task = @splat(4),
         .digest = @splat(5),
-    }, @splat(6), "B1");
+    }, @splat(6));
     defer first.deinit();
-    try prepare.verifyStored(allocator, first.value);
+    try std.testing.expectEqual(.local, try prepare.verifyStored(allocator, first.value));
     var second = try prepare.materialize(allocator, intent(), .{
         .task = @splat(7),
         .digest = @splat(8),
-    }, @splat(6), "B2");
+    }, @splat(6));
     defer second.deinit();
     try std.testing.expectEqualSlices(
         u8,
@@ -63,16 +63,53 @@ fn materialization(allocator: std.mem.Allocator) !void {
     ));
 }
 
-test "delivery preparation has stable wire identity independent of producer and current bot" {
+test "delivery preparation has stable local wire identity independent of producer" {
     try materialization(a);
     try std.testing.checkAllAllocationFailures(a, materialization, .{});
+}
+
+test "delivery preparation freezes the local message record" {
+    var logical = intent();
+    logical.payload.buttons.items = &.{.{
+        .block_id = .{ .bytes = "source-gap" },
+        .action_id = .{ .bytes = "answer" },
+        .value = .{ .bytes = "accept_gap" },
+        .label = .{ .bytes = "Accept explicit gap" },
+    }};
+    var frozen = try prepare.materialize(a, logical, .{
+        .task = @splat(4),
+        .digest = @splat(5),
+    }, @splat(6));
+    defer frozen.deinit();
+    const payload = frozen.value.payload;
+    try std.testing.expectEqual(prepare.renderer_version, payload.renderer_version);
+    try std.testing.expectEqual(prepare.hash(payload.wire_json.bytes), payload.content_digest);
+    try std.testing.expectEqual(
+        try prepare.markerDigest(a, payload.wire_json.bytes),
+        payload.marker_digest,
+    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload.wire_json.bytes, .{});
+    defer parsed.deinit();
+    const record = parsed.value.object;
+    try std.testing.expectEqualStrings(prepare.message_schema, record.get("schema").?.string);
+    try std.testing.expectEqualStrings(
+        "Three complete observations",
+        record.get("text").?.string,
+    );
+    const choice = record.get("choices").?.array.items[0].object;
+    try std.testing.expectEqualStrings("Accept explicit gap", choice.get("label").?.string);
+    try std.testing.expectEqualStrings("accept_gap", choice.get("value").?.string);
+    const metadata = record.get("metadata").?.object;
+    try std.testing.expectEqualStrings("digest", metadata.get("kind").?.string);
+    try std.testing.expectEqual(5, metadata.get("covered_observation").?.integer);
+    try std.testing.expectEqual(1, record.get("links").?.array.items.len);
 }
 
 test "delivery preparation checks seals operation and envelope before accepting retained bytes" {
     var frozen = try prepare.materialize(a, intent(), .{
         .task = @splat(4),
         .digest = @splat(5),
-    }, @splat(6), "B1");
+    }, @splat(6));
     defer frozen.deinit();
     for (0..8) |mutation| {
         var changed = frozen.value;
@@ -90,8 +127,59 @@ test "delivery preparation checks seals operation and envelope before accepting 
         try std.testing.expectError(error.InvalidPayload, prepare.verifyStored(a, changed));
     }
     var unsupported = frozen.value;
-    unsupported.payload.renderer_version = 2;
+    unsupported.payload.renderer_version = 3;
     try std.testing.expectError(error.UnsupportedRenderer, prepare.verifyStored(a, unsupported));
+}
+
+fn legacy(wire: []const u8) !c.Decoded(t.Delivery) {
+    const value = intent();
+    const payload: t.DeliveryPayload = .{
+        .renderer_version = prepare.legacy_renderer_version,
+        .logical = value.payload,
+        .content_digest = @splat(9),
+        .marker_digest = @splat(10),
+        .evidence_digest = @splat(6),
+        .wire_json = .{ .bytes = wire },
+    };
+    const request = try c.encodeOwned(struct {
+        destination: t.Destination,
+        key: t.DeliveryKey,
+        payload: t.DeliveryPayload,
+    }, a, .{ .destination = value.destination, .key = value.key, .payload = payload });
+    defer a.free(request);
+    const operation = try prepare.operation(a, value.key);
+    defer a.free(operation);
+    const bytes = try c.encodeOwned(t.Delivery, a, .{
+        .envelope = .{
+            .operation = .{ .bytes = operation },
+            .stable_request = prepare.hash(request),
+            .origin = .{ .derived = .{ .predecessor = .{
+                .task = @splat(4),
+                .digest = @splat(5),
+            } } },
+        },
+        .destination = value.destination,
+        .key = value.key,
+        .payload = payload,
+    });
+    defer a.free(bytes);
+    return c.decodeOwned(t.Delivery, a, bytes);
+}
+
+test "delivery preparation accepts retained legacy digests by seal without the retired wire" {
+    var retained = try legacy("{\"channel\":\"D1\",\"blocks\":[]}");
+    defer retained.deinit();
+    try std.testing.expectEqual(.legacy, try prepare.verifyStored(a, retained.value));
+    for (0..3) |mutation| {
+        var changed = retained.value;
+        switch (mutation) {
+            0 => changed.envelope.operation.bytes = "delivery:forged",
+            1 => changed.payload.wire_json.bytes = "{}",
+            2 => changed.envelope.origin = .{ .local = .{ .uid = 42 } },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.InvalidPayload, prepare.verifyStored(a, changed));
+    }
 }
 
 test "delivery preparation refuses inconsistent coverage and freezes route escaping" {
@@ -99,7 +187,7 @@ test "delivery preparation refuses inconsistent coverage and freezes route escap
     logical.payload.coverage.?.sequence = 4;
     try std.testing.expectError(
         error.InvalidPayload,
-        prepare.materialize(a, logical, .{ .task = @splat(4), .digest = @splat(5) }, @splat(6), ""),
+        prepare.materialize(a, logical, .{ .task = @splat(4), .digest = @splat(5) }, @splat(6)),
     );
     logical = intent();
     logical.payload.comparison.?.repository.owner.bytes = "a/b";
@@ -107,9 +195,9 @@ test "delivery preparation refuses inconsistent coverage and freezes route escap
     var frozen = try prepare.materialize(a, logical, .{
         .task = @splat(4),
         .digest = @splat(5),
-    }, @splat(6), "");
+    }, @splat(6));
     defer frozen.deinit();
-    try prepare.verifyStored(a, frozen.value);
+    _ = try prepare.verifyStored(a, frozen.value);
     try std.testing.expect(
         std.mem.indexOf(
             u8,

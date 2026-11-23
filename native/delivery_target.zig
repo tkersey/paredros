@@ -24,3 +24,15 @@ pub fn resolve(index: *const idx.Index, value: t.Delivery) ?t.Id {
     }
     return null;
 }
+
+pub fn auditTarget(index: *const idx.Index, value: t.Delivery) ?t.Id {
+    for (index.imports) |imported| {
+        const head = index.head(index.obligation(imported.obligation).?);
+        if (!std.meta.eql(value.key.lineage, head.lineage)) continue;
+        if (value.payload.logical.obligation) |original| {
+            for (imported.bundle.lineages.items) |lineage|
+                if (std.meta.eql(lineage.obligation, original)) return imported.obligation;
+        } else if (value.key.purpose == .activation) return imported.obligation;
+    }
+    return resolve(index, value);
+}

@@ -19,7 +19,8 @@ pub fn directive(
     body: t.DirectiveBody,
 ) !void {
     switch (body) {
-        .audit, .recovery_hold, .recovery_release => return,
+        .audit, .frontier_audit => return error.AuditUnavailable,
+        .recovery_hold, .recovery_release => return,
         else => {},
     }
     if (!try transfer.pendingControlsAdmitted(a, index, target))

@@ -164,7 +164,12 @@ fn appendTurn(builder: *Builder, index: *const idx.Index, record: idx.Record) !v
         if (!std.meta.eql(source, t.Reference{ .task = record.task, .digest = digest })) continue;
         const snapshot = delivery.owner_snapshot orelse continue;
         const evidence = delivery.owner_evidence orelse continue;
-        const fact = try @import("delivery_fact.zig").settlement(builder.a, snapshot, evidence);
+        const fact = try @import("delivery_fact.zig").settlement(
+            builder.a,
+            snapshot,
+            evidence,
+            .current,
+        );
         if (fact.value) |value| {
             if (value.outcome == .confirmed and try builder.reference(delivery)) confirmed = true;
         }
@@ -222,7 +227,6 @@ fn offers(a: std.mem.Allocator, head: t.Head) ![]const @FieldType(t.Proposal, "b
         .{ .directive = .{ .@"resume" = {} } },
         .{ .directive = .{ .cancel = {} } },
         .{ .directive = .{ .check = {} } },
-        .{ .directive = .{ .frontier_audit = {} } },
         .{ .directive = .{ .revert = .{ .expected_revision = head.specification.revision } } },
     });
 }

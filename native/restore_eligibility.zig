@@ -2,13 +2,12 @@ const std = @import("std");
 const t = @import("application_types");
 const idx = @import("index.zig");
 
-pub fn allows(index: *const idx.Index, delivery: t.Delivery) bool {
-    if (index.outputHeld()) return false;
+pub fn allowsKey(index: *const idx.Index, key: t.DeliveryKey) bool {
     for (index.restore_cut) |reference| {
         const record = index.record(reference.task) orelse return false;
         if (!std.meta.eql(record.input_digest, reference.digest)) return false;
-        if (inputContains(record.input, delivery.key)) return false;
-        if (record.result) |result| if (outputContains(result, delivery.key)) return false;
+        if (inputContains(record.input, key)) return false;
+        if (record.result) |result| if (outputContains(result, key)) return false;
     }
     return true;
 }

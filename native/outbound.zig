@@ -5,6 +5,7 @@ const idx = @import("index.zig");
 const preparation = @import("delivery_prepare.zig");
 const admission = @import("admission.zig");
 const eligibility = @import("eligibility.zig");
+const restore_eligibility = @import("restore_eligibility.zig");
 
 const Wanted = struct { intent: t.DeliveryIntent, producer: t.Reference };
 
@@ -16,14 +17,20 @@ pub fn admitDeliveries(
     clock_ms: i64,
 ) ![]t.Id {
     const obligation = index.obligation(target) orelse return error.UnknownObligation;
-    try @import("delivery_retirement.zig").reconcile(service, a, index, obligation);
+    if (!admissible(index)) return &.{};
     const wanted = try collect(a, index, obligation, clock_ms);
     defer a.free(wanted);
     var tasks: std.ArrayList(t.Id) = .empty;
     errdefer tasks.deinit(a);
-    for (wanted) |value|
+    for (wanted) |value| {
+        if (!restore_eligibility.allowsKey(index, value.intent.key)) continue;
         try tasks.append(a, try admitDelivery(service, a, index, obligation, value));
+    }
     return tasks.toOwnedSlice(a);
+}
+
+pub fn admissible(index: *const idx.Index) bool {
+    return !index.outputHeld() and index.recovery_purpose != .transfer;
 }
 
 fn collect(
@@ -94,6 +101,7 @@ pub fn admitTurnDeliveries(
     a: std.mem.Allocator,
     index: *const idx.Index,
 ) ![]t.Id {
+    if (!admissible(index)) return &.{};
     var tasks: std.ArrayList(t.Id) = .empty;
     errdefer tasks.deinit(a);
     for (index.records, 0..) |record, position| {
@@ -101,6 +109,7 @@ pub fn admitTurnDeliveries(
             record.result.? != .turn or record.result_digest == null or
             record.input.turn.envelope.origin != .slack) continue;
         const intent = record.result.?.turn.delivery orelse continue;
+        if (!restore_eligibility.allowsKey(index, intent.key)) continue;
         try tasks.append(a, try admitDelivery(service, a, index, null, .{
             .intent = intent,
             .producer = index.reference(position),
@@ -126,7 +135,7 @@ fn admitDelivery(
         defer input.deinit();
         if (input.value != .delivery) return error.OperationConflict;
         const original = input.value.delivery;
-        try preparation.verifyStored(a, original);
+        const stored = try preparation.verifyStored(a, original);
         if (wanted.intent.key.purpose == .turn and !std.meta.eql(
             original.envelope.origin.derived.predecessor,
             wanted.producer,
@@ -140,6 +149,7 @@ fn admitDelivery(
             wanted.intent,
             original.envelope.origin.derived.predecessor,
         );
+        if (stored == .legacy) return receipt.value.task;
         return (try service.submit(a, operation, input.value)).receipt.task;
     }
     var prepared = try preparation.materialize(
@@ -147,7 +157,6 @@ fn admitDelivery(
         wanted.intent,
         wanted.producer,
         try manifest(a, index, obligation, wanted),
-        "",
     );
     defer prepared.deinit();
     return (try service.submit(a, operation, .{ .delivery = prepared.value })).receipt.task;
@@ -237,27 +246,4 @@ fn manifest(
         .batches = .{ .items = references.items },
     };
     return admission.stableDigest(a, value);
-}
-
-pub fn admitAudits(
-    service: anytype,
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-    target: t.Id,
-    clock_ms: i64,
-) ![]t.Id {
-    return @import("audit_control.zig").schedule(service, a, index, target, clock_ms);
-}
-
-pub fn auditOperation(
-    a: std.mem.Allocator,
-    producer: t.Reference,
-    ordinal: u64,
-    key: t.DeliveryKey,
-) ![]u8 {
-    return @import("audit_control.zig").operation(a, producer, ordinal, key);
-}
-
-pub fn auditStableDigest(a: std.mem.Allocator, audit: t.Audit) !t.Digest {
-    return @import("audit_control.zig").stableDigest(a, audit);
 }

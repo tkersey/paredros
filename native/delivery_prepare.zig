@@ -1,9 +1,34 @@
 const std = @import("std");
 const c = @import("protean_contracts");
 const t = @import("application_types");
-const slack = @import("slack.zig");
 
-pub const renderer_version: u32 = 1;
+pub const renderer_version: u32 = 2;
+pub const legacy_renderer_version: u32 = 1;
+pub const message_schema = "paredros.message.v1";
+pub const Stored = enum { local, legacy };
+
+const Metadata = struct {
+    delivery_key: []const u8,
+    generation: u32,
+    issue: u32,
+    lineage_root: []const u8,
+    obligation: ?[]const u8,
+    source_epoch: u64,
+    kind: []const u8,
+    prior_observation: u64,
+    covered_observation: u64,
+    evidence_manifest: []const u8,
+    base_oid: ?[]const u8,
+    tip_oid: ?[]const u8,
+};
+const Choice = struct { label: []const u8, value: []const u8 };
+const Message = struct {
+    schema: []const u8,
+    metadata: Metadata,
+    text: []const u8,
+    links: []const []const u8,
+    choices: []const Choice,
+};
 
 pub fn hash(bytes: []const u8) t.Digest {
     var result: t.Digest = undefined;
@@ -35,16 +60,6 @@ pub fn projectIntent(delivery: t.Delivery) t.DeliveryIntent {
     };
 }
 
-pub fn binding(destination: t.Destination, bot_id: []const u8) slack.Binding {
-    return .{
-        .app_id = destination.app.bytes,
-        .team_id = destination.workspace.bytes,
-        .operator_id = destination.operator.bytes,
-        .channel_id = destination.channel.bytes,
-        .bot_id = bot_id,
-    };
-}
-
 fn route(a: std.mem.Allocator, value: []const u8) ![]const u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(a);
@@ -57,18 +72,31 @@ fn route(a: std.mem.Allocator, value: []const u8) ![]const u8 {
     return encoded.toOwnedSlice(a);
 }
 
+pub fn comparisonLink(a: std.mem.Allocator, payload: t.LogicalPayload) !?[]const u8 {
+    const comparison = payload.comparison orelse return null;
+    try oid(comparison.base);
+    try oid(comparison.tip);
+    const owner = try route(a, comparison.repository.owner.bytes);
+    defer a.free(owner);
+    const name = try route(a, comparison.repository.name.bytes);
+    defer a.free(name);
+    return try std.fmt.allocPrint(a, "https://github.com/{s}/{s}/compare/{s}...{s}", .{
+        owner, name, comparison.base, comparison.tip,
+    });
+}
+
 fn oid(value: t.Oid) !void {
     for (value) |byte| if (!std.ascii.isHex(byte)) return error.InvalidPayload;
 }
 
-fn marker(a: std.mem.Allocator, intent: t.DeliveryIntent, evidence: t.Digest) !slack.Marker {
+fn describe(a: std.mem.Allocator, intent: t.DeliveryIntent, evidence: t.Digest) !Metadata {
     const payload = intent.payload;
     if (payload.schema_version != 1 or payload.prior_sequence > payload.through_sequence)
         return error.InvalidPayload;
     if (intent.key.purpose == .digest and
         (payload.coverage == null or payload.prior_sequence == payload.through_sequence))
         return error.InvalidPayload;
-    var tip: []const u8 = "";
+    var tip: ?[]const u8 = null;
     var epoch: u64 = 0;
     if (payload.coverage) |coverage| {
         if (coverage.sequence != payload.through_sequence) return error.InvalidPayload;
@@ -78,100 +106,57 @@ fn marker(a: std.mem.Allocator, intent: t.DeliveryIntent, evidence: t.Digest) !s
             tip = try a.dupe(u8, &value);
         }
     }
-    var base: []const u8 = "";
+    var base: ?[]const u8 = null;
     if (payload.comparison) |comparison| {
         try oid(comparison.base);
         try oid(comparison.tip);
-        if (intent.key.purpose == .digest and !std.mem.eql(u8, tip, &comparison.tip))
+        if (intent.key.purpose == .digest and
+            (tip == null or !std.mem.eql(u8, tip.?, &comparison.tip)))
             return error.InvalidPayload;
         tip = try a.dupe(u8, &comparison.tip);
         base = try a.dupe(u8, &comparison.base);
     }
     return .{
-        .key = try keyDigest(a, intent.key),
+        .delivery_key = try a.dupe(u8, &std.fmt.bytesToHex(try keyDigest(a, intent.key), .lower)),
         .generation = intent.key.generation,
         .issue = payload.issue,
-        .content = @splat(0),
-        .lineage = try a.dupe(u8, &std.fmt.bytesToHex(intent.key.lineage, .lower)),
+        .lineage_root = try a.dupe(u8, &std.fmt.bytesToHex(intent.key.lineage, .lower)),
         .obligation = if (payload.obligation) |id|
             try a.dupe(u8, &std.fmt.bytesToHex(id, .lower))
         else
-            "none",
-        .source_epoch = try std.fmt.allocPrint(a, "{d}", .{epoch}),
-        .kind = switch (intent.key.purpose) {
-            .activation => .activation,
-            .digest => .digest,
-            .question => .question,
-            .control => .directive,
-            .turn, .failure => .reply,
-        },
-        .prior = payload.prior_sequence,
-        .covered = payload.through_sequence,
-        .evidence = evidence,
+            null,
+        .source_epoch = epoch,
+        .kind = @tagName(intent.key.purpose),
+        .prior_observation = payload.prior_sequence,
+        .covered_observation = payload.through_sequence,
+        .evidence_manifest = try a.dupe(u8, &std.fmt.bytesToHex(evidence, .lower)),
         .base_oid = base,
         .tip_oid = tip,
     };
 }
 
-pub fn wire(
-    a: std.mem.Allocator,
-    intent: t.DeliveryIntent,
-    evidence: t.Digest,
-    bot_id: []const u8,
-) !slack.Prepared {
+pub fn wire(a: std.mem.Allocator, intent: t.DeliveryIntent, evidence: t.Digest) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const buttons = try scratch.alloc(slack.Button, intent.payload.buttons.items.len);
-    for (buttons, intent.payload.buttons.items) |*target, source| target.* = .{
-        .block_id = source.block_id.bytes,
-        .action_id = source.action_id.bytes,
-        .value = source.value.bytes,
-        .label = source.label.bytes,
+    const buttons = intent.payload.buttons.items;
+    const choices = try scratch.alloc(Choice, buttons.len);
+    for (choices, buttons) |*choice, button| choice.* = .{
+        .label = button.label.bytes,
+        .value = button.value.bytes,
     };
-    var links: []const slack.Link = &.{};
-    if (intent.payload.comparison) |comparison| {
-        const url = try std.fmt.allocPrint(
-            scratch,
-            "https://github.com/{s}/{s}/compare/{s}...{s}",
-            .{
-                try route(scratch, comparison.repository.owner.bytes),
-                try route(scratch, comparison.repository.name.bytes),
-                comparison.base,
-                comparison.tip,
-            },
-        );
-        links = try scratch.dupe(slack.Link, &.{.{ .label = "Comparison", .url = url }});
-    }
-    return slack.prepareLinked(
-        a,
-        binding(intent.destination, bot_id),
-        intent.payload.frozen_text.bytes,
-        buttons,
-        links,
-        try marker(scratch, intent, evidence),
-    );
-}
-
-pub fn verify(
-    a: std.mem.Allocator,
-    destination: t.Destination,
-    key: t.DeliveryKey,
-    payload: t.DeliveryPayload,
-    bot_id: []const u8,
-) !slack.Prepared {
-    if (payload.renderer_version != renderer_version) return error.UnsupportedRenderer;
-    var prepared = try wire(a, .{
-        .destination = destination,
-        .key = key,
-        .payload = payload.logical,
-    }, payload.evidence_digest, bot_id);
-    errdefer prepared.deinit();
-    if (!std.mem.eql(u8, prepared.body, payload.wire_json.bytes) or
-        !std.meta.eql(prepared.marker.content, payload.content_digest) or
-        !std.meta.eql(try markerDigest(a, prepared.body), payload.marker_digest))
-        return error.InvalidPayload;
-    return prepared;
+    const link = try comparisonLink(scratch, intent.payload);
+    const links: []const []const u8 = if (link) |url|
+        try scratch.dupe([]const u8, &.{url})
+    else
+        &.{};
+    return std.json.Stringify.valueAlloc(a, Message{
+        .schema = message_schema,
+        .metadata = try describe(scratch, intent, evidence),
+        .text = intent.payload.frozen_text.bytes,
+        .links = links,
+        .choices = choices,
+    }, .{});
 }
 
 pub fn operation(a: std.mem.Allocator, key: t.DeliveryKey) ![]u8 {
@@ -180,25 +165,44 @@ pub fn operation(a: std.mem.Allocator, key: t.DeliveryKey) ![]u8 {
     });
 }
 
-pub fn verifyStored(a: std.mem.Allocator, delivery: t.Delivery) !void {
-    if (delivery.envelope.version != 1 or delivery.envelope.origin != .derived)
-        return error.InvalidPayload;
-    var prepared = try verify(a, delivery.destination, delivery.key, delivery.payload, "");
-    defer prepared.deinit();
-    const expected_operation = try operation(a, delivery.key);
-    defer a.free(expected_operation);
+fn stableRequest(
+    a: std.mem.Allocator,
+    destination: t.Destination,
+    key: t.DeliveryKey,
+    payload: t.DeliveryPayload,
+) !t.Digest {
     const request = try c.encodeOwned(struct {
         destination: t.Destination,
         key: t.DeliveryKey,
         payload: t.DeliveryPayload,
-    }, a, .{
-        .destination = delivery.destination,
-        .key = delivery.key,
-        .payload = delivery.payload,
-    });
+    }, a, .{ .destination = destination, .key = key, .payload = payload });
     defer a.free(request);
+    return hash(request);
+}
+
+pub fn verifyStored(a: std.mem.Allocator, delivery: t.Delivery) !Stored {
+    if (delivery.envelope.version != 1 or delivery.envelope.origin != .derived)
+        return error.InvalidPayload;
+    const stored: Stored = switch (delivery.payload.renderer_version) {
+        renderer_version => .local,
+        legacy_renderer_version => .legacy,
+        else => return error.UnsupportedRenderer,
+    };
+    const expected_operation = try operation(a, delivery.key);
+    defer a.free(expected_operation);
     if (!std.mem.eql(u8, delivery.envelope.operation.bytes, expected_operation) or
-        !std.meta.eql(delivery.envelope.stable_request, hash(request))) return error.InvalidPayload;
+        !std.meta.eql(
+            delivery.envelope.stable_request,
+            try stableRequest(a, delivery.destination, delivery.key, delivery.payload),
+        )) return error.InvalidPayload;
+    if (stored == .legacy) return stored;
+    const expected = try wire(a, projectIntent(delivery), delivery.payload.evidence_digest);
+    defer a.free(expected);
+    if (!std.mem.eql(u8, expected, delivery.payload.wire_json.bytes) or
+        !std.meta.eql(hash(expected), delivery.payload.content_digest) or
+        !std.meta.eql(try markerDigest(a, expected), delivery.payload.marker_digest))
+        return error.InvalidPayload;
+    return stored;
 }
 
 pub fn materialize(
@@ -206,29 +210,23 @@ pub fn materialize(
     intent: t.DeliveryIntent,
     producer: t.Reference,
     evidence: t.Digest,
-    bot_id: []const u8,
 ) !c.Decoded(t.Delivery) {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var prepared = try wire(scratch, intent, evidence, bot_id);
-    defer prepared.deinit();
+    const body = try wire(scratch, intent, evidence);
     const payload: t.DeliveryPayload = .{
+        .renderer_version = renderer_version,
         .logical = intent.payload,
-        .content_digest = prepared.marker.content,
-        .marker_digest = try markerDigest(scratch, prepared.body),
+        .content_digest = hash(body),
+        .marker_digest = try markerDigest(scratch, body),
         .evidence_digest = evidence,
-        .wire_json = .{ .bytes = prepared.body },
+        .wire_json = .{ .bytes = body },
     };
-    const request = try c.encodeOwned(struct {
-        destination: t.Destination,
-        key: t.DeliveryKey,
-        payload: t.DeliveryPayload,
-    }, scratch, .{ .destination = intent.destination, .key = intent.key, .payload = payload });
     const encoded = try c.encodeOwned(t.Delivery, scratch, .{
         .envelope = .{
             .operation = .{ .bytes = try operation(scratch, intent.key) },
-            .stable_request = hash(request),
+            .stable_request = try stableRequest(scratch, intent.destination, intent.key, payload),
             .origin = .{ .derived = .{ .predecessor = producer } },
         },
         .destination = intent.destination,

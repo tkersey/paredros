@@ -61,6 +61,19 @@ pub const Value = struct {
     encoding: enum { contract, json },
     bytes: c.Bytes(null),
 };
+pub fn sourceInput(a: std.mem.Allocator, value: Value) !t.Input {
+    if (!std.mem.eql(u8, value.schema.bytes, t.input_schema_id))
+        return error.UnsupportedContinuityInput;
+    return switch (value.encoding) {
+        .contract => (try c.decodeOwned(t.Input, a, value.bytes.bytes)).value,
+        .json => try native.values.fromJson(
+            t.Input,
+            a,
+            (try native.json.parseAsset(a, value.bytes.bytes, value.bytes.bytes.len)).value,
+        ),
+    };
+}
+
 pub const SourceAttempt = struct {
     id: t.Digest,
     response: ?c.Bytes(null),

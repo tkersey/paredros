@@ -6,7 +6,8 @@ const retained = @import("retained.zig");
 const admission = @import("admission.zig");
 const delivery = @import("delivery_fact.zig");
 const continuity = @import("continuity.zig");
-const interaction = @import("interaction_evidence.zig");
+const legacy = @import("legacy.zig");
+const delivery_target = @import("delivery_target.zig");
 const measure = @import("render_measure.zig");
 
 pub fn step(
@@ -131,11 +132,11 @@ fn directives(
 }
 
 pub fn factTarget(index: *const idx.Index, record: idx.Record) ?t.Id {
-    if (interaction.target(index, record)) |selected| return selected;
+    if (legacy.interactionTarget(index, record)) |selected| return selected;
     return switch (record.input) {
         .step => |value| value.obligation,
-        .delivery => |value| @import("delivery_target.zig").resolve(index, value),
-        .audit => |value| @import("audit_control.zig").deliveryTarget(index, value.delivery),
+        .delivery => |value| delivery_target.resolve(index, value),
+        .audit => |value| delivery_target.auditTarget(index, value.delivery),
         .turn => |value| value.target,
         .genesis,
         .directive,
@@ -200,6 +201,7 @@ pub fn readyFact(record: idx.Record) bool {
     const snapshot = record.owner_snapshot orelse return false;
     if (snapshot.outcome == .completed or snapshot.outcome == .failed or
         snapshot.outcome == .cancelled) return true;
+    if (delivery.retiredDigest(record.input.delivery)) return true;
     const evidence = record.owner_evidence orelse return false;
     if (evidence.status == .unknown) return true;
     for (snapshot.attempts.items) |attempt| if (attempt.capture) |capture| {
@@ -216,7 +218,7 @@ fn settlement(
 ) !t.Settlement {
     const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
     const bytes = try c.encodeOwned(retained.Snapshot, a, snapshot);
-    const bound_interaction = try interaction.settlement(a, index, record);
+    const bound_interaction = try legacy.interaction(a, index, record);
     const disposition = if (bound_interaction) |value|
         value
     else if (record.input == .delivery)
@@ -224,6 +226,7 @@ fn settlement(
             a,
             snapshot,
             record.owner_evidence orelse return error.MissingOwnerEvidence,
+            .current,
         )).value
     else if (record.input == .audit) try auditFact(record) else null;
     return .{

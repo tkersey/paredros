@@ -147,30 +147,20 @@ fn finish(fixture: *Fixture, task: t.Id) !void {
 
 fn verifyReleasedEligibility(index: *@import("../native/index.zig").Index, target: t.Id) !void {
     const gate = @import("../native/restore_eligibility.zig");
-    const preparation = @import("../native/delivery_prepare.zig");
+    const outbound = @import("../native/outbound.zig");
     const obligation = index.obligation(target).?;
     const producer = index.reference(obligation.chain[obligation.chain.len - 1]);
-    const a = index.arena.allocator();
-    var intent = index.head(obligation).activation.?;
-    var old = try preparation.materialize(a, intent, producer, @splat(0), "B1");
-    defer old.deinit();
-    try std.testing.expect(!gate.allows(index, old.value));
-    intent.key.generation += 1;
-    var generation = try preparation.materialize(a, intent, producer, @splat(0), "B1");
-    defer generation.deinit();
-    try std.testing.expect(!gate.allows(index, generation.value));
-    intent.key.purpose = .digest;
-    intent.key.identity = index.record(producer.task).?.input.step.envelope.stable_request;
-    intent.key.generation = 0;
-    intent.payload.obligation = target;
-    intent.payload.prior_sequence = 0;
-    intent.payload.through_sequence = 1;
-    intent.payload.coverage = .{ .sequence = 1, .epoch = 0, .tip = @splat('a') };
-    var fresh = try preparation.materialize(a, intent, producer, @splat(0), "B1");
-    defer fresh.deinit();
-    try std.testing.expect(gate.allows(index, fresh.value));
+    var key = index.head(obligation).activation.?.key;
+    try std.testing.expect(!gate.allowsKey(index, key));
+    key.generation += 1;
+    try std.testing.expect(!gate.allowsKey(index, key));
+    key.purpose = .digest;
+    key.identity = index.record(producer.task).?.input.step.envelope.stable_request;
+    key.generation = 0;
+    try std.testing.expect(gate.allowsKey(index, key));
+    try std.testing.expect(outbound.admissible(index));
     index.recovery_hold = true;
-    try std.testing.expect(!gate.allows(index, fresh.value));
+    try std.testing.expect(!outbound.admissible(index));
 }
 
 test "native restore begin survives reopen and release folds held obligations once" {

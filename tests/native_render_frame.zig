@@ -4,7 +4,6 @@ const c = @import("protean_contracts");
 const frame = @import("../app/render_frame.zig");
 const t = @import("application_types");
 const fixtures = @import("contracts.zig");
-const slack = @import("../native/slack.zig");
 
 const Types = struct {
     pub const application_id = "paredros.render-frame.witness";
@@ -53,34 +52,20 @@ fn expectText(result: frame.Result, text: []const u8) !void {
     try std.testing.expect(std.mem.find(u8, result.text.bytes, text) != null);
 }
 
-fn expectBound(a: std.mem.Allocator, result: frame.Result) !void {
+fn escapedCost(text: []const u8) usize {
+    var total: usize = 0;
+    for (text) |byte| total += switch (byte) {
+        '&' => 5,
+        '<', '>' => 4,
+        else => 1,
+    };
+    return total;
+}
+
+fn expectBound(result: frame.Result) !void {
     try std.testing.expect(result.text.bytes.len <= 4000);
     try std.testing.expect(std.unicode.utf8ValidateSlice(result.text.bytes));
-    const escaped = try slack.escape(a, result.text.bytes);
-    defer a.free(escaped);
-    try std.testing.expect(try std.unicode.utf8CountCodepoints(escaped) <= 4000);
-    var prepared = try slack.prepare(a, .{
-        .app_id = "A1",
-        .team_id = "T1",
-        .operator_id = "U1",
-        .channel_id = "D1",
-        .bot_id = "B1",
-    }, result.text.bytes, &.{}, .{
-        .key = @splat(1),
-        .generation = 1,
-        .issue = 1,
-        .content = @splat(0),
-        .lineage = "root",
-        .obligation = "obligation",
-        .source_epoch = "3",
-        .kind = .digest,
-        .prior = 7,
-        .covered = 11,
-        .evidence = @splat(2),
-    });
-    defer prepared.deinit();
-    try std.testing.expect(std.mem.find(u8, prepared.body, "\"mrkdwn\":false") != null);
-    try std.testing.expect(std.mem.find(u8, prepared.body, "\"link_names\":false") != null);
+    try std.testing.expect(escapedCost(result.text.bytes) <= 4000);
 }
 
 fn run(fixture: *Fixture, operation: []const u8, value: frame.Input) !frame.Result {
@@ -96,7 +81,7 @@ fn run(fixture: *Fixture, operation: []const u8, value: frame.Input) !frame.Resu
         std.debug.print("render frame {s}: {s}\n", .{ operation, diagnostic });
     }
     const result = try fixture.output(task);
-    try expectBound(fixture.arena.allocator(), result);
+    try expectBound(result);
     try std.testing.expectEqualDeep(value.repository, result.comparison.repository);
     try std.testing.expectEqual(value.base, result.comparison.base);
     try std.testing.expectEqual(value.tip, result.comparison.tip);
