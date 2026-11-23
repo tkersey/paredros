@@ -44,11 +44,9 @@ jobs:
             groups: source,emitted
           - lane: providers
             groups: providers
-          - lane: product
-            groups: product
     env:
       ZIG_DEBUG_CMD: '1'
-    steps:
+    steps: &lane-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -81,6 +79,18 @@ jobs:
             .zig-cache/p
             .protean-native/inputs
           key: paredros-inputs-${{ matrix.lane }}-${{ hashFiles('build.zig.zon') }}
+  product:
+    name: Qualification / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: product
+            groups: product
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *lane-steps
   native:
     name: native
     needs: [qualify, tiger-style]
@@ -104,5 +114,5 @@ jobs:
             exit 1
           fi
           elapsed=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '(now - (.created_at | fromdate)) | floor')
-          echo "Complete workflow from trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Gated qualification from trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$elapsed" -le 600
