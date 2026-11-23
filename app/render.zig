@@ -90,6 +90,7 @@ pub fn emit(
         .{
             .input = input,
             .prefix = try b.update(try c.literal(Prefix, .{ .epoch = 0, .through = 0 }), .{
+                .bytes = try methodState(c, b, head),
                 .epoch = try b.field(told, "epoch"),
                 .through = try b.field(told, "sequence"),
             }),
@@ -104,6 +105,18 @@ pub fn emit(
         try none.ret(head),
     )));
     return function;
+}
+
+fn methodState(c: protean.Context, b: anytype, head: a.Value(t.Head)) !a.Value(u64) {
+    const selected = try b.field(head, "method");
+    const ordinary = try b.caseOf(selected, "ordinary");
+    const retained = try b.caseOf(selected, "retained");
+    const rb = retained.body();
+    const state = try rb.field(retained.payload(), "state");
+    return b.match(selected, .{
+        .ordinary = try ordinary.ret(try ordinary.body().constant(u64, 0)),
+        .retained = try retained.ret(try measure(c, rb, @FieldType(Retained, "state"), state)),
+    });
 }
 
 fn add(c: protean.Context, b: anytype, x: a.Value(u64), y: a.Value(u64)) !a.Value(u64) {

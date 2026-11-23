@@ -660,6 +660,26 @@ test "native retained render updates bounded state and filters candidate highlig
     try std.testing.expectEqual(0, scenario.calls);
 }
 
+test "native retained render reserves method state within its whole batch bound" {
+    var scenario: Scenario = .{};
+    var f: Fixture = .{};
+    defer f.deinit();
+    f.profile.environment = &scenario;
+    try f.initWithGrants(method_grants);
+    const values = try commits(f.arena.allocator(), 2);
+    const facts = [_]Fact{ batch(1, 0, 1, values[0..1]), batch(2, 1, 2, values[1..2]) };
+    var value = try methodInput(&f, facts[1], .{ .output_state = "next method state" });
+    value.step.batches.items = &facts;
+    const encoded = try cts.encodeOwned(Batches, f.arena.allocator(), .{ .items = &facts });
+    value.head.specification.policies.render_input_bytes = encoded.len;
+    value.step.previous = value.head;
+    const result = try execute(&f, "retained-state-bound", value);
+    try std.testing.expect(result.method_disposition == null);
+    try std.testing.expectEqualStrings("next method state", result.method.retained.state.bytes);
+    _ = try methodFrame(value.head, result, facts[0]);
+    try std.testing.expectEqual(0, scenario.calls);
+}
+
 test "native retained render before-call fault permits one ordinary completion" {
     var scenario: Scenario = .{};
     var f: Fixture = .{};

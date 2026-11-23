@@ -449,10 +449,17 @@ fn advanceCoverage(
     const advances = try sb.branch();
     const stale = try sb.branch();
     const valid = try validCoverage(c, advances, head, payload, some.payload());
+    const paced = try retryInstant(c, advances, head);
+    const waiting = try advances.field(head, "render_not_before_ms");
     const next = try advances.update(head, .{
         .told = some.payload(),
         .told_receipt = try advances.variant(try c.schema(?t.Receipt), "some", receipt),
         .digest = try c.literal(?t.DigestIntent, null),
+        .render_not_before_ms = try advances.select(
+            try advances.less(waiting, paced),
+            paced,
+            waiting,
+        ),
     });
     const result = try sb.conditional(
         growing,

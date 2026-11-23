@@ -297,6 +297,11 @@ fn accounted(previous: t.Head, current: t.Settlement) t.Head {
     return result;
 }
 
+fn confirmationPace(previous: t.Head) i64 {
+    const interval = previous.specification.policies.notification_interval_ms;
+    return previous.clock_ms + @as(i64, @intCast(interval));
+}
+
 test "native settlements advance only exact contiguous confirmed coverage and retain receipt" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
@@ -308,6 +313,7 @@ test "native settlements advance only exact contiguous confirmed coverage and re
     expected.told = intent().payload.coverage.?;
     expected.told_receipt = receipt();
     expected.digest = null;
+    expected.render_not_before_ms = confirmationPace(previous);
     try std.testing.expectEqualDeep(expected, try fixture.output(try fixture.execute("confirmed", .{
         .head = previous,
         .facts = .{ .items = &.{current} },
@@ -513,6 +519,7 @@ test "native settlements use exclusive prior sequence at the maximum frontier wi
             expected.told = previous.observed;
             expected.told_receipt = current.delivery.?.receipt;
             expected.digest = null;
+            expected.render_not_before_ms = confirmationPace(previous);
         }
         const operation = if (advancing) "last-prefix" else "empty-prefix";
         const task = try fixture.execute(operation, .{

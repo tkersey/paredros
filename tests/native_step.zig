@@ -144,6 +144,88 @@ test "native bounded step prioritizes source except for backlog fairness and pro
     try std.testing.expectEqualDeep(head.observed, folded.head.observed);
 }
 
+fn pending(head: t.Head) t.DigestIntent {
+    return .{ .hold = .none, .not_before_ms = 0, .delivery = .{
+        .destination = head.specification.destination,
+        .key = .{
+            .lineage = head.lineage,
+            .purpose = .digest,
+            .identity = @splat(3),
+            .generation = 0,
+        },
+        .payload = .{
+            .obligation = @splat(1),
+            .specification_revision = head.specification.revision,
+            .prior_sequence = 0,
+            .through_sequence = 1,
+            .frozen_text = .{ .bytes = "verified digest" },
+            .prompt = null,
+            .supersedes = null,
+            .coverage = .{ .sequence = 1, .epoch = 0, .tip = @splat('b') },
+        },
+    } };
+}
+
+fn confirmed(intent: t.DeliveryIntent) t.Settlement {
+    const timestamp: t.Timestamp = .{ .bytes = "1700000000.000001" };
+    return .{
+        .reference = .{ .task = @splat(7), .revision = 2, .digest = @splat(7) },
+        .kind = .delivery,
+        .accounting = .{},
+        .delivery = .{
+            .admitted = .{
+                .envelope = fixtures.genesis().envelope,
+                .destination = intent.destination,
+                .key = intent.key,
+                .payload = .{
+                    .logical = intent.payload,
+                    .content_digest = @splat(6),
+                    .marker_digest = @splat(5),
+                    .evidence_digest = @splat(7),
+                    .wire_json = .{ .bytes = "{}" },
+                },
+            },
+            .outcome = .{ .confirmed = .{ .timestamp = timestamp, .metadata_observed = true } },
+            .receipt = .{
+                .key = intent.key,
+                .destination = intent.destination,
+                .timestamp = timestamp,
+                .payload_digest = @splat(6),
+                .evidence = .{ .task = @splat(9), .digest = @splat(10) },
+                .basis = .captured_response,
+            },
+        },
+    };
+}
+
+test "native bounded step renders the next prefix only after folding its confirmation" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    var head = genesis.expectedFresh(fixtures.genesis());
+    head.observed = .{ .sequence = 2, .epoch = 0, .tip = @splat('c') };
+    head.next_due_ms = 1_000_000;
+    head.specification.policies.notification_interval_ms = 0;
+    head.digest = pending(head);
+    const first = backlog(head);
+    var second = backlog(head);
+    second.value.sequence = 2;
+    second.value.base = @splat('b');
+    second.value.tip = @splat('c');
+    var next = input(head);
+    next.facts = .{ .items = &.{confirmed(head.digest.?.delivery)} };
+    next.batches = .{ .items = &.{ first, second } };
+    const folded = try fixture.output(try fixture.execute("confirm-fold", next));
+    try std.testing.expectEqual(1, folded.head.told.sequence);
+    try std.testing.expect(folded.head.digest == null);
+    try std.testing.expectEqual(head.phase, folded.head.phase);
+    next = input(folded.head);
+    next.batches = .{ .items = &.{second} };
+    const drained = try fixture.output(try fixture.execute("next-prefix", next));
+    try std.testing.expectEqual(.render, drained.head.phase);
+    try std.testing.expectEqual(1, drained.head.told.sequence);
+}
+
 test "native bounded step corrects skipped slots and regression while preserving backoff" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
