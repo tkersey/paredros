@@ -241,7 +241,7 @@ fn execute(
     const operation_id = try operation(request);
     if (request.command != .transfer_export and request.command != .transfer_import and
         request.command != .audit_delivery)
-        try admissionOpen(a, driver, operation_id, producesOutput(request));
+        try admissionOpen(a, driver, operation_id, request.command == .ask);
     var response = if (request.command == .transfer_export or request.command == .transfer_import)
         try continuityCommand(a, driver, config, origin, request, environment)
     else
@@ -284,10 +284,6 @@ fn readOnly(request: Request) bool {
         => true,
         else => false,
     };
-}
-
-fn producesOutput(request: Request) bool {
-    return request.command == .ask or request.command == .monitor_add;
 }
 
 fn admissionOpen(
@@ -465,7 +461,6 @@ fn confirmProposal(
     const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
     if (prior) |task_id| return task_id;
     const selected = try commands.proposal(&index, confirmation);
-    if (selected.body == .genesis) try ingress_policy.output(&index);
     if (selected.body == .directive) try validateDirective(
         a,
         driver,

@@ -1887,3 +1887,83 @@ test "native continuity rebuild keeps the imported lineage over an exact local r
     _ = try to.execute("monitor-fork", .{ .genesis = forked });
     try std.testing.expectError(error.DuplicateLineage, destination.rebuild(a));
 }
+
+fn controlMonitor(
+    a: std.mem.Allocator,
+    driver: *Driver,
+    operation: []const u8,
+    wording: []const u8,
+) !@import("protean_native").json.Value {
+    const bytes = try control.encode(a, .{
+        .version = 1,
+        .operation = .{ .bytes = operation },
+        .command = .{ .monitor_add = .{ .wording = .{ .bytes = wording }, .interval_ms = null } },
+    });
+    const reply = try control.dispatch(a, driver, config(), 501, bytes);
+    return (try @import("protean_native").json.parse(a, reply, .{})).value;
+}
+
+fn controlTask(a: std.mem.Allocator, driver: *Driver, operation: []const u8) !t.Id {
+    const reply = (try controlMonitor(a, driver, operation, "watch")).object;
+    try std.testing.expectEqualStrings("admitted", reply.get("status").?.string);
+    const task = reply.get("data").?.object.get("task").?.string;
+    return @import("../native/cli.zig").hex(t.Id, task);
+}
+
+fn controlRefused(
+    a: std.mem.Allocator,
+    driver: *Driver,
+    operation: []const u8,
+    wording: []const u8,
+    expected: []const u8,
+) !void {
+    const reply = (try controlMonitor(a, driver, operation, wording)).object;
+    try std.testing.expectEqualStrings("rejected", reply.get("status").?.string);
+    try std.testing.expectEqualStrings(expected, reply.get("error").?.string);
+}
+
+fn controlSource(f: *Fixture, clock: *u8) !transfer.OwnedBundle {
+    const a = f.arena.allocator();
+    var original: Driver = .{
+        .service = &f.service.?,
+        .clock = .{ .context = clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try original.attach(a);
+    defer original.detach();
+    const target = try controlTask(a, &original, "monitor-retry");
+    try finish(f, target);
+    return transfer.capture(&original, a, source(f), .snapshot);
+}
+
+test "native continuity control monitor add retried under the import hold returns the import" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var clock: u8 = 0;
+    var bundle = try controlSource(&from, &clock);
+    defer bundle.deinit();
+    try from.close();
+    try to.init();
+    const a = to.arena.allocator();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, bundle.value);
+    try expectImportHold(a, &destination, true);
+    const before = try recordCount(a, &destination);
+    try std.testing.expectEqualDeep(imported, try controlTask(a, &destination, "monitor-retry"));
+    try controlRefused(a, &destination, "monitor-retry", "watch more", "ContinuityImportHeld");
+    try controlRefused(a, &destination, "monitor-fresh", "watch", "ContinuityImportHeld");
+    try std.testing.expectEqual(before, try recordCount(a, &destination));
+    _ = try destination.directive(a, "monitor-reused", origin, imported, .{ .pause = {} });
+    try controlRefused(a, &destination, "monitor-reused", "watch", "OperationConflict");
+    try std.testing.expectEqualDeep(imported, try controlTask(a, &destination, "monitor-retry"));
+    try expectImportHold(a, &destination, true);
+}

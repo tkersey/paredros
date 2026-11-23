@@ -4,6 +4,7 @@ const t = @import("application_types");
 const idx = @import("index.zig");
 const admission = @import("admission.zig");
 const dialogue = @import("dialogue.zig");
+const ingress_policy = @import("ingress_policy.zig");
 
 pub const TurnRequest = struct {
     destination: t.Destination,
@@ -109,6 +110,7 @@ fn admitGenesis(
     };
     const Materializer = struct {
         driver: @TypeOf(driver),
+        index: *const idx.Index,
         specification: t.Specification,
         anchor_now: bool,
 
@@ -117,6 +119,7 @@ fn admitGenesis(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
+            try ingress_policy.output(self.index);
             const envelope = genesisEnvelope(requested);
             const clock_ms = try self.driver.clock.now(self.driver.clock.context);
             var frozen = self.specification;
@@ -135,6 +138,7 @@ fn admitGenesis(
     if (try importedGenesis(scratch, &index, request)) |task| return task;
     const result = try admission.admit(driver.service, scratch, request, Materializer{
         .driver = driver,
+        .index = &index,
         .specification = specification,
         .anchor_now = anchor_now,
     });

@@ -219,7 +219,7 @@ fn admitInteraction(
     if (selected) |value| {
         return confirm(driver, a, &index, name, authenticated, value, evidence) catch |err| {
             if (!refusable(err)) return err;
-            try ingress_policy.output(index);
+            try ingress_policy.output(&index);
             return refusal(driver, a, config, name, evidence, @errorName(err));
         };
     }
@@ -258,7 +258,6 @@ fn confirm(
         const prior = try commands.confirmed(driver, a, index, name, authenticated, confirmation);
         if (prior) |task| return task;
         const offered = try commands.proposal(index, confirmation);
-        if (offered.body == .genesis) try ingress_policy.output(index);
         if (offered.body == .directive) try ingress_policy.directive(
             a,
             index,
