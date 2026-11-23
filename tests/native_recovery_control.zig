@@ -180,12 +180,98 @@ test "native recovery control validates bindings before mutation and replays exa
     const data = status.object.get("data").?.object;
     try std.testing.expect(!data.get("recovery_hold").?.bool);
     try std.testing.expect(!data.get("import_hold").?.bool);
-    const saved = try native.values.fromJson(?t.InputReference, a, data.get("recovery").?);
-    try std.testing.expectEqualDeep(reference, saved.?);
-    const cut = try native.values.fromJson(
-        c.Vector(t.InputReference, null),
-        a,
-        data.get("restore_cut").?,
+    const saved = data.get("recovery").?.object;
+    try std.testing.expectEqualDeep(reference.task, try cli.hex(
+        t.Id,
+        try native.json.text(saved.get("task").?),
+    ));
+    try std.testing.expectEqualDeep(reference.digest, try cli.hex(
+        t.Digest,
+        try native.json.text(saved.get("digest").?),
+    ));
+    try std.testing.expect(try cutSize(data) > 0);
+}
+
+const large_cut_directives = 1_400;
+
+fn seedDirectives(fixture: *Fixture, target: t.Id) !void {
+    var prior: ?t.InputReference = null;
+    for (1..large_cut_directives + 1) |ordinal| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const operation = try std.fmt.allocPrint(a, "large-cut-directive:{d}", .{ordinal});
+        const input: t.Input = .{ .directive = .{
+            .envelope = .{
+                .operation = .{ .bytes = operation },
+                .stable_request = @import("../native/index.zig").digest(operation),
+                .origin = .{ .local = .{ .uid = 501 } },
+            },
+            .obligation = target,
+            .ordinal = ordinal,
+            .predecessor = prior,
+            .body = .pause,
+        } };
+        const id = try fixture.execute(operation, input);
+        const bytes = try c.encodeOwned(t.Input, a, input);
+        prior = .{ .task = id, .digest = @import("../native/index.zig").digest(bytes) };
+    }
+}
+
+fn cutSize(data: std.json.ObjectMap) !u64 {
+    return std.fmt.parseInt(u64, try native.json.text(data.get("restore_cut_size").?), 10);
+}
+
+fn observedRecovery(a: std.mem.Allocator, driver: *Driver) !std.json.ObjectMap {
+    const reply = try call(a, driver, config(), null, .{ .recovery_status = {} });
+    const status = try native.json.text(reply.object.get("status").?);
+    try std.testing.expectEqualStrings("observed", status);
+    return reply.object.get("data").?.object;
+}
+
+fn cliRelease(a: std.mem.Allocator, driver: *Driver, recovery: std.json.ObjectMap) !t.Id {
+    const request = try cli.request(a, &.{
+        "recovery",
+        "release",
+        try native.json.text(recovery.get("task").?),
+        try native.json.text(recovery.get("digest").?),
+        "--exclusive-owner",
+    }, "large-cut-release");
+    const response = try control.dispatch(a, driver, config(), 501, request);
+    return taskId((try native.json.parse(a, response, .{})).value);
+}
+
+test "native recovery status stays framed for a large cut and its boundary releases via CLI" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try fixture.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    try seedDirectives(&fixture, target);
+    var clock: u8 = 0;
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    const marker = try taskId(try call(a, &driver, config(), "large-cut-begin", .{
+        .recovery_begin = {},
+    }));
+    const held = try observedRecovery(a, &driver);
+    try std.testing.expect(held.get("recovery_hold").?.bool);
+    try std.testing.expect(try cutSize(held) > large_cut_directives);
+    const recovery = held.get("recovery").?.object;
+    try std.testing.expectEqualDeep(marker, try cli.hex(
+        t.Id,
+        try native.json.text(recovery.get("task").?),
+    ));
+    _ = try cliRelease(a, &driver, recovery);
+    const released = try observedRecovery(a, &driver);
+    try std.testing.expect(!released.get("recovery_hold").?.bool);
+    try std.testing.expectEqualStrings(
+        try native.json.text(held.get("restore_cut_digest").?),
+        try native.json.text(released.get("restore_cut_digest").?),
     );
-    try std.testing.expect(cut.items.len > 0);
 }

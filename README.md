@@ -240,13 +240,20 @@ materializing. Reusing an import operation for a different file is refused as an
 operation conflict. Import preserves portable observations, pending controls,
 method source, and unresolved delivery evidence. Imported output, including
 imported conversation turns, remains held; `recovery status` reports `import_hold`.
-Establish that the original source cannot run again, then declare exclusive
-ownership when releasing: run `recovery begin`, take TASK and DIGEST from
-`recovery status`, and run `recovery release TASK DIGEST --exclusive-owner`.
+While it is held, `ask`, `monitor add`, monitor proposals, and Slack messages are
+refused with `ContinuityImportHeld`, and live-model experiments wait. Neither
+`recovery begin` nor `serve --recover` opens a boundary before the import is
+materialized (`ContinuityImportPending`); run `serve` to finish it. Establish
+that the original source cannot run again, then declare exclusive ownership when
+releasing: run `recovery begin`, take TASK and DIGEST from `recovery status`, and
+run `recovery release TASK DIGEST --exclusive-owner`.
 
 After a known filesystem rollback, start with `serve --recover`. Inspect
 `recovery status`, perform read-only `delivery audit KEY_JSON` operations, and
-make explicit dispositions for uncertain outputs. To release a recovery boundary:
+make explicit dispositions for uncertain outputs. `recovery status` prints the
+current boundary as hex `data.recovery.task` and `data.recovery.digest`, which
+`recovery release` accepts unchanged, with the size and SHA-256 of the
+cumulative recovery cut rather than its entries. To release a recovery boundary:
 
 ```sh
 paredros --config /absolute/config.json recovery release TASK DIGEST --exclusive-owner

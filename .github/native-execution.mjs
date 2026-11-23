@@ -52,9 +52,9 @@ const suites = {
       'native_methods_test.', 'tests.native_method.', 'tests.method_catalog.', 'tests.method.',
       'tests.experiment.', 'tests.native_genesis.', 'tests.contracts.'),
   },
-  'continuity-first': 7,
+  'continuity-first': 8,
   'continuity-second': 24,
-  'continuity-third': 29,
+  'continuity-third': 30,
   product: 5,
   crash: 12,
 };

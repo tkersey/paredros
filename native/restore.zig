@@ -256,6 +256,8 @@ fn Begin(comptime Driver: type) type {
             var index = try self.driver.rebuild(a);
             defer index.deinit();
             if (index.recovery_purpose == .transfer) return error.RestoreTransferPermanent;
+            if (@import("transfer.zig").importPending(&index))
+                return error.ContinuityImportPending;
             const cut = try a.alloc(t.InputReference, index.records.len);
             for (index.records, cut) |record, *reference| reference.* = .{
                 .task = record.task,

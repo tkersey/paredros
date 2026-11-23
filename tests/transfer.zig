@@ -493,6 +493,137 @@ test "native continuity imported output waits for the exclusive ownership releas
     try std.testing.expect(try replyPermitted(&destination, a, imported));
 }
 
+const control = @import("../native/control.zig");
+const slack_owner = @import("../native/slack_owner.zig");
+const experiment_codec = @import("../app/experiment_contract.zig").codec_identity;
+
+fn recordCount(a: std.mem.Allocator, driver: *Driver) !usize {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    return index.records.len;
+}
+
+fn refusedCommand(
+    a: std.mem.Allocator,
+    driver: *Driver,
+    operation: []const u8,
+    command: @FieldType(control.Request, "command"),
+) !void {
+    const bytes = try control.encode(a, .{
+        .version = 1,
+        .operation = .{ .bytes = operation },
+        .command = command,
+    });
+    const reply = try control.dispatch(a, driver, config(), 501, bytes);
+    const value = (try @import("protean_native").json.parse(a, reply, .{})).value.object;
+    try std.testing.expectEqualStrings("rejected", value.get("status").?.string);
+    try std.testing.expectEqualStrings("ContinuityImportHeld", value.get("error").?.string);
+}
+
+fn slackText(a: std.mem.Allocator) ![]const u8 {
+    const destination = contracts.specification().destination;
+    return std.json.Stringify.valueAlloc(a, .{
+        .envelope_id = "held-envelope",
+        .type = "events_api",
+        .payload = .{
+            .api_app_id = destination.app.bytes,
+            .team_id = destination.workspace.bytes,
+            .type = "event_callback",
+            .event_id = "held-event",
+            .event = .{
+                .type = "message",
+                .user = destination.operator.bytes,
+                .channel = destination.channel.bytes,
+                .channel_type = "im",
+                .ts = "1700000002.1",
+                .text = "Asked while imported output is held.",
+            },
+        },
+    }, .{});
+}
+
+fn refusedOutputIngress(a: std.mem.Allocator, driver: *Driver) !void {
+    const before = try recordCount(a, driver);
+    try refusedCommand(a, driver, "held-ask", .{ .ask = .{
+        .text = .{ .bytes = "status?" },
+        .target = null,
+    } });
+    try refusedCommand(a, driver, "held-monitor", .{ .monitor_add = .{
+        .wording = .{ .bytes = "watch" },
+        .interval_ms = null,
+    } });
+    try std.testing.expectError(
+        error.ContinuityImportHeld,
+        slack_owner.admit(driver, a, config(), try slackText(a)),
+    );
+    try std.testing.expectEqual(before, try recordCount(a, driver));
+}
+
+fn heldExperiment(f: *Fixture, driver: *Driver) !t.Id {
+    const a = f.arena.allocator();
+    const admitted = try f.service.?.submit(a, "held-live-experiment", .{ .experiment = .{
+        .envelope = .{
+            .operation = .{ .bytes = "held-live-experiment" },
+            .stable_request = @splat(29),
+            .origin = origin,
+        },
+        .campaign = @splat(30),
+        .attempt = 1,
+        .plan = .{ .bytes = "plan" },
+        .evidence = .{ .items = &.{} },
+        .live_model = true,
+    } });
+    const model = @import("../app/model_contract.zig").P.identity;
+    try std.testing.expect(!try permitted(driver, a, admitted.receipt.task, model));
+    try std.testing.expect(try permitted(driver, a, admitted.receipt.task, experiment_codec));
+    return admitted.receipt.task;
+}
+
+test "native continuity refuses boundaries until materialized and output ingress until released" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    var clock: u8 = 0;
+    var original: Driver = .{
+        .service = &from.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try original.attach(a);
+    defer if (original.attached) original.detach();
+    _ = try frozenTurn(&from, &original);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    var progress = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    progress.deinit(a);
+    const before = try recordCount(a, &destination);
+    try std.testing.expectError(
+        error.ContinuityImportPending,
+        restore.begin(&destination, a, "boundary-during-import", origin),
+    );
+    try std.testing.expectEqual(before, try recordCount(a, &destination));
+    try importDone(&to, &destination, bundle.value);
+    try refusedOutputIngress(a, &destination);
+    const experiment = try heldExperiment(&to, &destination);
+    try releaseImport(&to, &destination);
+    try expectImportHold(a, &destination, false);
+    const model = @import("../app/model_contract.zig").P.identity;
+    try std.testing.expect(try permitted(&destination, a, experiment, model));
+}
+
 fn expectImportHold(a: std.mem.Allocator, driver: *Driver, expected: bool) !void {
     var index = try driver.rebuild(a);
     defer index.deinit();

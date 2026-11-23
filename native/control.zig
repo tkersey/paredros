@@ -241,7 +241,7 @@ fn execute(
     const operation_id = try operation(request);
     if (request.command != .transfer_export and request.command != .transfer_import and
         request.command != .audit_delivery)
-        try admissionOpen(a, driver, operation_id);
+        try admissionOpen(a, driver, operation_id, producesOutput(request));
     var response = if (request.command == .transfer_export or request.command == .transfer_import)
         try continuityCommand(a, driver, config, origin, request, environment)
     else
@@ -286,7 +286,16 @@ fn readOnly(request: Request) bool {
     };
 }
 
-fn admissionOpen(a: std.mem.Allocator, driver: anytype, operation_id: []const u8) !void {
+fn producesOutput(request: Request) bool {
+    return request.command == .ask or request.command == .monitor_add;
+}
+
+fn admissionOpen(
+    a: std.mem.Allocator,
+    driver: anytype,
+    operation_id: []const u8,
+    output: bool,
+) !void {
     if (try driver.service.operationLookup(a, operation_id)) |found| {
         var receipt = found;
         defer receipt.deinit();
@@ -294,6 +303,7 @@ fn admissionOpen(a: std.mem.Allocator, driver: anytype, operation_id: []const u8
     }
     var index = try driver.rebuild(a);
     defer index.deinit();
+    if (output) return ingress_policy.output(&index);
     try ingress_policy.validate(&index);
 }
 
@@ -455,6 +465,7 @@ fn confirmProposal(
     const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
     if (prior) |task_id| return task_id;
     const selected = try commands.proposal(&index, confirmation);
+    if (selected.body == .genesis) try ingress_policy.output(&index);
     if (selected.body == .directive) try validateDirective(
         a,
         driver,
@@ -540,18 +551,19 @@ fn inspect(
 
 fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Value {
     var result = try native.values.toJson(struct {
-        recovery: ?t.InputReference,
         recovery_hold: bool,
         import_hold: bool,
-        restore_cut: c.Vector(t.InputReference, null),
+        restore_cut_size: u64,
         recovery_purpose: ?t.RestorePurpose,
     }, a, .{
-        .recovery = index.recovery,
         .recovery_hold = index.recovery_hold,
         .import_hold = index.import_hold,
-        .restore_cut = .{ .items = index.restore_cut },
+        .restore_cut_size = index.restore_cut.len,
         .recovery_purpose = index.recovery_purpose,
     });
+    const cut = try hexText(a, &try cutDigest(a, index.restore_cut));
+    try native.json.put(a, &result, "restore_cut_digest", native.json.string(cut));
+    try native.json.put(a, &result, "recovery", try boundary(a, index.recovery));
     const history = @import("history_evidence.zig");
     try native.json.put(a, &result, "external_history", try native.values.toJson(
         history.Page,
@@ -559,6 +571,26 @@ fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Va
         try history.page(a, index, null, null, 16),
     ));
     return result;
+}
+
+fn boundary(a: std.mem.Allocator, reference: ?t.InputReference) !native.json.Value {
+    const value = reference orelse return .null;
+    var result = native.json.object();
+    try native.json.put(a, &result, "task", native.json.string(try hexText(a, &value.task)));
+    try native.json.put(a, &result, "digest", native.json.string(try hexText(a, &value.digest)));
+    return result;
+}
+
+fn hexText(a: std.mem.Allocator, bytes: anytype) ![]const u8 {
+    return a.dupe(u8, &std.fmt.bytesToHex(bytes.*, .lower));
+}
+
+fn cutDigest(a: std.mem.Allocator, cut: []const t.InputReference) !t.Digest {
+    const bytes = try c.encodeOwned(c.Vector(t.InputReference, null), a, .{ .items = cut });
+    defer a.free(bytes);
+    var digest: t.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
 }
 
 fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !native.json.Value {

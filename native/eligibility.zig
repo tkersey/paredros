@@ -42,7 +42,7 @@ pub fn permits(
         ) and
             try @import("lineage_audit.zig").permits(a, index, value),
         .turn => record.input.turn.envelope.origin != .derived and !index.outputHeld(),
-        .experiment => |value| experimentPermitted(value, request.capability),
+        .experiment => |value| experimentPermitted(index, value, request.capability),
         .genesis, .directive, .continuity_member, .continuity_cut, .restore => false,
     };
 }
@@ -151,7 +151,11 @@ fn activationPermitted(
         try equal(a, t.DeliveryIntent, wanted, intent);
 }
 
-fn experimentPermitted(value: t.Experiment, capability: []const u8) bool {
+fn experimentPermitted(
+    index: *const idx.Index,
+    value: t.Experiment,
+    capability: []const u8,
+) bool {
     if (value.envelope.origin == .derived) return false;
     const experiment = @import("../app/experiment_contract.zig");
     const method = @import("../app/method_contract.zig");
@@ -160,5 +164,6 @@ fn experimentPermitted(value: t.Experiment, capability: []const u8) bool {
         std.mem.eql(u8, capability, method.workspace_identity) or
         std.mem.eql(u8, capability, method.codec_identity)) return true;
     const model_identity = @import("../app/model_contract.zig").P.identity;
-    return value.live_model and std.mem.eql(u8, capability, model_identity);
+    return value.live_model and !index.outputHeld() and
+        std.mem.eql(u8, capability, model_identity);
 }

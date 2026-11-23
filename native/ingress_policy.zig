@@ -7,6 +7,11 @@ pub fn validate(index: anytype) !void {
     if (transfer.importPending(index)) return error.ContinuityImportPending;
 }
 
+pub fn output(index: anytype) !void {
+    try validate(index);
+    if (index.import_hold) return error.ContinuityImportHeld;
+}
+
 pub fn directive(
     a: std.mem.Allocator,
     index: anytype,
