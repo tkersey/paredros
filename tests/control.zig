@@ -359,6 +359,42 @@ fn statusPage(frame: std.mem.Allocator, driver: *Driver, after: ?t.Id) !native.j
     return value.object.get("data").?;
 }
 
+fn expectStatusPages(frame: std.mem.Allocator, driver: *Driver, expected: usize) !void {
+    var seen: usize = 0;
+    var after: ?t.Id = null;
+    for (0..expected) |_| {
+        const page = try statusPage(frame, driver, after);
+        const items = page.object.get("obligations").?.array.items;
+        try std.testing.expect(items.len > 0 and items.len < expected);
+        for (items) |item| try std.testing.expectEqual(
+            16,
+            item.object.get("pending_directives").?.array.items.len,
+        );
+        seen += items.len;
+        after = try native.values.fromJson(?t.Id, frame, page.object.get("next").?);
+        if (after == null) break;
+    }
+    try std.testing.expectEqual(expected, seen);
+}
+
+fn widestHealth(frame: std.mem.Allocator) !native.json.Value {
+    const transport = @import("../native/slack_transport.zig");
+    const widest = std.math.maxInt(u64);
+    return native.values.toJson(transport.Health, frame, .{
+        .state = .stopped,
+        .last_failure = .acknowledgement_deadline,
+        .connections = widest,
+        .received = widest,
+        .acknowledged = widest,
+        .ignored = widest,
+        .admission_failures = widest,
+        .deadline_misses = widest,
+        .reconnects = widest,
+        .last_received_ms = std.math.minInt(i64),
+        .last_acknowledged_ms = std.math.minInt(i64),
+    });
+}
+
 test "control pages pending directives and status within one decorated frame" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
@@ -384,36 +420,8 @@ test "control pages pending directives and status within one decorated frame" {
         try finish(&fixture, id.*);
         try admitLarge(frame, &driver, id.*, wording, count);
     }
-    var seen: usize = 0;
-    var after: ?t.Id = null;
-    for (0..3) |_| {
-        const page = try statusPage(frame, &driver, after);
-        const items = page.object.get("obligations").?.array.items;
-        try std.testing.expect(items.len > 0 and items.len < 3);
-        for (items) |item| try std.testing.expectEqual(
-            16,
-            item.object.get("pending_directives").?.array.items.len,
-        );
-        seen += items.len;
-        after = try native.values.fromJson(?t.Id, frame, page.object.get("next").?);
-        if (after == null) break;
-    }
-    try std.testing.expectEqual(3, seen);
-    const transport = @import("../native/slack_transport.zig");
-    const widest = std.math.maxInt(u64);
-    const health = try native.values.toJson(transport.Health, frame, .{
-        .state = .stopped,
-        .last_failure = .acknowledgement_deadline,
-        .connections = widest,
-        .received = widest,
-        .acknowledged = widest,
-        .ignored = widest,
-        .admission_failures = widest,
-        .deadline_misses = widest,
-        .reconnects = widest,
-        .last_received_ms = std.math.minInt(i64),
-        .last_acknowledged_ms = std.math.minInt(i64),
-    });
+    try expectStatusPages(frame, &driver, ids.len);
+    const health = try widestHealth(frame);
     try std.testing.expect(try native.json.fits(frame, health, .{
         .bytes = control.decoration_reserve.bytes,
         .tokens = control.decoration_reserve.tokens,
