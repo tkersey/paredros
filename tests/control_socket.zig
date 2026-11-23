@@ -318,7 +318,7 @@ var interruptions: u32 = 0;
 fn interruptedLock(fd: c_int, operation: c_int) callconv(.c) c_int {
     if (interruptions == 0) return flock(fd, operation);
     interruptions -= 1;
-    c._errno().* = @intFromEnum(c.E.INTR);
+    c._errno().* = @backingInt(c.E.INTR);
     return -1;
 }
 
