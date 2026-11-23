@@ -344,6 +344,10 @@ fn verifyDelivery(f: *Fixture, driver: *Driver) !void {
         try std.testing.expectEqual(1, repeated.len);
         try std.testing.expectEqualDeep(witness.subject, repeated[0]);
     }
+    try std.testing.expectEqual(
+        @as(u32, if (completed) 0 else 1),
+        try driver.resumeRetained(a, 8),
+    );
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     try drive(f, &session, witness.subject);
