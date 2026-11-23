@@ -32,11 +32,27 @@ pub fn envelopeOf(input: t.Input) t.Envelope {
     };
 }
 
-pub fn settlement(
+const Fact = @FieldType(t.Settlement, "delivery");
+
+pub fn settlement(a: std.mem.Allocator, index: *const idx.Index, record: idx.Record) !Fact {
+    return bound(a, index, record, null);
+}
+
+pub fn copied(
     a: std.mem.Allocator,
     index: *const idx.Index,
     record: idx.Record,
-) !@FieldType(t.Settlement, "delivery") {
+    metadata: bool,
+) !Fact {
+    return bound(a, index, record, metadata);
+}
+
+fn bound(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    record: idx.Record,
+    claimed: ?bool,
+) !Fact {
     const envelope = envelopeOf(record.input);
     const ingress = envelope.ingress orelse return null;
     const proof = ingress.interaction orelse return null;
@@ -46,7 +62,7 @@ pub fn settlement(
     const delivery = source.input.delivery;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const metadata = try verify(arena.allocator(), source.*, envelope, ingress, delivery);
+    const metadata = try verify(arena.allocator(), source.*, envelope, ingress, delivery, claimed);
     return .{
         .admitted = delivery,
         .outcome = .{ .confirmed = .{
@@ -70,6 +86,7 @@ fn verify(
     envelope: t.Envelope,
     ingress: t.Ingress,
     delivery: t.Delivery,
+    claimed: ?bool,
 ) !bool {
     if (envelope.origin != .slack) return error.InvalidInteractionOrigin;
     const proof = ingress.interaction.?;
@@ -109,7 +126,7 @@ fn verify(
         proof.bot_id.bytes,
     );
     defer prepared.deinit();
-    const timestamp = try knownTimestamp(a, source);
+    const metadata = try path(a, source, proof.message_timestamp, claimed);
     const button = try selectedButton(delivery, proof);
     try slack.bindInteraction(a, .{
         .origin = binding,
@@ -126,8 +143,21 @@ fn verify(
         .action_id = button.action_id.bytes,
         .value = button.value.bytes,
         .label = button.label.bytes,
-    }, if (timestamp) |value| value.bytes else null);
-    return timestamp == null;
+    }, if (metadata) null else proof.message_timestamp.bytes);
+    return metadata;
+}
+
+fn path(
+    a: std.mem.Allocator,
+    source: idx.Record,
+    message: t.Timestamp,
+    claimed: ?bool,
+) !bool {
+    const known = try knownTimestamp(a, source);
+    const matched = known != null and std.mem.eql(u8, known.?.bytes, message.bytes);
+    const metadata = claimed orelse !matched;
+    if (!metadata and !matched) return error.CopiedInteractionMismatch;
+    return metadata;
 }
 
 fn selectedButton(delivery: t.Delivery, proof: anytype) !t.Button {

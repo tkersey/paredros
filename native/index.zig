@@ -817,7 +817,10 @@ fn validateDeliveryFact(
     snapshot: retained.Snapshot,
 ) !void {
     if (fact.kind == .interaction) {
-        const expected = try interaction.settlement(a, self, item);
+        const claimed = fact.delivery orelse return error.CopiedInteractionMismatch;
+        if (claimed.outcome != .confirmed) return error.CopiedInteractionMismatch;
+        const metadata = claimed.outcome.confirmed.metadata_observed;
+        const expected = try interaction.copied(a, self, item, metadata);
         if (expected == null or !try sameValue(
             a,
             @FieldType(t.Settlement, "delivery"),
@@ -833,9 +836,10 @@ fn validateDeliveryFact(
     if (fact.kind == .delivery) {
         if (item.input != .delivery) return error.FactKindMismatch;
         var evidence = item.owner_evidence orelse return error.MissingOwnerEvidence;
-        if (fact.delivery) |claimed| if (claimed.outcome == .indeterminate) {
-            evidence.status = .unknown;
-        };
+        evidence.status = if (fact.delivery) |claimed|
+            if (claimed.outcome == .indeterminate) .unknown else null
+        else
+            null;
         var expected = try @import("delivery_fact.zig").settlement(a, snapshot, evidence);
         defer expected.deinit();
         if ((fact.delivery == null) != (expected.value == null))

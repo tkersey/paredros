@@ -272,12 +272,21 @@ fn validateCase(a: std.mem.Allocator, selected: e.Case) !void {
         return error.EmptyRubricTerm;
     for (selected.rubric.forbidden.items) |text| if (text.bytes.len == 0)
         return error.EmptyRubricTerm;
-    const one: @FieldType(t.Step, "batches") = .{ .items = input.step.batches.items[0..1] };
-    const encoded = try c.encodeOwned(@TypeOf(one), a, one);
-    defer a.free(encoded);
-    const oversized = encoded.len > input.head.specification.policies.render_input_bytes;
+    const oversized = !try firstFits(a, input);
     if (selected.condition == .oversized and !oversized) return error.OversizedCaseFits;
     if (selected.condition != .oversized and oversized) return error.MethodNotExercised;
+}
+
+fn firstFits(a: std.mem.Allocator, input: step.RenderInput) !bool {
+    const first = input.step.batches.items[0];
+    const one = [_]@FieldType(method.GuestInput, "batches").Child{.{
+        .reference = first.reference,
+        .value = first.value,
+    }};
+    return @import("method_external.zig").guestFits(a, .{
+        .batches = .{ .items = &one },
+        .state = .{ .bytes = "" },
+    }, input.head.specification.policies.render_input_bytes);
 }
 
 pub fn scriptedBinding() t.ModelBinding {

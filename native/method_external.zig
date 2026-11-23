@@ -215,6 +215,12 @@ fn codecValue(a: std.mem.Allocator, request: m.CodecRequest) !m.CodecReply {
     };
 }
 
+pub fn guestFits(a: std.mem.Allocator, guest: m.GuestInput, bound: u64) !bool {
+    const encoded = try c.encodeOwned(m.GuestInput, a, guest);
+    defer a.free(encoded);
+    return encoded.len <= bound;
+}
+
 fn prepare(a: std.mem.Allocator, input: m.MethodInput) !m.Prepared {
     if (!std.meta.eql(
         input.retained.source_digest,
@@ -225,9 +231,7 @@ fn prepare(a: std.mem.Allocator, input: m.MethodInput) !m.Prepared {
             try contractDigest(a),
         ))
         return error.InvalidMethodSource;
-    const encoded = try c.encodeOwned(m.GuestInput, a, input.guest);
-    defer a.free(encoded);
-    if (encoded.len > input.input_bytes_max) return error.MethodInputBound;
+    if (!try guestFits(a, input.guest, input.input_bytes_max)) return error.MethodInputBound;
     const selected = try exposures(a, input.retained.bytes.bytes);
     return .{
         .build = .{ .program = .{ .build = .{

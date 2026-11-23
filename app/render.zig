@@ -32,6 +32,10 @@ const Prefix = struct {
 };
 const Selection = struct { input: step.RenderInput, prefix: Prefix };
 const Select = a.Function(struct { state: Selection }, Prefix);
+const Projected = a.Function(struct { commits: frame.Commits, index: u64, total: u64 }, u64);
+const commit_lead = "\nEvidence untrusted: commit ";
+const commit_size = " message bytes=";
+const commit_end = "\n";
 const ContextState = struct {
     batches: Batches,
     count: u64,
@@ -93,8 +97,8 @@ pub fn emit(
         .{
             .input = input,
             .prefix = try b.update(try c.literal(Prefix, .{ .epoch = 0, .through = 0 }), .{
-                .floor = try methodState(c, b, head, true),
-                .state = try methodState(c, b, head, false),
+                .floor = try reserve(c, b, head, true),
+                .state = try reserve(c, b, head, false),
                 .epoch = try b.field(told, "epoch"),
                 .through = try b.field(told, "sequence"),
             }),
@@ -111,7 +115,7 @@ pub fn emit(
     return function;
 }
 
-fn methodState(
+fn reserve(
     c: protean.Context,
     b: anytype,
     head: a.Value(t.Head),
@@ -120,15 +124,84 @@ fn methodState(
     const selected = try b.field(head, "method");
     const ordinary = try b.caseOf(selected, "ordinary");
     const retained = try b.caseOf(selected, "retained");
+    const ob = ordinary.body();
     const rb = retained.body();
     const state = if (empty)
         try c.literal(mc.State, .{ .bytes = "" })
     else
         try rb.field(retained.payload(), "state");
+    const lead = try prelude(c, ob, try ob.field(head, "specification"));
     return b.match(selected, .{
-        .ordinary = try ordinary.ret(try ordinary.body().constant(u64, 0)),
+        .ordinary = try ordinary.ret(try ob.blobLength(lead)),
         .retained = try retained.ret(try measure(c, rb, mc.State, state)),
     });
+}
+
+fn framing(b: anytype, head: a.Value(t.Head), count: a.Value(u64)) !a.Value(u64) {
+    const selected = try b.field(head, "method");
+    const ordinary = try b.caseOf(selected, "ordinary");
+    const retained = try b.caseOf(selected, "retained");
+    return b.match(selected, .{
+        .ordinary = try ordinary.ret(try ordinary.body().constant(u64, 0)),
+        .retained = try retained.ret(try natural(retained.body(), count)),
+    });
+}
+
+fn batchBytes(
+    c: protean.Context,
+    b: anytype,
+    projected: Projected,
+    head: a.Value(t.Head),
+    fact: a.Value(BatchFact),
+) !a.Value(u64) {
+    const selected = try b.field(head, "method");
+    const ordinary = try b.caseOf(selected, "ordinary");
+    const retained = try b.caseOf(selected, "retained");
+    const ob = ordinary.body();
+    const commits = try ob.call(projected, .{
+        .commits = try ob.field(try ob.field(fact, "value"), "commits"),
+        .index = try ob.constant(u64, 0),
+        .total = try ob.blobLength(try batchHeader(c, ob, fact)),
+    });
+    return b.match(selected, .{
+        .ordinary = try ordinary.ret(commits),
+        .retained = try retained.ret(try measure(c, retained.body(), BatchFact, fact)),
+    });
+}
+
+fn projection(c: protean.Context) !Projected {
+    const function = try c.author.function("measure projected commit context", .{
+        .commits = try c.schema(frame.Commits),
+        .index = try c.schema(u64),
+        .total = try c.schema(u64),
+    }, try c.schema(u64), &.{});
+    const b = try c.author.body(function);
+    const commits = try b.parameter("commits");
+    const index = try b.parameter("index");
+    const total = try b.parameter("total");
+    const more = try b.branch();
+    const done = try b.branch();
+    const commit = try more.variantPayload(
+        try more.sequenceGet(commits, index),
+        "some",
+        try a.failure(c, "render_commit_bounds"),
+    );
+    const message = try more.blobLength(try more.field(commit, "message"));
+    const fixed = commit_lead.len + @typeInfo(t.Oid).array.len + commit_size.len + commit_end.len;
+    const header = try add(c, more, try more.constant(u64, fixed), try more.blobLength(
+        try more.textInteger(message),
+    ));
+    const next = try more.call(function, .{
+        .commits = commits,
+        .index = try add(c, more, index, try more.constant(u64, 1)),
+        .total = try add(c, more, total, try add(c, more, header, message)),
+    });
+    try c.author.define(function, try b.ret(try b.conditional(
+        try b.less(index, try b.sequenceLength(commits)),
+        try more.ret(next),
+        try done.ret(total),
+    )));
+    return function;
 }
 
 fn add(c: protean.Context, b: anytype, x: a.Value(u64), y: a.Value(u64)) !a.Value(u64) {
@@ -252,7 +325,11 @@ fn selection(c: protean.Context) !Select {
         "some",
         try a.failure(c, "render_batch_bounds"),
     );
-    const value = try selectNext(c, more, function, equal_oids, state, fact);
+    const value = try selectNext(c, more, .{
+        .loop = function,
+        .oids = equal_oids,
+        .projected = try projection(c),
+    }, state, fact);
     const active = try andAll(
         b,
         &.{
@@ -272,12 +349,12 @@ fn selection(c: protean.Context) !Select {
 fn selectNext(
     c: protean.Context,
     b: anytype,
-    loop: Select,
-    oids: anytype,
+    functions: anytype,
     state: a.Value(Selection),
     fact: a.Value(BatchFact),
 ) !a.Value(Prefix) {
     const input = try b.field(state, "input");
+    const head = try b.field(input, "head");
     const prefix = try b.field(state, "prefix");
     const batch = try b.field(fact, "value");
     const gap = try coverage(c, b, batch, .accepted_gap);
@@ -285,16 +362,17 @@ fn selectNext(
     const boundary = try andAll(b, &.{ gap, try b.booleanNot(first) });
     const stop = try b.branch();
     const consider = try b.branch();
-    try validateBatch(c, consider, oids, input, prefix, batch, gap, first);
+    try validateBatch(c, consider, functions.oids, input, prefix, batch, gap, first);
     const size = try add(
         c,
         consider,
         try b.field(prefix, "bytes"),
-        try measure(c, consider, BatchFact, fact),
+        try batchBytes(c, consider, functions.projected, head, fact),
     );
     const count = try add(c, consider, try b.field(prefix, "count"), try consider.constant(u64, 1));
-    const oversized = try exceeds(c, consider, input, prefix, size, count, "floor");
-    const crowded = try exceeds(c, consider, input, prefix, size, count, "state");
+    const framed = try add(c, consider, size, try framing(consider, head, count));
+    const oversized = try exceeds(c, consider, input, prefix, framed, "floor");
+    const crowded = try exceeds(c, consider, input, prefix, framed, "state");
     const accepted = try consider.branch();
     const refused = try consider.branch();
     const revised = try accepted.update(prefix, .{
@@ -318,7 +396,7 @@ fn selectNext(
         .oversized = oversized,
         .crowded = crowded,
     });
-    const next = try accepted.call(loop, .{ .state = try accepted.update(state, .{
+    const next = try accepted.call(functions.loop, .{ .state = try accepted.update(state, .{
         .prefix = revised,
     }) });
     const fit = try consider.select(
@@ -335,18 +413,16 @@ fn exceeds(
     b: anytype,
     input: a.Value(step.RenderInput),
     prefix: a.Value(Prefix),
-    size: a.Value(u64),
-    count: a.Value(u64),
-    comptime reserve: []const u8,
+    framed: a.Value(u64),
+    comptime field: []const u8,
 ) !a.Value(bool) {
     const policies = try b.field(
         try b.field(try b.field(input, "head"), "specification"),
         "policies",
     );
-    const framed = try add(c, b, size, try natural(b, count));
     return b.less(
         try b.field(policies, "render_input_bytes"),
-        try add(c, b, framed, try b.field(prefix, reserve)),
+        try add(c, b, framed, try b.field(prefix, field)),
     );
 }
 
@@ -530,11 +606,11 @@ fn contextCommits(c: protean.Context, oid: oid_text.Function) !ContextCommits {
         c,
         more,
         .{
-            try literal(c, "\nEvidence untrusted: commit "),
+            try literal(c, commit_lead),
             try oid_text.format(c, more, oid, try more.field(commit, "oid")),
-            try literal(c, " message bytes="),
+            try literal(c, commit_size),
             try more.textInteger(try more.blobLength(message)),
-            try literal(c, "\n"),
+            try literal(c, commit_end),
         },
     );
     const required = try add(
@@ -660,20 +736,13 @@ fn appendContextBatch(
     });
 }
 
-fn renderContext(
+fn prelude(
     c: protean.Context,
     b: anytype,
-    function: ContextBatches,
-    input: a.Value(step.RenderInput),
-    prefix: a.Value(Prefix),
-) !a.Value(?Context) {
-    const head = try b.field(input, "head");
-    const specification = try b.field(head, "specification");
+    specification: a.Value(t.Specification),
+) !a.Value(Context) {
     const repository = try b.field(specification, "repository");
-    const configured = try b.field(try b.field(specification, "policies"), "context_bytes");
-    const capacity = try b.constant(u64, 256 * 1024);
-    const limit = try b.select(try b.less(configured, capacity), configured, capacity);
-    const text = try join(c, b, .{
+    return join(c, b, .{
         try literal(c, "Operator instruction bytes="),
         try b.textInteger(try b.blobLength(try b.field(specification, "wording"))),
         try literal(c, "\n"),
@@ -685,6 +754,20 @@ fn renderContext(
         try literal(c, "\nComplete commit records and immutable provenance follow. " ++
             "Provider captures remain retained locally; this context projects commit evidence.\n"),
     });
+}
+
+fn renderContext(
+    c: protean.Context,
+    b: anytype,
+    function: ContextBatches,
+    input: a.Value(step.RenderInput),
+    prefix: a.Value(Prefix),
+) !a.Value(?Context) {
+    const specification = try b.field(try b.field(input, "head"), "specification");
+    const configured = try b.field(try b.field(specification, "policies"), "context_bytes");
+    const capacity = try b.constant(u64, 256 * 1024);
+    const limit = try b.select(try b.less(configured, capacity), configured, capacity);
+    const text = try prelude(c, b, specification);
     const fits = try b.branch();
     const full = try b.branch();
     const next = try fits.call(function, .{ .state = try fits.product(

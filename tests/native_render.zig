@@ -273,26 +273,35 @@ test "native ordinary render chooses an exact whole batch byte prefix and skips 
     defer f.deinit();
     f.profile.environment = &scenario;
     try f.initWithGrants(&.{model_identity});
-    const values = try commits(f.arena.allocator(), 3);
+    const a = f.arena.allocator();
+    const values = try commits(a, 5);
     const facts = [_]Fact{ batch(
         1,
         0,
-        1,
-        values[0..1],
-    ), batch(2, 1, 2, values[1..2]), batch(3, 2, 3, values[2..3]) };
-    const encoded = try cts.encodeOwned(Batches, f.arena.allocator(), .{ .items = facts[0..2] });
+        2,
+        values[0..2],
+    ), batch(2, 2, 4, values[2..4]), batch(3, 4, 5, values[4..5]) };
+    _ = try execute(&f, "two-batch-context", input(head(2), facts[0..2]));
+    const expected = try a.dupe(u8, scenario.context.?);
     var previous = head(3);
-    previous.specification.policies.render_input_bytes = encoded.len;
+    previous.specification.policies.render_input_bytes = expected.len;
     const value = try execute(&f, "exact-budget", input(previous, &facts));
     const delivery = try assertFrame(previous, value, facts[1]);
-    try contains(delivery.payload.frozen_text.bytes, "Verified commits: 2");
+    try contains(delivery.payload.frozen_text.bytes, "Verified commits: 4");
     try contains(delivery.payload.frozen_text.bytes, "observations after 0 through 2; epoch 2");
-    try std.testing.expectEqual(0, scenario.calls);
+    try std.testing.expectEqual(2, scenario.calls);
+    try std.testing.expectEqualStrings(expected, scenario.context.?);
     try std.testing.expectEqualDeep(oid(0), delivery.payload.comparison.?.base);
-    try std.testing.expectEqualDeep(oid(2), delivery.payload.comparison.?.tip);
-    previous.specification.policies.render_input_bytes = encoded.len - 1;
+    try std.testing.expectEqualDeep(oid(4), delivery.payload.comparison.?.tip);
+    previous.specification.policies.render_input_bytes = expected.len - 1;
     const smaller = try execute(&f, "one-byte-short", input(previous, &facts));
-    _ = try assertFrame(previous, smaller, facts[0]);
+    const first = try assertFrame(previous, smaller, facts[0]);
+    try std.testing.expectEqual(2, scenario.calls);
+    try std.testing.expect(std.mem.find(
+        u8,
+        first.payload.frozen_text.bytes,
+        "Large-batch fallback",
+    ) == null);
 }
 
 test "native ordinary render keeps oversized complete evidence and records deterministic fallback" {
@@ -333,13 +342,14 @@ fn raw(body: []const u8) t.ReadEvidence {
     };
 }
 
-test "native ordinary render includes raw capture bytes and metadata in its whole batch bound" {
+test "native ordinary render bounds its exact model context and not retained raw captures" {
     var scenario: Scenario = .{};
     var f: Fixture = .{};
     defer f.deinit();
     f.profile.environment = &scenario;
     try f.initWithGrants(&.{model_identity});
-    const values = try commits(f.arena.allocator(), 4);
+    const a = f.arena.allocator();
+    const values = try commits(a, 4);
     const body: [8192]u8 = @splat('x');
     var capture = raw(&body);
     capture.headers = .{ .items = &.{.{
@@ -348,16 +358,24 @@ test "native ordinary render includes raw capture bytes and metadata in its whol
     }} };
     var first = batch(1, 0, 4, values);
     first.value.raw_evidence = .{ .items = &.{capture} };
-    const encoded = try cts.encodeOwned(Batches, f.arena.allocator(), .{ .items = &.{first} });
+    const encoded = try cts.encodeOwned(Batches, a, .{ .items = &.{first} });
     var previous = head(1);
     previous.specification.policies.render_input_bytes = encoded.len - 1;
-    const oversized = try execute(&f, "raw-too-large", input(previous, &.{first}));
-    try contains(oversized.digest.?.delivery.payload.frozen_text.bytes, "Large-batch fallback");
-    try std.testing.expectEqual(0, scenario.calls);
-    previous.specification.policies.render_input_bytes = encoded.len;
-    const exact = try execute(&f, "raw-exact", input(previous, &.{first}));
-    _ = try assertFrame(previous, exact, first);
+    const captured = try execute(&f, "raw-beyond-wire", input(previous, &.{first}));
+    _ = try assertFrame(previous, captured, first);
     try std.testing.expectEqual(1, scenario.calls);
+    const expected = try a.dupe(u8, scenario.context.?);
+    try std.testing.expect(expected.len < encoded.len);
+    try std.testing.expect(std.mem.find(u8, expected, "x-capture") == null);
+    previous.specification.policies.render_input_bytes = expected.len;
+    const exact = try execute(&f, "context-exact", input(previous, &.{first}));
+    _ = try assertFrame(previous, exact, first);
+    try std.testing.expectEqual(2, scenario.calls);
+    try std.testing.expectEqualStrings(expected, scenario.context.?);
+    previous.specification.policies.render_input_bytes = expected.len - 1;
+    const oversized = try execute(&f, "context-too-large", input(previous, &.{first}));
+    try contains(oversized.digest.?.delivery.payload.frozen_text.bytes, "Large-batch fallback");
+    try std.testing.expectEqual(2, scenario.calls);
 }
 
 test "native ordinary render calls one model with complete provenance and validates highlights" {

@@ -32,7 +32,7 @@ const suites = {
     multibyte: group(1, 'native conversation retains full multibyte'),
     publication: group(21, 'native render frame keeps Unicode', 'native render frame empty evidence',
       'native conversation describes exact hostile Unicode', 'tests.native_check_publish.', 'tests.native_audit.', 'tests.native_step.'),
-    bytes: group(2, 'native ordinary render chooses an exact', 'native ordinary render includes raw capture'),
+    bytes: group(2, 'native ordinary render chooses an exact', 'native ordinary render bounds its exact'),
     coverage: group(5, 'native ordinary render keeps oversized', 'native ordinary render stops at an accepted gap',
       'native ordinary render rejects incomplete', 'native ordinary render preserves empty', 'native ordinary render leaves an unknown'),
     model: group(2, 'native ordinary render calls one model', 'native ordinary render makes context exhaustion'),

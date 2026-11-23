@@ -1209,3 +1209,214 @@ test "index driver admits a clock regression before the stale due instant" {
     try std.testing.expect(driver.needsStep(&index, obligation, -600_000));
     try std.testing.expect(driver.needsStep(&index, obligation, std.math.minInt(i64)));
 }
+
+const message_ts = "1700000000.000001";
+
+fn clicked(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Directive {
+    const slack = @import("../native/slack.zig");
+    const destination = admitted.destination;
+    const button = admitted.payload.logical.buttons.items[0];
+    const binding: slack.Binding = .{
+        .app_id = destination.app.bytes,
+        .team_id = destination.workspace.bytes,
+        .operator_id = destination.operator.bytes,
+        .channel_id = destination.channel.bytes,
+        .bot_id = "B1",
+    };
+    const action_ts = "1700000000.000009";
+    const identity = slack.interactionDigest(
+        binding,
+        message_ts,
+        action_ts,
+        button.block_id.bytes,
+        button.action_id.bytes,
+        button.value.bytes,
+    );
+    const wire = try std.json.parseFromSlice(
+        std.json.Value,
+        a,
+        admitted.payload.wire_json.bytes,
+        .{},
+    );
+    const message = try std.json.Stringify.valueAlloc(a, .{
+        .bot_id = "B1",
+        .app_id = binding.app_id,
+        .team = binding.team_id,
+        .ts = message_ts,
+        .text = "Provider rendered text",
+        .blocks = wire.value.object.get("blocks").?,
+        .metadata = wire.value.object.get("metadata").?,
+    }, .{});
+    var value = directive("unused", 1, null, .{ .pause = {} });
+    value.envelope = .{
+        .operation = .{ .bytes = try std.fmt.allocPrint(a, "slack:{s}", .{
+            std.fmt.bytesToHex(identity, .lower),
+        }) },
+        .stable_request = identity,
+        .origin = .{ .slack = .{
+            .app = destination.app,
+            .workspace = destination.workspace,
+            .user = destination.operator,
+            .channel = destination.channel,
+        } },
+        .ingress = .{
+            .stable_request = identity,
+            .timestamp = .{ .bytes = action_ts },
+            .interaction = .{
+                .delivery = inputRef(source),
+                .message_timestamp = .{ .bytes = message_ts },
+                .block_id = button.block_id,
+                .action_id = button.action_id,
+                .value = button.value,
+                .bot_id = .{ .bytes = "B1" },
+                .message = .{ .bytes = message },
+            },
+        },
+    };
+    return value;
+}
+
+fn captured(a: std.mem.Allocator, admitted: t.Delivery, timestamp: []const u8) !idx.Row {
+    return row(a, 2, .{ .delivery = admitted }, .{ .delivery = .{ .confirmed = .{
+        .timestamp = .{ .bytes = timestamp },
+        .metadata_observed = true,
+    } } });
+}
+
+fn interactionFact(a: std.mem.Allocator, rows: []const idx.Row, click: idx.Row) !t.Settlement {
+    const index = try a.create(idx.Index);
+    index.* = try idx.Index.init(Native, a, rows, &.{});
+    const bound = try @import("../native/interaction_evidence.zig").settlement(
+        a,
+        index,
+        index.record(click.input.task).?.*,
+    );
+    const bytes = try snapshotBytes(a, click);
+    return .{
+        .reference = .{ .task = click.input.task, .revision = 5, .digest = idx.digest(bytes) },
+        .owner_snapshot = .{ .bytes = bytes },
+        .kind = .interaction,
+        .accounting = .{},
+        .delivery = bound,
+    };
+}
+
+fn rebuildFolded(
+    a: std.mem.Allocator,
+    rows: []const idx.Row,
+    fact: t.Settlement,
+    expected: ?anyerror,
+) !void {
+    const folding = try foldedFact(a, rows[rows.len - 1], fact);
+    const all = try std.mem.concat(a, idx.Row, &.{ &[_]idx.Row{folding}, rows });
+    const rebuilt = idx.Index.init(Native, std.testing.allocator, all, &.{});
+    if (expected) |err| return std.testing.expectError(err, rebuilt);
+    var index = try rebuilt;
+    index.deinit();
+}
+
+test "index rebuilds an interaction folded before its delivery capture became known" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try genesis(a);
+    const admitted = try pendingDelivery(a, ref(initial));
+    const pending = try row(a, 2, .{ .delivery = admitted }, null);
+    const click = try row(a, 4, .{ .directive = try clicked(a, pending, admitted) }, null);
+    const early = try interactionFact(a, &.{ click, pending, initial }, click);
+    try std.testing.expect(early.delivery.?.outcome.confirmed.metadata_observed);
+    const same = try captured(a, admitted, message_ts);
+    const duplicate = try captured(a, admitted, "1700000000.000005");
+    for ([_]idx.Row{ pending, same, duplicate }) |source| {
+        try rebuildFolded(a, &.{ click, source, initial }, early, null);
+    }
+    const late = try interactionFact(a, &.{ click, same, initial }, click);
+    try std.testing.expect(!late.delivery.?.outcome.confirmed.metadata_observed);
+    try rebuildFolded(a, &.{ click, same, initial }, late, null);
+    for ([_]idx.Row{ pending, duplicate }) |source| {
+        try rebuildFolded(a, &.{ click, source, initial }, late, error.CopiedInteractionMismatch);
+    }
+    var forged = early;
+    forged.delivery.?.receipt.?.timestamp.bytes = "1700000000.000005";
+    try rebuildFolded(a, &.{ click, same, initial }, forged, error.CopiedInteractionMismatch);
+}
+
+fn object(bytes: []const u8) retained_views.Object {
+    return .{ .digest = idx.digest(bytes), .bytes = bytes.len };
+}
+
+fn notificationAttempt(id: u8, reply: ?[]const u8) retained_views.Attempt {
+    return .{
+        .id = @splat(id),
+        .occurrence = @splat(id),
+        .capability = .{ .bytes = @import("../app/slack_contract.zig").notification_identity },
+        .inference = false,
+        .request = object("request"),
+        .prepared = object("prepared"),
+        .capture = if (reply) |bytes| .{
+            .disposition = .complete,
+            .response = object("capture"),
+            .reply = object(bytes),
+            .output_tokens = null,
+        } else null,
+        .usage = null,
+    };
+}
+
+fn retrying(a: std.mem.Allocator, admitted: t.Delivery) !idx.Row {
+    const horos = @import("horos");
+    const outcome = try c.encodeOwned(t.DeliveryOutcome, a, .{ .rejected = .{
+        .code = .{ .bytes = "ratelimited" },
+        .retryable = true,
+    } });
+    const reply: horos.data.invocation.Result = .{
+        .request_identity = @splat(1),
+        .value = outcome,
+    };
+    const bytes = try a.alloc(
+        u8,
+        try horos.data.invocation.encodedLength(horos.data.invocation.Result, reply),
+    );
+    _ = try horos.data.invocation.encode(horos.data.invocation.Result, a, reply, bytes);
+    var source = try row(a, 2, .{ .delivery = admitted }, null);
+    const attempts = try a.dupe(retained_views.Attempt, &.{
+        notificationAttempt(1, bytes),
+        notificationAttempt(2, null),
+    });
+    source.owner_snapshot.?.attempts.items = attempts;
+    source.owner_evidence.?.attempts = try a.dupe(retained_views.AttemptEvidence, &.{
+        .{ .id = attempts[0].id, .response = "capture", .reply = bytes },
+        .{ .id = attempts[1].id, .response = null, .reply = null },
+    });
+    return source;
+}
+
+test "index rebuilds an unsettled delivery fact after its task status becomes unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try genesis(a);
+    const admitted = try pendingDelivery(a, ref(initial));
+    var source = try retrying(a, admitted);
+    const bytes = try snapshotBytes(a, source);
+    var fact: t.Settlement = .{
+        .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
+        .owner_snapshot = .{ .bytes = bytes },
+        .kind = .delivery,
+        .accounting = .{},
+        .delivery = null,
+    };
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    source.owner_evidence.?.status = .unknown;
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    fact.delivery = .{
+        .admitted = admitted,
+        .outcome = .{ .indeterminate = .{ .bytes = "possibly_transmitted" } },
+        .receipt = null,
+    };
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    source.owner_evidence.?.status = null;
+    try rebuildFolded(a, &.{ source, initial }, fact, null);
+    fact.delivery.?.outcome = .{ .rejected = .{ .code = .{ .bytes = "ratelimited" } } };
+    try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
+}

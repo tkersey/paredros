@@ -410,6 +410,7 @@ fn rejectedPlan(
 ) !void {
     var reply = try external.evaluate(a, .{ .prepare = try input(allocator, selected, 0, live) });
     defer reply.deinit();
+    try std.testing.expect(reply.value == .terminal);
     var report = try c.decodeOwned(e.Report, a, reply.value.terminal.report.bytes);
     defer report.deinit();
     try std.testing.expectEqualStrings(reason, report.value.rejection.?.bytes);
@@ -448,6 +449,29 @@ test "native experiment rejects missing conditions budgets and exposed withheld 
     unexercised[0].input.step.previous = unexercised[0].input.head;
     changed.cases.items = unexercised;
     try rejectedPlan(allocator, changed, false, "MethodNotExercised");
+    try retainedReserve(allocator, original);
+}
+
+fn exactBound(allocator: std.mem.Allocator, selected: *e.Case) !void {
+    const one: @FieldType(t.Step, "batches") = .{
+        .items = selected.input.step.batches.items[0..1],
+    };
+    const encoded = try c.encodeOwned(@TypeOf(one), allocator, one);
+    selected.input.head.specification.policies.render_input_bytes = encoded.len;
+    selected.input.step.previous = selected.input.head;
+}
+
+fn retainedReserve(allocator: std.mem.Allocator, original: e.ComparisonPlan) !void {
+    var changed = original;
+    const cases = try allocator.dupe(e.Case, original.cases.items);
+    changed.cases.items = cases;
+    try exactBound(allocator, &cases[0]);
+    try rejectedPlan(allocator, changed, false, "MethodNotExercised");
+    cases[0] = original.cases.items[0];
+    try exactBound(allocator, &cases[3]);
+    var reply = try external.evaluate(a, .{ .prepare = try input(allocator, changed, 0, false) });
+    defer reply.deinit();
+    try std.testing.expect(reply.value == .prepared);
 }
 
 fn allocationProbe(allocator: std.mem.Allocator, selected: t.Experiment) !void {
