@@ -89,6 +89,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
             if shown.returncode==0: break
             assert time.monotonic()<deadline,(shown.stdout,shown.stderr)
             time.sleep(.1)
+        deadline=time.monotonic()+120
         while True:
             items=json.loads(run(['messages',task],config=config).stdout)['data']['messages']
             if any(item['purpose']=='activation' for item in items): break
