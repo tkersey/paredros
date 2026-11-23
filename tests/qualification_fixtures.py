@@ -137,8 +137,8 @@ def reopen(binary, fixture, report, home):
         item = command(binary, "--config", config, "monitor", "show", report["obligation"])["data"]
         for field in ("observed", "told"):
             require(item["head"][field] == report["head"][field], f"reopened {field} head differs")
-        items = command(binary, "--config", config, "messages", report["obligation"])["data"]["items"]
-        legacy = [message for message in items if message["purpose"] == "activation"]
+        page = command(binary, "--config", config, "messages", report["obligation"])["data"]
+        legacy = [message for message in page["messages"] if message["purpose"] == "activation"]
         require(legacy and all(message["state"].startswith("legacy_") for message in legacy),
                 "expected the activation flagged legacy")
     require(files() == before, "reopening changed historical namespace files")
