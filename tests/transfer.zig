@@ -1478,11 +1478,28 @@ test "native continuity delivery target ignores lineages whose genesis is pendin
     _ = try destination.nextStep(a, index.obligations[0].task);
 }
 
+fn exportAs(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    operation: []const u8,
+    request: continuity_control.Export,
+) !continuity_control.ExportProgress {
+    return continuity_control.exportBundle(
+        driver,
+        f.arena.allocator(),
+        settings,
+        .{ .io = std.testing.io, .source = source(f) },
+        operation,
+        origin,
+        request,
+    );
+}
+
 test "native continuity export retries resume the pending cut for one name" {
     var f: Fixture = .{};
     defer f.deinit();
     try f.init();
-    const a = f.arena.allocator();
     const genesis = contracts.genesis();
     _ = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
@@ -1490,71 +1507,34 @@ test "native continuity export retries resume the pending cut for one name" {
         .service = &f.service.?,
         .clock = .{ .context = &clock, .now = Clock.now },
     };
-    try driver.attach(a);
+    try driver.attach(f.arena.allocator());
     defer driver.detach();
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
     var settings = config();
     settings.backup_directory = try backup.path();
-    const environment: continuity_control.Environment = .{
-        .io = std.testing.io,
-        .source = source(&f),
-    };
     const request: continuity_control.Export = .{
         .name = .{ .bytes = "retry.paredros" },
         .snapshot = true,
     };
-    const started = try continuity_control.exportBundle(
-        &driver,
-        a,
-        settings,
-        environment,
-        "snapshot-first",
-        origin,
-        request,
-    );
+    const started = try exportAs(&f, &driver, settings, "snapshot-first", request);
     try std.testing.expectEqual(.cut_pending, started.phase);
-    const retried = try continuity_control.exportBundle(
-        &driver,
-        a,
-        settings,
-        environment,
-        "snapshot-retry",
-        origin,
-        request,
-    );
+    const retried = try exportAs(&f, &driver, settings, "snapshot-retry", request);
     try std.testing.expectEqualDeep(started.cut, retried.cut);
     try std.testing.expectEqualStrings("snapshot-first", retried.operation.bytes);
     try completeAdmissions(&f, &driver);
     const written = try exportWritten(&f, &driver, settings, "snapshot-first", "retry.paredros");
     try std.testing.expectEqualDeep(started.cut, written.cut);
-    try std.testing.expectError(error.TransferFileConflict, continuity_control.exportBundle(
-        &driver,
-        a,
-        settings,
-        environment,
-        "snapshot-again",
-        origin,
-        request,
-    ));
-    const fenced = try continuity_control.exportBundle(
-        &driver,
-        a,
-        settings,
-        environment,
-        "transfer-first",
-        origin,
-        .{ .name = .{ .bytes = "first.paredros" } },
+    try std.testing.expectError(
+        error.TransferFileConflict,
+        exportAs(&f, &driver, settings, "snapshot-again", request),
     );
+    const fenced = try exportAs(&f, &driver, settings, "transfer-first", .{
+        .name = .{ .bytes = "first.paredros" },
+    });
     try std.testing.expectEqual(.finalizing, fenced.phase);
-    const resumed = try continuity_control.exportBundle(
-        &driver,
-        a,
-        settings,
-        environment,
-        "transfer-renamed",
-        origin,
-        .{ .name = .{ .bytes = "renamed.paredros" } },
-    );
+    const resumed = try exportAs(&f, &driver, settings, "transfer-renamed", .{
+        .name = .{ .bytes = "renamed.paredros" },
+    });
     try std.testing.expectEqualStrings("transfer-first", resumed.operation.bytes);
 }

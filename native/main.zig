@@ -492,12 +492,7 @@ fn serve(
         .max_frame_bytes = control.frame_bytes_max,
     });
     defer server.deinit();
-    var driver: Driver = .{
-        .service = &service,
-        .clock = .{ .context = &io, .now = wallTime },
-        .model = if (launch.model_binding) |binding| binding.value else null,
-        .bindings = configuration.bindings(launch.config),
-    };
+    var driver = daemonDriver(&service, &io, launch);
     var runtime_context: Runtime = .{
         .config = &launch.config,
         .continuity = try continuityEnvironment(io, &namespace, &admitted, runtime),
@@ -521,6 +516,15 @@ fn serve(
     }
     defer if (runtime_context.slack) |channel| channel.deinit();
     return loop(a, io, &daemon, &runtime_context);
+}
+
+fn daemonDriver(service: *native.tasks.Service(t), io: *std.Io, launch: anytype) Driver {
+    return .{
+        .service = service,
+        .clock = .{ .context = io, .now = wallTime },
+        .model = if (launch.model_binding) |binding| binding.value else null,
+        .bindings = configuration.bindings(launch.config),
+    };
 }
 
 fn continuityEnvironment(
