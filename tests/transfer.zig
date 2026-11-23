@@ -467,6 +467,7 @@ test "native continuity imported output waits for the exclusive ownership releas
     try destination.attach(to.arena.allocator());
     defer destination.detach();
     try importDone(&to, &destination, bundle.value);
+    try expectImportHold(a, &destination, true);
     const model = @import("../app/model_contract.zig").P.identity;
     const asked = try heldAsk(&to, &destination);
     try std.testing.expect(!try permitted(&destination, a, asked, model));
@@ -474,6 +475,7 @@ test "native continuity imported output waits for the exclusive ownership releas
     try finish(&to, asked);
     try std.testing.expect(!try replyPermitted(&destination, a, asked));
     try releaseImport(&to, &destination);
+    try expectImportHold(a, &destination, false);
     try std.testing.expect(try permitted(&destination, a, asked, model));
     try std.testing.expect(try destination.importedTurns(a));
     var index = try destination.rebuild(a);
@@ -489,6 +491,12 @@ test "native continuity imported output waits for the exclusive ownership releas
     try std.testing.expect(try permitted(&destination, a, imported, model));
     try finish(&to, imported);
     try std.testing.expect(try replyPermitted(&destination, a, imported));
+}
+
+fn expectImportHold(a: std.mem.Allocator, driver: *Driver, expected: bool) !void {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(expected, index.import_hold);
 }
 
 const lineage_contract = @import("../app/lineage_audit_contract.zig");

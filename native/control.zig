@@ -542,11 +542,13 @@ fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Va
     var result = try native.values.toJson(struct {
         recovery: ?t.InputReference,
         recovery_hold: bool,
+        import_hold: bool,
         restore_cut: c.Vector(t.InputReference, null),
         recovery_purpose: ?t.RestorePurpose,
     }, a, .{
         .recovery = index.recovery,
         .recovery_hold = index.recovery_hold,
+        .import_hold = index.import_hold,
         .restore_cut = .{ .items = index.restore_cut },
         .recovery_purpose = index.recovery_purpose,
     });

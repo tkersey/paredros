@@ -179,6 +179,7 @@ test "native recovery control validates bindings before mutation and replays exa
     );
     const data = status.object.get("data").?.object;
     try std.testing.expect(!data.get("recovery_hold").?.bool);
+    try std.testing.expect(!data.get("import_hold").?.bool);
     const saved = try native.values.fromJson(?t.InputReference, a, data.get("recovery").?);
     try std.testing.expectEqualDeep(reference, saved.?);
     const cut = try native.values.fromJson(

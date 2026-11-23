@@ -238,7 +238,8 @@ including across a restart, while other control and Slack ingress waits. Repeat
 `transfer import PATH` to observe progress; exit 75 means the daemon is still
 materializing. Reusing an import operation for a different file is refused as an
 operation conflict. Import preserves portable observations, pending controls,
-method source, and unresolved delivery evidence. Imported output remains held.
+method source, and unresolved delivery evidence. Imported output, including
+imported conversation turns, remains held; `recovery status` reports `import_hold`.
 Establish that the original source cannot run again, then declare exclusive
 ownership when releasing: run `recovery begin`, take TASK and DIGEST from
 `recovery status`, and run `recovery release TASK DIGEST --exclusive-owner`.
