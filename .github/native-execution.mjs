@@ -4,7 +4,7 @@ const suites = {
   authority: {
     driver: group(20, 'native_authority_test.', 'tests.native_driver.', 'tests.native_delivery_retirement.', 'tests.native_daemon.'),
     proposal: group(1, 'control proposal consumer shows and confirms maximal retained body'),
-    controls: group(78, 'tests.native_session.', 'control CLI preserves', 'control protocol freezes',
+    controls: group(80, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.history_evidence.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
@@ -51,8 +51,8 @@ const suites = {
       'tests.experiment.', 'tests.native_genesis.', 'tests.contracts.'),
   },
   'continuity-first': 7,
-  'continuity-second': 21,
-  'continuity-third': 13,
+  'continuity-second': 22,
+  'continuity-third': 18,
   product: 5,
   crash: 12,
 };
