@@ -121,10 +121,14 @@ def import_archive(binary, fixture, report, home):
 @contextlib.contextmanager
 def preserved(state):
     pristine = state.with_name(state.name + ".pristine")
+    staging = state.with_name(state.name + ".partial")
+    if staging.exists():
+        shutil.rmtree(staging)
     if pristine.exists():
         restore(state, pristine)
-    pristine.mkdir(mode=0o700)
-    clone(state, pristine)
+    staging.mkdir(mode=0o700)
+    clone(state, staging)
+    staging.rename(pristine)
     try:
         yield
     finally:
@@ -165,6 +169,7 @@ def reopened(binary, report, config, state):
     require(audit["report"]["native_closure"]["application_readability"] == "verified",
             "historical namespace readability was not verified")
     require(files() == before, "read-only audit changed historical namespace files")
+    tasks = task_ids(audit)
     with serve(binary, config):
         task = command(binary, "--config", config, "task", "show", report["audit"]["data"]["task"])
         require(task["data"]["input"] == report["audit_task"]["data"]["input"],
@@ -176,6 +181,18 @@ def reopened(binary, report, config, state):
         legacy = [message for message in page["messages"] if message["purpose"] == "activation"]
         require(legacy and all(message["state"].startswith("legacy_") for message in legacy),
                 "expected the activation flagged legacy")
+    after = task_ids(command(binary, "--config", config, "namespace", "check"))
+    require(tasks <= after, "reopen lost historical tasks")
+    added = after - tasks
+    require(len(added) <= 1, f"reopen admitted {len(added)} tasks; expected at most one step")
+    with serve(binary, config):
+        for task in added:
+            shown = command(binary, "--config", config, "task", "show", task)["data"]
+            require(shown["input"]["tag"] == "step", "reopen admitted a task other than a step")
+
+
+def task_ids(audit):
+    return {bytes(task["id"]).hex() for task in audit["report"]["tasks"]}
 
 
 def check_100k(binary, fixture, report, home):
