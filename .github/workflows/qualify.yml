@@ -42,8 +42,10 @@ jobs:
         include:
           - lane: source
             groups: source,emitted
+            budget: 600
           - lane: providers
             groups: providers
+            budget: 600
     env:
       ZIG_DEBUG_CMD: '1'
     steps: &lane-steps
@@ -62,7 +64,7 @@ jobs:
           use-cache: false
           use-tool-cache: true
       - name: Qualify ${{ matrix.groups }}
-        run: zig build qualify -- --group "${{ matrix.groups }}"
+        run: zig build qualify -- --group "${{ matrix.groups }}" --budget-seconds "${{ matrix.budget }}"
   product:
     name: Qualification / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
@@ -72,6 +74,7 @@ jobs:
         include:
           - lane: product
             groups: product
+            budget: 840
     env:
       ZIG_DEBUG_CMD: '1'
     steps: *lane-steps

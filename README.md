@@ -107,7 +107,7 @@ within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`
 The Linux product smoke runs on every pull request as its own
 `Qualification / product` check but is outside the gate: compiling the product
 takes six to eight minutes on a hosted runner, which leaves the lane at nine to
-ten minutes. It passes `--essential`, omitting the licenses, version and offline
+ten minutes, so it runs with `--budget-seconds 840`. It passes `--essential`, omitting the licenses, version and offline
 ask probes, which cost about 75 seconds on the direct backend; the macOS smoke
 keeps them. The process-death cases need about nine minutes on a hosted runner,
 so they run in local and fallback qualification with historical reopen and

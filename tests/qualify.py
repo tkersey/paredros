@@ -40,6 +40,11 @@ ESSENTIAL_GROUPS = ("providers",)
 BUDGET_SECONDS = 600
 
 
+def set_budget(seconds):
+    global BUDGET_SECONDS
+    BUDGET_SECONDS = seconds
+
+
 def build_jobs():
     memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     return max(1, min(os.cpu_count() or 1, memory // (3 << 30)))
@@ -324,7 +329,11 @@ def main():
     options = parser.add_mutually_exclusive_group()
     options.add_argument("--list", action="store_true", help="print the local inventory without running it")
     options.add_argument("--group", help="run comma-separated groups and their prerequisites")
+    parser.add_argument("--budget-seconds", type=int, default=BUDGET_SECONDS,
+                        help="shared wall-clock budget measured from zig build (default 600)")
     args = parser.parse_args()
+    require(0 < args.budget_seconds <= 900, "budget must be between 1 and 900 seconds")
+    set_budget(args.budget_seconds)
     system = (platform.system(), platform.machine())
     base = Path("zig-out/qualification").resolve()
     install = base / ("build-" + "-".join(system))
