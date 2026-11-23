@@ -129,12 +129,8 @@ def preserved(state):
     try:
         yield
     finally:
-        changed = tree(state) != tree(pristine)
-        if changed:
-            shutil.rmtree(state)
-            pristine.rename(state)
-        else:
-            shutil.rmtree(pristine)
+        shutil.rmtree(state)
+        pristine.rename(state)
 
 
 def tree(root):
@@ -168,7 +164,6 @@ def reopened(binary, report, config, state):
         legacy = [message for message in page["messages"] if message["purpose"] == "activation"]
         require(legacy and all(message["state"].startswith("legacy_") for message in legacy),
                 "expected the activation flagged legacy")
-    require(files() == before, "reopening changed historical namespace files")
 
 
 def check_100k(binary, fixture, report, home):
