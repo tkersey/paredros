@@ -122,15 +122,27 @@ def import_archive(binary, fixture, report, home):
 def preserved(state):
     pristine = state.with_name(state.name + ".pristine")
     if pristine.exists():
-        shutil.rmtree(state)
-        pristine.rename(state)
-    flags = ["-c"] if platform.system() == "Darwin" else []
-    subprocess.run(["cp", *flags, "-R", state, pristine], check=True)
+        restore(state, pristine)
+    pristine.mkdir(mode=0o700)
+    clone(state, pristine)
     try:
         yield
     finally:
-        shutil.rmtree(state)
-        pristine.rename(state)
+        restore(state, pristine)
+
+
+def clone(source, destination):
+    flags = ["-c"] if platform.system() == "Darwin" else []
+    for item in sorted(source.iterdir()):
+        require(item.is_file(), f"unexpected namespace entry: {item}")
+        subprocess.run(["cp", *flags, "-p", item, destination / item.name], check=True)
+
+
+def restore(state, pristine):
+    for item in state.iterdir():
+        item.unlink()
+    clone(pristine, state)
+    shutil.rmtree(pristine)
 
 
 def tree(root):
