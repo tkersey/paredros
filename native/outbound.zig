@@ -40,8 +40,7 @@ fn collect(
         if (head.activation) |activation|
             try append(a, &wanted, .{ .intent = activation, .producer = current });
         if (head.digest) |digest| {
-            if (digest.hold == .none and clock_ms >= digest.not_before_ms and
-                digest.delivery.payload.specification_revision == head.specification.revision)
+            if (digest.hold == .none and clock_ms >= digest.not_before_ms)
                 try append(a, &wanted, .{ .intent = digest.delivery, .producer = current });
         }
         if (head.question) |question| {

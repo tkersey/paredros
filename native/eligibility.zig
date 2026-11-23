@@ -85,9 +85,7 @@ fn deliveryPermitted(
             if (try equal(a, t.DeliveryIntent, notice, intent)) return true;
         return false;
     }
-    if (!obligation.ordinaryDispatch() or
-        value.payload.logical.specification_revision != head.specification.revision)
-        return false;
+    if (!obligation.ordinaryDispatch()) return false;
     if (value.key.purpose == .digest) {
         const wanted = head.digest orelse return false;
         return wanted.hold == .none and clock_ms >= wanted.not_before_ms and
@@ -96,6 +94,7 @@ fn deliveryPermitted(
     if (value.key.purpose == .question) {
         const question = head.question orelse return false;
         return question.specification_revision == head.specification.revision and
+            value.payload.logical.specification_revision == head.specification.revision and
             try equal(a, t.DeliveryIntent, question.prompt, intent);
     }
     return false;

@@ -325,6 +325,26 @@ test "outbound delivery admits authored retry generation without inventing one f
     );
 }
 
+test "outbound digest keeps its frozen payload across a specification amendment" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    var store: Store = .{};
+    defer store.deinit();
+    const first = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
+    defer a.free(first);
+    try std.testing.expectEqual(1, first.len);
+    var saved = try store.read(0);
+    defer saved.deinit();
+    try fixture.addDelivery(saved.value.delivery, first[0]);
+    try fixture.advance();
+    fixture.index.records[2].result.?.step.head.specification.revision += 1;
+    const amended = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 300);
+    defer a.free(amended);
+    try std.testing.expectEqualSlices(t.Id, first, amended);
+    try std.testing.expect(try permits(&fixture, first[0]));
+    try std.testing.expectEqual(1, store.entries.items.len);
+}
+
 test "outbound delivery respects deadline hold and effective pending control fence" {
     var fixture = try Fixture.init();
     defer fixture.index.deinit();
