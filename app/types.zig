@@ -93,7 +93,7 @@ pub const Accounting = struct {
 };
 pub const DeliveryKey = struct {
     lineage: Digest,
-    purpose: enum { activation, digest, question, turn, failure },
+    purpose: enum { activation, digest, question },
     identity: Digest,
     generation: u32,
 };
@@ -451,7 +451,6 @@ pub const Turn = struct {
 pub const TurnResult = struct {
     reply: Text,
     proposals: c.Vector(Proposal, 3),
-    delivery: ?DeliveryIntent = null,
 };
 pub const Experiment = struct {
     envelope: Envelope,

@@ -12,6 +12,7 @@ fn local(
     a: std.mem.Allocator,
     producer: t.Reference,
     purpose: @FieldType(t.DeliveryKey, "purpose"),
+    identity: u8,
     obligation: ?t.Id,
     buttons: []const t.Button,
 ) !t.Delivery {
@@ -19,7 +20,7 @@ fn local(
         .key = .{
             .lineage = @splat(8),
             .purpose = purpose,
-            .identity = @splat(@as(u8, @backingInt(purpose)) + 20),
+            .identity = @splat(identity),
             .generation = 0,
         },
         .payload = .{
@@ -73,11 +74,11 @@ fn witness(a: std.mem.Allocator) !Witness {
     const initial = try rows.genesis(a);
     const first = rows.step(rows.head(), rows.ref(initial), "message-step");
     const stepped = try rows.row(a, 3, .{ .step = first }, rows.successor(first));
-    const activation = try local(a, rows.ref(initial), .activation, @splat(1), &.{});
+    const activation = try local(a, rows.ref(initial), .activation, 20, @splat(1), &.{});
     const announced = try rows.row(a, 4, .{ .delivery = activation }, confirmed);
     var failed = try rows.row(a, 5, .{ .delivery = try digest(a, rows.ref(initial)) }, null);
     failed.owner_snapshot.?.outcome = .cancelled;
-    const question = try local(a, rows.ref(stepped), .question, @splat(1), &.{.{
+    const question = try local(a, rows.ref(stepped), .question, 22, @splat(1), &.{.{
         .block_id = .{ .bytes = "source-gap" },
         .action_id = .{ .bytes = "answer" },
         .value = .{ .bytes = "accept_gap" },
@@ -85,7 +86,7 @@ fn witness(a: std.mem.Allocator) !Witness {
     }});
     const delivered = try rows.row(a, 6, .{ .delivery = question }, confirmed);
     const foreign = try rows.row(a, 8, .{
-        .delivery = try local(a, rows.ref(initial), .failure, @splat(9), &.{}),
+        .delivery = try local(a, rows.ref(initial), .activation, 24, @splat(9), &.{}),
     }, null);
     var all: std.ArrayList(idx.Row) = .empty;
     try all.appendSlice(a, &.{ foreign, delivered, failed, announced, stepped, initial });
@@ -186,7 +187,7 @@ test "messages keep earlier ordinals when a late local message is folded" {
     const observed = try witness(a);
     const seen = try messages.page(a, &observed.index, observed.target, null, 64);
     try std.testing.expectEqual(3, seen.total);
-    const late = try local(a, rows.ref(observed.rows[4]), .turn, observed.target, &.{});
+    const late = try local(a, rows.ref(observed.rows[4]), .question, 25, observed.target, &.{});
     const reply = try rows.row(a, 11, .{ .delivery = late }, confirmed);
     var all: std.ArrayList(idx.Row) = .empty;
     try all.appendSlice(a, observed.rows);
@@ -199,7 +200,7 @@ test "messages keep earlier ordinals when a late local message is folded" {
     const folded = try idx.Index.init(Native, a, all.items, &.{});
     const next = try messages.page(a, &folded, observed.target, seen.total, 64);
     try std.testing.expectEqual(1, next.messages.items.len);
-    try std.testing.expectEqual(.turn, next.messages.items[0].purpose);
+    try std.testing.expectEqual(.question, next.messages.items[0].purpose);
     try std.testing.expectEqual(4, next.messages.items[0].ordinal);
     const again = try messages.page(a, &folded, observed.target, null, 64);
     for (seen.messages.items, again.messages.items[0..3]) |before, after| {

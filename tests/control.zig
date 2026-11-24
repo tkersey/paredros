@@ -692,7 +692,7 @@ test "control proposal consumer shows and confirms maximal retained body by auth
     } };
     try driver.attach(frame);
     defer driver.detach();
-    const token = try consumerToken(&fixture, turn_id);
+    const token = try consumerToken(&fixture, input);
     const response = try consumerCall(frame, &driver, "show", token);
     try std.testing.expectEqualStrings(
         "observed",
@@ -837,23 +837,10 @@ pub fn consumerBinding() t.ModelBinding {
     };
 }
 
-fn consumerToken(fixture: *ConsumerFixture, turn_id: t.Id) ![]const u8 {
-    const frame = fixture.arena.allocator();
-    var saved = (try fixture.service.?.applicationValue(frame, turn_id, .result)).?;
-    defer saved.deinit();
-    try std.testing.expectEqualStrings(t.output_schema_id, saved.schema_id);
-    try std.testing.expectEqual(.json, saved.encoding);
-    const value = try native.json.parseInto(frame, saved.bytes, .{
-        .bytes = saved.bytes.len,
-        .depth = saved.bytes.len,
-        .tokens = saved.bytes.len,
-        .members = saved.bytes.len,
+fn consumerToken(fixture: *ConsumerFixture, input: t.Turn) ![]const u8 {
+    const identity = std.fmt.bytesToHex(input.envelope.stable_request, .lower);
+    return std.fmt.allocPrint(fixture.arena.allocator(), "{s}:{d}:0", .{
+        &identity,
+        input.attempt,
     });
-    const output = try native.values.fromJson(t.Output, frame, value);
-    const text = output.turn.delivery.?.payload.frozen_text.bytes;
-    const prefix = "paredros proposal confirm ";
-    const found = std.mem.find(u8, text, prefix) orelse return error.MissingCliNotice;
-    const start = found + prefix.len;
-    const end = std.mem.findScalarPos(u8, text, start, '\n') orelse text.len;
-    return text[start..end];
 }

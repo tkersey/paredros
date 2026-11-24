@@ -139,24 +139,6 @@ test "native conversation turn binds distinct proposals and freezes model contex
         try std.testing.expectEqual(request.target, proposal.target);
         try std.testing.expect(proposal.body.directive == .pause);
     }
-    const delivery = result.delivery.?;
-    try std.testing.expectEqualDeep(request.envelope.stable_request, delivery.key.identity);
-    try std.testing.expectEqual(.turn, delivery.key.purpose);
-    try std.testing.expectEqual(2, delivery.payload.buttons.items.len);
-    try std.testing.expectEqual(request.target, delivery.payload.obligation);
-    try std.testing.expectEqual(
-        request.expected_revision.?,
-        delivery.payload.specification_revision,
-    );
-    try std.testing.expectEqualStrings(
-        "paredros.proposal.confirm.v1",
-        delivery.payload.buttons.items[0].action_id.bytes,
-    );
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        delivery.payload.buttons.items[0].value.bytes,
-        delivery.payload.buttons.items[1].value.bytes,
-    ));
     request.context.bytes = "new unrelated context";
     const invalid = try fixture.execute("changed-context", request);
     var task = try fixture.service.?.task(fixture.arena.allocator(), invalid);
@@ -173,8 +155,6 @@ test "native conversation final failure and absent configuration cannot invoke t
     request.attempt = 2;
     const failed = try fixture.output(try fixture.execute("final-attempt", request));
     try std.testing.expectEqual(0, failed.proposals.items.len);
-    try std.testing.expectEqual(request.attempt, failed.delivery.?.key.generation);
-    try std.testing.expectEqual(0, failed.delivery.?.payload.buttons.items.len);
     try std.testing.expect(std.mem.find(u8, failed.reply.bytes, "could not complete") != null);
     request.attempt = 0;
     request.model = null;
@@ -230,20 +210,10 @@ test "native conversation describes exact hostile Unicode fields and binds attem
         body.object.get("interval_ms").?.number_string,
     );
     try std.testing.expectEqualDeep(request.proposal_offers.items[0], proposal.body);
-    const delivery = result.delivery.?;
-    try std.testing.expectEqual(1, delivery.key.generation);
     try std.testing.expectEqual(1, proposal.identity.attempt);
-    const selected = delivery.payload.buttons.items[0];
-    try std.testing.expect(std.mem.endsWith(u8, selected.value.bytes, ":1:0"));
-    try std.testing.expectEqualStrings("Confirm proposal 0", selected.label.bytes);
-    try std.testing.expect(std.mem.find(
-        u8,
-        delivery.payload.frozen_text.bytes,
-        proposal.description.?.bytes,
-    ) != null);
 }
 
-test "native conversation retains maximal exact proposal body for CLI without a button" {
+test "native conversation retains maximal exact proposal body without a description" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -256,14 +226,6 @@ test "native conversation retains maximal exact proposal body for CLI without a 
     try std.testing.expectEqual(@as(?t.Text, null), proposal.description);
     try std.testing.expectEqualDeep(request.proposal_offers.items[0], proposal.body);
     try std.testing.expectEqualSlices(u8, wording, proposal.body.directive.amend.wording.?.bytes);
-    const delivery = result.delivery.?;
-    try std.testing.expectEqual(0, delivery.payload.buttons.items.len);
-    try std.testing.expect(std.mem.find(
-        u8,
-        delivery.payload.frozen_text.bytes,
-        "paredros proposal confirm",
-    ) != null);
-    try std.testing.expect(delivery.payload.frozen_text.bytes.len < 4000);
 }
 
 fn checkedOutput(fixture: *Fixture, task: t.Id) !t.TurnResult {
@@ -325,11 +287,6 @@ test "native conversation refuses an invalid confirmation without invoking a con
         "This confirmation could not be admitted. No action was taken.",
         result.reply.bytes,
     );
-    try std.testing.expectEqualDeep(
-        request.envelope.stable_request,
-        result.delivery.?.key.identity,
-    );
-    try std.testing.expectEqual(0, result.delivery.?.payload.buttons.items.len);
 }
 
 test "native conversation retains full multibyte descriptions within the scalar budget" {
@@ -348,5 +305,4 @@ test "native conversation retains full multibyte descriptions within the scalar 
     const body = parsed.value.object.get("body").?.object.get("directive").?.object.get("amend").?;
     try std.testing.expectEqualStrings(wording, body.object.get("wording").?.string);
     try std.testing.expectEqualDeep(request.proposal_offers.items[0], proposal.body);
-    try std.testing.expectEqual(1, result.delivery.?.payload.buttons.items.len);
 }

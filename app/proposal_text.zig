@@ -89,7 +89,7 @@ fn literal(c: protean.Context, text: []const u8) !a.Value(Text) {
     return c.literal(Text, .{ .bytes = text });
 }
 
-pub fn literalCost(text: []const u8) !u64 {
+fn literalCost(text: []const u8) !u64 {
     var total: u64 = 0;
     for (text) |byte| {
         const cost: u64 = switch (byte) {
@@ -448,7 +448,7 @@ fn needsEscape(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
     );
 }
 
-pub fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var width = try b.constant(u64, 4);
     inline for (.{ .{ 240, 3 }, .{ 224, 2 }, .{ 128, 1 } }) |entry|
         width = try b.select(
@@ -460,7 +460,7 @@ pub fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
 }
 
 // The caller supplies the leading byte of an admitted UTF-8 scalar.
-pub fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
+fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
     var cost = try b.constant(u64, 1);
     inline for (.{ .{ '&', 5 }, .{ '<', 4 }, .{ '>', 4 } }) |entry|
         cost = try b.select(
@@ -561,32 +561,5 @@ fn textPiece(
             .cost = try raw.field(span, "cost"),
             .width = try raw.checked(.subtract, end, index, .{ .overflow = bounds }),
         })),
-    );
-}
-
-pub fn identity(c: protean.Context, b: anytype, digest: a.Value(t.Digest)) !a.Value(t.Name) {
-    var result = try literal(c, "");
-    inline for (0..32) |index| {
-        const byte = try b.variantPayload(
-            try b.sequenceGet(digest, try b.constant(u64, index)),
-            "some",
-            try a.failure(c, "proposal_identity_bounds"),
-        );
-        result = try b.blobConcat(
-            try c.schema(Text),
-            result,
-            try byteEncoding(c, b, byte, true),
-            try a.failure(c, "proposal_identity_capacity"),
-        );
-    }
-    return b.blobSlice(
-        try c.schema(t.Name),
-        result,
-        try b.constant(u64, 0),
-        try b.blobLength(result),
-        .{
-            .capacity = try a.failure(c, "proposal_identity_capacity"),
-            .invalid_utf8 = try a.failure(c, "proposal_identity_utf8"),
-        },
     );
 }

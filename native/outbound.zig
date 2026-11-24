@@ -61,7 +61,6 @@ pub fn permitted(
                 try equal(a, t.DeliveryIntent, question.prompt, intent)
         else
             false,
-        .turn, .failure => false,
     };
 }
 

@@ -197,12 +197,12 @@ scenario.
 ## Reading updates
 
 Every output for the owner is a local message: the activation notice, commit
-digests, questions, and failure notices. A message is recorded when its `delivery`
-task completes. That task performs no external write; the next step folds its
-confirmation once and advances the told frontier. A delivery task left unfinished
-by a stop or crash resumes only while the rules that admit a delivery still allow
-it: no output hold, no transfer, a key outside the restore cut, and an output its
-obligation still wants. Otherwise it stays parked.
+digests, and questions. A message is recorded when its `delivery` task completes.
+That task performs no external write; the next step folds its confirmation once
+and advances the told frontier. A delivery task left unfinished by a stop or crash
+resumes only while the rules that admit a delivery still allow it: no output hold,
+no transfer, a key outside the restore cut, and an output its obligation still
+wants. Otherwise it stays parked.
 
 ```sh
 paredros --config /absolute/config.json messages OBLIGATION_ID
