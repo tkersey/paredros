@@ -197,33 +197,26 @@ scenario.
 ## Reading updates
 
 Every output for the owner is a local message: the activation notice, commit
-digests, questions, failure notices, and control notices. A message is recorded
-when its `delivery` task completes. That task performs no external write; the next
-step folds its confirmation once and advances the told frontier. A delivery task
-left unfinished by a stop or crash resumes only while the rules that admit a
-delivery still allow it: no output hold, no transfer, a key outside the restore
-cut, and an output its obligation still wants. Otherwise it stays parked.
+digests, questions, and failure notices. A message is recorded when its `delivery`
+task completes. That task performs no external write; the next step folds its
+confirmation once and advances the told frontier. A delivery task left unfinished
+by a stop or crash resumes only while the rules that admit a delivery still allow
+it: no output hold, no transfer, a key outside the restore cut, and an output its
+obligation still wants. Otherwise it stays parked.
 
 ```sh
 paredros --config /absolute/config.json messages OBLIGATION_ID
 paredros --config /absolute/config.json messages OBLIGATION_ID --after ORDINAL --limit N
-paredros --config /absolute/config.json messages --after ORDINAL --limit N
 ```
 
-`messages` is read-only and returns a bounded page. An obligation's list starts
-with its Slack-era messages. A local message joins the list when a step folds
-its confirmation; messages folded by the same step are ordered by purpose, then
-key. After a cancel or transfer no step folds again, so the remaining local
-messages are appended together once none can still be admitted. A new message
-therefore always lands after every message already listed, and an ordinal cursor
-stays valid as messages are added; continue from the last ordinal until the next
-cursor is null. Without an ID, `messages` lists conversation replies that named
-no obligation (only Slack-era conversation turns produce them): their Slack-era
-copies first, then their local messages, which appear together once no Slack-era
-conversation turn can still reply. Each item carries its task, purpose, key,
-issue, superseded key, covered sequence range, text, links, and choices, with a
-state of `delivered`, `pending`, `legacy_delivered`, `legacy_unsent`, or
-`legacy_possibly_sent`.
+`messages` is read-only and returns a bounded page. A message joins its
+obligation's list when a step folds its confirmation; messages folded by the same
+step are ordered by purpose, then key. After a cancel or transfer no step folds
+again, so the remaining messages are appended together. A new message therefore
+always lands after every message already listed, and an ordinal cursor stays valid
+as messages are added; continue from the last ordinal until the next cursor is
+null. Each item carries its task, purpose, key, issue, superseded key, covered
+sequence range, text, links, and choices, with a state of `delivered` or `pending`.
 
 A question's choices include the command that answers it, `question answer ID
 QUESTION_DIGEST CHOICE`; `monitor show` also reports the open question. `proposal
@@ -231,38 +224,14 @@ show` and `proposal confirm` handle proposals, and `ask` waits for and prints th
 conversation reply. A held digest is inspected with `delivery show KEY_JSON` and
 released with `delivery release ID KEY_JSON`.
 
-## Upgrading a Slack-era namespace
+## Upgrading a namespace
 
-A namespace created by an earlier build keeps its Slack identity. Keep its
-configuration's `slack` section (`account`, `app`, `workspace`, `operator`,
-`channel`, `bot_id`) unchanged: it is read only as the namespace's owner binding,
-which fixes the tenant and the destination that retained tasks, imports, and
-recovery release are checked against. Without it, or with any value changed,
-existing tasks belong to a different owner and are refused. Remove
-`grants.slack_history`, `grants.slack_write`, `slack_bot_credential_file`, and
-`slack_app_credential_file`; a configuration that still sets them is refused with
-`SlackRemoved`. A configuration without `slack` binds a new namespace to the local
-owner.
-
-`namespace check` reads an old namespace without writing to it. `serve` continues
-it and writes: steps and conversation turns pinned to the Slack-era program are
-superseded by replacements under this build (the old step or turn is cancelled
-and a new one runs). To keep a Slack-era state as an archive, take a snapshot
-export with the earlier build before serving the namespace with this one.
-Retained Slack deliveries, button interactions, and audit records keep validating
-against their stored digests and stay readable; audit and lineage-audit tasks are
-never dispatched again, and no Slack-era delivery is ever run again. Each commit
-digest that was never sent is settled once and reissued as a local message with
-the next generation; if a step had already folded its pending state before the
-upgrade, `serve` first cancels that delivery task so its settlement can be
-recorded. A digest whose Slack write may have been sent is held as an uncertain
-transmission; `delivery release` issues a local replacement that warns the
-earlier copy may also have arrived. Activation notices, questions, control
-notices, and conversation replies addressed to Slack stay as history, listed by
-`messages` with a legacy state, and are not reissued. A Slack-origin conversation
-turn whose reply was never delivered gets a local message. Importing a Slack-era
-bundle requires the same `slack` section in the importing configuration; its
-unresolved deliveries arrive held and are reissued locally after release.
+`namespace check` reads a namespace created by an earlier build without writing
+to it. `serve` continues it and writes: steps and conversation turns pinned to an
+earlier program, profile, or runtime are superseded by replacements under this
+build (the old step or turn is cancelled and a new one runs). To keep the earlier
+state as an archive, take a snapshot export with the earlier build before serving
+the namespace with this one.
 
 ## Recovery and handoff
 

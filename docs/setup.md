@@ -11,10 +11,7 @@ the numeric repository ID, UID, ref, paths, and model selection. The `account`
 fields are stable local binding names. Use a GitHub credential authorized for
 read-only repository contents and metadata on the selected repository. An account
 label alone grants no remote capability: the two explicit `grants` select access.
-A new installation omits the `slack` section and binds its namespace to the local
-owner. An installation upgraded from a Slack-era build keeps that section unchanged
-and drops the Slack grants and credential files, as the README's upgrade section
-describes.
+The configuration schema is closed; an unknown field is refused.
 
 Install the selected `siwc` executable and prepare its model account under the
 service UID. Set its exact account, supported model slug and effort, and protected
