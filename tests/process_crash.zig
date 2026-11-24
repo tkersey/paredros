@@ -297,6 +297,7 @@ fn verifyGenesis(f: *Fixture, driver: *Driver) !void {
     const completed = state.value.terminal();
     state.deinit();
     try std.testing.expect(!completed);
+    try std.testing.expectEqual(1, try driver.resumeRetained(a, 8));
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     try drive(f, &session, witness.subject);
