@@ -95,23 +95,40 @@ pub fn scalar(
     );
 }
 
-fn within(
-    b: anytype,
-    code: a.Value(u32),
-    comptime ranges: []const [2]u32,
-) anyerror!a.Value(bool) {
-    if (ranges.len == 1) return b.select(
-        try b.less(code, try b.constant(u32, ranges[0][0])),
+fn within(b: anytype, code: a.Value(u32), comptime ranges: []const [2]u32) !a.Value(bool) {
+    const last = ranges.len - 1;
+    const head = try b.branch();
+    var lowers: [last]@TypeOf(head) = undefined;
+    var uppers: [last]@TypeOf(head) = undefined;
+    var below: [last]a.Value(bool) = undefined;
+    var leaves: [last]a.Value(bool) = undefined;
+    lowers[0] = head;
+    uppers[0] = try b.branch();
+    below[0] = try b.less(code, try b.constant(u32, ranges[1][0]));
+    inline for (1..last) |level| {
+        const parent = uppers[level - 1];
+        lowers[level] = try parent.branch();
+        uppers[level] = try parent.branch();
+        below[level] = try parent.less(code, try parent.constant(u32, ranges[level + 1][0]));
+    }
+    inline for (0..last) |level| leaves[level] = try contains(lowers[level], code, ranges[level]);
+    var value = try contains(uppers[last - 1], code, ranges[last]);
+    inline for (1..last) |step| {
+        const level = last - step;
+        value = try uppers[level - 1].conditional(
+            below[level],
+            try lowers[level].ret(leaves[level]),
+            try uppers[level].ret(value),
+        );
+    }
+    return b.conditional(below[0], try lowers[0].ret(leaves[0]), try uppers[0].ret(value));
+}
+
+fn contains(b: anytype, code: a.Value(u32), comptime range: [2]u32) !a.Value(bool) {
+    return b.select(
+        try b.less(code, try b.constant(u32, range[0])),
         try b.constant(bool, false),
-        try b.less(code, try b.constant(u32, ranges[0][1] + 1)),
-    );
-    const middle = ranges.len / 2;
-    const lower = try b.branch();
-    const upper = try b.branch();
-    return b.conditional(
-        try b.less(code, try b.constant(u32, ranges[middle][0])),
-        try lower.ret(try within(lower, code, ranges[0..middle])),
-        try upper.ret(try within(upper, code, ranges[middle..])),
+        try b.less(code, try b.constant(u32, range[1] + 1)),
     );
 }
 
