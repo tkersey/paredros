@@ -10,6 +10,7 @@ const transport = @import("http.zig");
 pub const Environment = struct { repository: t.Repository, http: transport.Config };
 pub const Capture = union(enum) {
     local_rejection: struct { request_digest: t.Digest, reason: contract.Failure },
+    refused: struct { request_digest: t.Digest, refused: transport.Refused },
     response: t.ReadEvidence,
 };
 
@@ -64,6 +65,18 @@ fn reject(a: std.mem.Allocator, bytes: []const u8, reason: contract.Failure) reg
     return .{ .captured = captured };
 }
 
+fn refuse(
+    a: std.mem.Allocator,
+    request: adapter.Prepared,
+    refused: transport.Refused,
+) registry.Acquisition {
+    const captured = c.encodeOwned(Capture, a, .{ .refused = .{
+        .request_digest = request.request_digest,
+        .refused = refused,
+    } }) catch |err| return .{ .unknown = err };
+    return .{ .captured = captured };
+}
+
 pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
     ctx.checkCancellation() catch |err| return .{ .definitely_not_sent = err };
     var request = c.decodeOwned(contract.Request, ctx.allocator, bytes) catch |err|
@@ -111,6 +124,7 @@ pub fn acquire(ctx: registry.Context, bytes: []const u8) !registry.Acquisition {
     return switch (transport.execute(ctx.allocator, ctx.io, env.http, &http)) {
         .definitely_not_sent => |err| .{ .definitely_not_sent = err },
         .unknown => |err| .{ .unknown = err },
+        .refused => |refused| refuse(ctx.allocator, prepared, refused),
         .captured => |captured| capture(ctx, prepared, captured),
     };
 }
@@ -132,7 +146,10 @@ fn capture(
     defer captured.deinit();
     const captured_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds();
     const bytes = captureBytes(ctx.allocator, request, captured, captured_ms) catch |err|
-        return .{ .unknown = err };
+        return refuse(ctx.allocator, request, .{
+            .status = captured.status,
+            .refusal = if (err == error.OutOfMemory) .local_resources else .unrepresentable,
+        });
     return .{ .captured = bytes };
 }
 
@@ -187,17 +204,18 @@ pub fn interpret(
     defer request.deinit();
     var captured = try c.decodeOwned(Capture, ctx.allocator, captured_bytes);
     defer captured.deinit();
-    switch (captured.value) {
-        .local_rejection => |rejected| {
+    const observation: adapter.Observation = switch (captured.value) {
+        .local_rejection => |rejected| local: {
             if (!std.meta.eql(rejected.request_digest, hash(expected))) return error.InvalidCapture;
-            return .{ .reply = try c.encodeOwned(contract.Reply, ctx.allocator, .{
-                .rejected = .{ .reason = rejected.reason, .evidence = null },
-            }) };
+            break :local .{ .local = rejected.reason };
         },
-        .response => |evidence| {
-            var reply = try adapter.interpret(ctx.allocator, request.value, evidence);
-            defer reply.deinit();
-            return .{ .reply = try c.encodeOwned(contract.Reply, ctx.allocator, reply.value) };
-        },
-    }
+        .refused => |refused| .{ .refused = .{
+            .request_digest = refused.request_digest,
+            .refused = refused.refused,
+        } },
+        .response => |evidence| .{ .response = evidence },
+    };
+    var reply = try adapter.classify(ctx.allocator, request.value, observation);
+    defer reply.deinit();
+    return .{ .reply = try c.encodeOwned(contract.Reply, ctx.allocator, reply.value) };
 }

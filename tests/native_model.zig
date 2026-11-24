@@ -380,7 +380,17 @@ fn expectFailure(fixture: *Fixture, id: t.Id, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, failure.code.bytes);
 }
 
-test "native model candidate invalid OID and unoffered proposal references cannot escape" {
+fn expectUnnamedHighlight(result: m.Result) !void {
+    const summary = result.candidate.summary;
+    try std.testing.expectEqualStrings("Frozen summary", summary.summary.bytes);
+    try std.testing.expectEqual(1, summary.highlights.items.len);
+    const unnamed: t.Oid = @splat(0);
+    try std.testing.expectEqualSlices(u8, &unnamed, &summary.highlights.items[0].oid);
+    try std.testing.expectEqual(20, result.usage.?.input_tokens.?);
+    try std.testing.expectEqual(10, result.usage.?.output_tokens.?);
+}
+
+test "native model candidate keeps a summary naming no commit and refuses unoffered proposals" {
     var scenario: Scenario = .{ .selected = .invalid_oid };
     var fixture: Fixture = .{};
     defer fixture.deinit();
@@ -394,10 +404,7 @@ test "native model candidate invalid OID and unoffered proposal references canno
         modelInput(binding, .summary),
     );
     try std.testing.expect(try drive(&fixture, invalid.receipt.task, false));
-    const rejected = try fixture.output(invalid.receipt.task);
-    try std.testing.expectEqual(.invalid_arguments, rejected.candidate.rejected);
-    try std.testing.expectEqual(20, rejected.usage.?.input_tokens.?);
-    try std.testing.expectEqual(10, rejected.usage.?.output_tokens.?);
+    try expectUnnamedHighlight(try fixture.output(invalid.receipt.task));
     try std.testing.expectEqual(1, scenario.calls);
     scenario.selected = .invalid_hex;
     const invalid_hex = try fixture.service.?.submit(
@@ -406,8 +413,7 @@ test "native model candidate invalid OID and unoffered proposal references canno
         modelInput(binding, .summary),
     );
     try std.testing.expect(try drive(&fixture, invalid_hex.receipt.task, false));
-    const hex_result = try fixture.output(invalid_hex.receipt.task);
-    try std.testing.expectEqual(.invalid_arguments, hex_result.candidate.rejected);
+    try expectUnnamedHighlight(try fixture.output(invalid_hex.receipt.task));
     try std.testing.expectEqual(2, scenario.calls);
     scenario.selected = .conversation;
     var missing = modelInput(binding, .conversation);

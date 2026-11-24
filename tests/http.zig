@@ -269,3 +269,40 @@ test "HTTP unavailable concurrency is definitely unsent through offline failing 
     const outcome = http.execute(std.testing.allocator, .failing, config(), &prepared);
     try std.testing.expect(outcome == .definitely_not_sent);
 }
+
+test "HTTP received response failures are typed refusals and never unknown" {
+    const a = std.testing.allocator;
+    const head = try response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    const none: ?std.http.Reader.BodyError = null;
+    var reader = std.Io.Reader.fixed("test");
+    var received = http.receive(a, head, &reader, .{ .response_body_bytes_max = 3 }, "x", &none);
+    try std.testing.expectEqualDeep(http.Received{ .refused = .{
+        .status = 200,
+        .refusal = .body_capacity,
+    } }, received);
+    reader = .fixed("bad");
+    received = http.receive(a, head, &reader, .{}, config().token, &none);
+    try std.testing.expectEqual(.body_interrupted, received.refused.refusal);
+    reader = .fixed(config().token);
+    const plain = try response("HTTP/1.1 200 OK\r\n\r\n");
+    received = http.receive(a, plain, &reader, .{}, config().token, &none);
+    try std.testing.expectEqual(.credential_echo, received.refused.refusal);
+    var broken: std.Io.Reader = .failing;
+    const chunked: ?std.http.Reader.BodyError = error.HttpChunkInvalid;
+    received = http.receive(a, plain, &broken, .{}, config().token, &chunked);
+    try std.testing.expectEqual(.body_malformed, received.refused.refusal);
+    reader = .fixed("{}");
+    received = http.receive(a, plain, &reader, .{}, config().token, &none);
+    defer received.captured.deinit();
+    try std.testing.expectEqualStrings("{}", received.captured.body);
+    try std.testing.expectEqual(.head_capacity, http.headRefusal(error.HttpHeadersOversize).?);
+    for ([_]std.http.Reader.HeadError{
+        error.HttpRequestTruncated,
+        error.HttpConnectionClosing,
+        error.ReadFailed,
+    }) |failure| try std.testing.expectEqual(null, http.headRefusal(failure));
+    try std.testing.expectEqual(.head_malformed, http.malformedHead(error.HttpHeadersInvalid));
+    try std.testing.expectEqual(.local_resources, http.refusal(error.OutOfMemory, null));
+    try std.testing.expectEqual(.head_capacity, http.refusal(error.ResponseHeaderCapacity, null));
+    try std.testing.expectEqual(.body_unexpected, http.refusal(error.UnexpectedResponseBody, null));
+}

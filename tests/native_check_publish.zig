@@ -155,3 +155,26 @@ test "native source publication rejects false unchanged complete baseline and ov
         try std.testing.expectEqual(.failed, state.value.outcome_kind);
     }
 }
+
+test "native source publication keeps a baseline identity recheck failure an incomplete check" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const initial = genesis.expectedFresh(fixtures.genesis());
+    const Failure = @import("../app/github_contract.zig").Failure;
+    const cases = [_]struct { reason: Failure, operation: []const u8, identity: u8 }{
+        .{ .reason = .incomplete, .operation = "baseline-incomplete", .identity = 2 },
+        .{ .reason = .unretained, .operation = "baseline-unretained", .identity = 3 },
+    };
+    for (cases) |case| {
+        var rejected = result(.rejected, null, @splat('a'));
+        rejected.reason = case.reason;
+        const published = try fixture.output(
+            try fixture.execute(case.operation, input(initial, rejected, case.identity)),
+        );
+        try std.testing.expectEqual(@as(?t.Question, null), published.head.question);
+        try std.testing.expectEqualDeep(initial.observed, published.head.observed);
+        try std.testing.expectEqual(1, published.head.check_failure_streak);
+        try std.testing.expectEqual(@as(?t.Batch, null), published.batch);
+    }
+}

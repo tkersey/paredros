@@ -11,7 +11,7 @@ const Highlights = a.Function(struct {
     input: @FieldType(m.RawSummary, "highlights"),
     index: u64,
     result: frame.Highlights,
-}, ?frame.Highlights);
+}, frame.Highlights);
 
 pub const Function = a.Function(struct { input: m.Input }, m.Result);
 const Bind = a.Function(struct {
@@ -395,7 +395,7 @@ fn highlightsFunction(c: protean.Context, oid: Oid) !Highlights {
         .input = try c.schema(@FieldType(m.RawSummary, "highlights")),
         .index = try c.schema(u64),
         .result = try c.schema(frame.Highlights),
-    }, try c.schema(?frame.Highlights), .{});
+    }, try c.schema(frame.Highlights), .{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
     const index = try b.parameter("index");
@@ -411,24 +411,28 @@ fn highlightsFunction(c: protean.Context, oid: Oid) !Highlights {
     });
     const invalid = try active.caseOf(admitted, "none");
     const valid = try active.caseOf(admitted, "some");
-    const vb = valid.body();
-    const highlight = try vb.product(try c.schema(frame.Highlight), .{
-        .oid = valid.payload(),
-        .text = try vb.field(item, "text"),
+    const named = try active.match(admitted, .{
+        .none = try invalid.ret(try c.literal(t.Oid, @splat(0))),
+        .some = try valid.ret(valid.payload()),
     });
-    const next = try vb.call(function, .{
+    const highlight = try active.product(try c.schema(frame.Highlight), .{
+        .oid = named,
+        .text = try active.field(item, "text"),
+    });
+    const next = try active.call(function, .{
         .input = input,
-        .index = try vb.checked(.add, index, try vb.constant(u64, 1), .{ .overflow = failure }),
-        .result = try vb.append(result, highlight, .{ .capacity = failure }),
-    });
-    const selected = try active.match(admitted, .{
-        .none = try invalid.ret(try c.literal(?frame.Highlights, null)),
-        .some = try valid.ret(next),
+        .index = try active.checked(
+            .add,
+            index,
+            try active.constant(u64, 1),
+            .{ .overflow = failure },
+        ),
+        .result = try active.append(result, highlight, .{ .capacity = failure }),
     });
     try c.author.define(function, try b.ret(try b.conditional(
         try b.less(index, try b.sequenceLength(input)),
-        try active.ret(selected),
-        try done.ret(try done.variant(try c.schema(?frame.Highlights), "some", result)),
+        try active.ret(next),
+        try done.ret(result),
     )));
     return function;
 }
@@ -514,20 +518,13 @@ fn summaryCandidate(
     summary: a.Value(m.RawSummary),
     highlights: Highlights,
 ) !a.Value(m.Candidate) {
-    const admitted = try b.call(highlights, .{
-        .input = try b.field(summary, "highlights"),
-        .index = try b.constant(u64, 0),
-        .result = try c.literal(frame.Highlights, .{ .items = &.{} }),
+    const value = try b.product(try c.schema(m.Summary), .{
+        .summary = try b.field(summary, "summary"),
+        .highlights = try b.call(highlights, .{
+            .input = try b.field(summary, "highlights"),
+            .index = try b.constant(u64, 0),
+            .result = try c.literal(frame.Highlights, .{ .items = &.{} }),
+        }),
     });
-    const invalid = try b.caseOf(admitted, "none");
-    const valid = try b.caseOf(admitted, "some");
-    const vb = valid.body();
-    const value = try vb.product(try c.schema(m.Summary), .{
-        .summary = try vb.field(summary, "summary"),
-        .highlights = valid.payload(),
-    });
-    return b.match(admitted, .{
-        .none = try invalid.ret(try c.literal(m.Candidate, .{ .rejected = .invalid_arguments })),
-        .some = try valid.ret(try vb.variant(try c.schema(m.Candidate), "summary", value)),
-    });
+    return b.variant(try c.schema(m.Candidate), "summary", value);
 }

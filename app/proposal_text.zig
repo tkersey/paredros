@@ -3,6 +3,7 @@ const protean = @import("protean");
 const cts = @import("protean_contracts");
 const t = @import("application_types");
 const a = @import("author.zig");
+const words = @import("render_text.zig");
 
 pub const Text = t.Text;
 pub const Input = struct { target: ?t.Id, body: @FieldType(t.Proposal, "body") };
@@ -21,6 +22,13 @@ fn Convert(comptime hex: bool) type {
     return a.Function(struct { input: Blob(hex), index: u64, rendering: Rendering }, Rendering);
 }
 const Helpers = struct { append: Append, text: Convert(false), bytes: Convert(true) };
+const Escape = a.Function(struct { code: u32 }, Text);
+const Scanning = struct { inert: words.Inert, scan: Scan, escape: Escape };
+
+fn scanners(c: protean.Context) !Scanning {
+    const inert = try words.inert(c);
+    return .{ .inert = inert, .scan = try spanScanner(c, inert), .escape = try escaper(c) };
+}
 
 pub fn emit(c: protean.Context) !Function {
     @setEvalBranchQuota(100_000);
@@ -362,7 +370,7 @@ fn converter(c: protean.Context, comptime hex: bool, append: Append) !Convert(he
     }) else try textPiece(
         c,
         more,
-        try spanScanner(c),
+        try scanners(c),
         input,
         index,
         byte,
@@ -398,8 +406,6 @@ fn encodings(comptime hex: bool) [if (hex) 256 else 128]cts.Text(6) {
     inline for (0..result.len) |index| {
         result[index] = .{ .bytes = if (hex)
             &.{ digits[index / 16], digits[index % 16] }
-        else if (index < 32)
-            &.{ '\\', 'u', '0', '0', digits[index / 16], digits[index % 16] }
         else if (index == '"' or index == '\\')
             &.{ '\\', @intCast(index) }
         else
@@ -435,28 +441,80 @@ fn byteEncoding(
     );
 }
 
-fn needsEscape(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
-    const yes = try b.constant(bool, true);
+fn quote(b: anytype, byte: a.Value(u8)) !a.Value(bool) {
     return b.select(
-        try b.less(byte, try b.constant(u8, 32)),
-        yes,
-        try b.select(
-            try b.equal(byte, try b.constant(u8, '"')),
-            yes,
-            try b.equal(byte, try b.constant(u8, '\\')),
-        ),
+        try b.equal(byte, try b.constant(u8, '"')),
+        try b.constant(bool, true),
+        try b.equal(byte, try b.constant(u8, '\\')),
     );
 }
 
-fn scalarWidth(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    var width = try b.constant(u64, 4);
-    inline for (.{ .{ 240, 3 }, .{ 224, 2 }, .{ 128, 1 } }) |entry|
-        width = try b.select(
-            try b.less(byte, try b.constant(u8, entry[0])),
-            try b.constant(u64, entry[1]),
-            width,
-        );
-    return width;
+fn needsEscape(b: anytype, scalar: a.Value(words.Scalar), byte: a.Value(u8)) !a.Value(bool) {
+    return b.select(
+        try b.field(scalar, "permitted"),
+        try quote(b, byte),
+        try b.constant(bool, true),
+    );
+}
+
+fn escaper(c: protean.Context) !Escape {
+    const function = try c.author.function("escape neutralized confirmation scalar", .{
+        .code = try c.schema(u32),
+    }, try c.schema(Text), &.{});
+    const b = try c.author.body(function);
+    const code = try b.parameter("code");
+    const failure = try a.failure(c, "proposal_escape_bounds");
+    const basic = try b.branch();
+    const paired = try b.branch();
+    const offset = try paired.checked(.subtract, code, try paired.constant(u32, 0x10000), .{
+        .overflow = failure,
+    });
+    const high = try paired.checked(.add, try paired.constant(u32, 0xD800), try paired.checked(
+        .divide,
+        offset,
+        try paired.constant(u32, 0x400),
+        .{ .overflow = failure, .division_by_zero = failure },
+    ), .{ .overflow = failure });
+    const low = try paired.checked(.add, try paired.constant(u32, 0xDC00), try paired.checked(
+        .remainder,
+        offset,
+        try paired.constant(u32, 0x400),
+        .{ .overflow = failure, .division_by_zero = failure },
+    ), .{ .overflow = failure });
+    const pair = try paired.blobConcat(
+        try c.schema(Text),
+        try unit(c, paired, high),
+        try unit(c, paired, low),
+        failure,
+    );
+    try c.author.define(function, try b.ret(try b.conditional(
+        try b.less(code, try b.constant(u32, 0x10000)),
+        try basic.ret(try unit(c, basic, code)),
+        try paired.ret(pair),
+    )));
+    return function;
+}
+
+fn unit(c: protean.Context, b: anytype, code: a.Value(u32)) !a.Value(Text) {
+    const failure = try a.failure(c, "proposal_escape_bounds");
+    var text = try literal(c, "\\u");
+    inline for (.{ 0x1000, 0x100, 0x10, 0x1 }) |place| {
+        const nibble = try b.checked(.remainder, try b.checked(
+            .divide,
+            code,
+            try b.constant(u32, place),
+            .{ .overflow = failure, .division_by_zero = failure },
+        ), try b.constant(u32, 16), .{ .overflow = failure, .division_by_zero = failure });
+        const digit = try b.variantPayload(try b.blobByte(
+            try literal(c, "0123456789abcdef"),
+            try b.convertInteger(try c.schema(u64), nibble, .{}),
+        ), "some", failure);
+        text = try b.blobConcat(try c.schema(Text), text, try b.textScalar(
+            try b.convertInteger(try c.schema(u32), digit, .{}),
+            failure,
+        ), failure);
+    }
+    return text;
 }
 
 // The caller supplies the leading byte of an admitted UTF-8 scalar.
@@ -472,7 +530,7 @@ fn scalarCost(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
 }
 
 // Walk admitted UTF-8 by scalar without carrying or copying the growing description.
-fn spanScanner(c: protean.Context) !Scan {
+fn spanScanner(c: protean.Context, inert: words.Inert) !Scan {
     const scan = try c.author.function("measure unchanged proposal text", .{
         .input = try c.schema(cts.Utf8),
         .end = try c.schema(u64),
@@ -492,18 +550,19 @@ fn spanScanner(c: protean.Context) !Scan {
         "some",
         try a.failure(c, "proposal_text_bounds"),
     );
+    const scalar = try words.scalar(c, more, inert, input, end, byte);
     const escape = try more.branch();
     const raw = try more.branch();
     const bounds = try a.failure(c, "proposal_scalar_bounds");
     const overflow = try a.failure(c, "proposal_description_budget");
     const next = try raw.call(scan, .{
         .input = input,
-        .end = try raw.checked(.add, end, try scalarWidth(raw, byte), .{ .overflow = bounds }),
+        .end = try raw.checked(.add, end, try raw.field(scalar, "width"), .{ .overflow = bounds }),
         .cost = try raw.checked(.add, cost, try scalarCost(raw, byte), .{ .overflow = overflow }),
         .limit = limit,
     });
     const scanned = try more.conditional(
-        try needsEscape(more, byte),
+        try needsEscape(more, scalar, byte),
         try escape.ret(span),
         try raw.ret(next),
     );
@@ -522,20 +581,31 @@ fn spanScanner(c: protean.Context) !Scan {
 fn textPiece(
     c: protean.Context,
     b: anytype,
-    scan: Scan,
+    scanning: Scanning,
     input: a.Value(cts.Utf8),
     index: a.Value(u64),
     byte: a.Value(u8),
     used: a.Value(u64),
 ) !a.Value(Piece) {
+    const scalar = try words.scalar(c, b, scanning.inert, input, index, byte);
     const escape = try b.branch();
     const raw = try b.branch();
-    const encoded = try byteEncoding(c, escape, byte, false);
+    const quoting = try escape.branch();
+    const neutral = try escape.branch();
+    const encoded = try escape.conditional(
+        try escape.field(scalar, "permitted"),
+        try quoting.ret(try byteEncoding(c, quoting, byte, false)),
+        try neutral.ret(try neutral.call(scanning.escape, .{
+            .code = try neutral.field(scalar, "code"),
+        })),
+    );
     const bounds = try a.failure(c, "proposal_scalar_bounds");
     const overflow = try a.failure(c, "proposal_description_budget");
-    const span = try raw.call(scan, .{
+    const span = try raw.call(scanning.scan, .{
         .input = input,
-        .end = try raw.checked(.add, index, try scalarWidth(raw, byte), .{ .overflow = bounds }),
+        .end = try raw.checked(.add, index, try raw.field(scalar, "width"), .{
+            .overflow = bounds,
+        }),
         .cost = try scalarCost(raw, byte),
         .limit = try raw.checked(
             .subtract,
@@ -550,11 +620,11 @@ fn textPiece(
         .invalid_utf8 = try a.failure(c, "proposal_scalar_utf8"),
     });
     return b.conditional(
-        try needsEscape(b, byte),
+        try needsEscape(b, scalar, byte),
         try escape.ret(try escape.product(try c.schema(Piece), .{
             .text = encoded,
             .cost = try escape.blobLength(encoded),
-            .width = try escape.constant(u64, 1),
+            .width = try escape.field(scalar, "width"),
         })),
         try raw.ret(try raw.product(try c.schema(Piece), .{
             .text = text,

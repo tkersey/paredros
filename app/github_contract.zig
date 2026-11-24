@@ -36,6 +36,7 @@ pub const Failure = enum {
     incomplete,
     behind,
     diverged,
+    unretained,
 };
 pub const Reply = union(enum) {
     repository: t.ReadEvidence,

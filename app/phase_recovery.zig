@@ -22,7 +22,9 @@ pub const RejectionInput = struct {
 };
 pub const Rejection = a.Function(struct { input: RejectionInput }, t.Head);
 const Delay = a.Function(struct { remaining: u32, delay_ms: i64 }, i64);
-const Seconds = a.Function(struct { text: t.Name, index: u64, value: i64 }, i64);
+const Seconds = a.Function(struct { text: t.Name, index: u64, value: i64 }, ?i64);
+const conservative_retry_ms: i64 = 60 * 60 * 1000;
+const retry_seconds_ceiling: i64 = 1_000_000_000_000;
 const ProviderInput = struct {
     evidence: check.Evidence,
     clock_ms: i64,
@@ -276,6 +278,7 @@ pub fn rejection(c: protean.Context) !Rejection {
         .incomplete,
         .behind,
         .diverged,
+        .unretained,
     }) |kind|
         defer_slot = try b.select(
             try b.equal(try b.enumTag(reason), try b.enumTag(try c.literal(github.Failure, kind))),
@@ -355,7 +358,7 @@ fn providerEntry(
         b,
         seconds,
         try b.field(entry, "retry_after"),
-        base,
+        .{ .base = base, .fallback = base },
     );
     const remaining = try b.field(entry, "rate_remaining");
     const absent = try b.caseOf(remaining, "none");
@@ -376,10 +379,9 @@ fn providerEntry(
     ), try limited.ret(try headerInstant(c, limited, seconds, try limited.field(
         entry,
         "rate_reset",
-    ), try limited.constant(i64, 0))), try ordinary.ret(try ordinary.constant(
-        i64,
-        std.math.minInt(i64),
-    )));
+    ), .{ .base = try limited.constant(i64, 0), .fallback = base })), try ordinary.ret(
+        try ordinary.constant(i64, std.math.minInt(i64)),
+    ));
     return maximum(
         b,
         try b.field(input, "deadline_ms"),
@@ -392,7 +394,7 @@ fn headerInstant(
     b: anytype,
     seconds: Seconds,
     header: a.Value(?t.Name),
-    base: a.Value(i64),
+    origin: struct { base: a.Value(i64), fallback: a.Value(i64) },
 ) !a.Value(i64) {
     const none = try b.caseOf(header, "none");
     const some = try b.caseOf(header, "some");
@@ -402,18 +404,50 @@ fn headerInstant(
         .index = try sb.constant(u64, 0),
         .value = try sb.constant(i64, 0),
     });
-    const overflow = try a.failure(c, "provider_retry_overflow");
-    const milliseconds = try sb.checked(
+    const unparsed = try sb.caseOf(parsed, "none");
+    const numeric = try sb.caseOf(parsed, "some");
+    const nb = numeric.body();
+    const milliseconds = try nb.checked(
         .multiply,
-        parsed,
-        try sb.constant(i64, 1000),
-        .{ .overflow = overflow },
+        numeric.payload(),
+        try nb.constant(i64, 1000),
+        .{ .overflow = try a.failure(c, "provider_retry_overflow") },
     );
-    const instant = try sb.checked(.add, base, milliseconds, .{ .overflow = overflow });
+    const instant = try sb.match(parsed, .{
+        .none = try unparsed.ret(try saturated(
+            c,
+            unparsed.body(),
+            origin.fallback,
+            try unparsed.body().constant(i64, conservative_retry_ms),
+        )),
+        .some = try numeric.ret(try saturated(c, nb, origin.base, milliseconds)),
+    });
     return b.match(header, .{
         .none = try none.ret(try none.body().constant(i64, std.math.minInt(i64))),
         .some = try some.ret(instant),
     });
+}
+
+fn saturated(
+    c: protean.Context,
+    b: anytype,
+    base: a.Value(i64),
+    duration: a.Value(i64),
+) !a.Value(i64) {
+    const overflow = try a.failure(c, "provider_retry_overflow");
+    const ceiling = try b.checked(
+        .subtract,
+        try b.constant(i64, std.math.maxInt(i64)),
+        duration,
+        .{ .overflow = overflow },
+    );
+    const sum = try b.branch();
+    const saturate = try b.branch();
+    return b.conditional(
+        try b.less(base, ceiling),
+        try sum.ret(try sum.checked(.add, base, duration, .{ .overflow = overflow })),
+        try saturate.ret(try saturate.constant(i64, std.math.maxInt(i64))),
+    );
 }
 
 fn secondsFunction(c: protean.Context) !Seconds {
@@ -421,17 +455,11 @@ fn secondsFunction(c: protean.Context) !Seconds {
         .text = try c.schema(t.Name),
         .index = try c.schema(u64),
         .value = try c.schema(i64),
-    }, try c.schema(i64), &.{});
+    }, try c.schema(?i64), &.{});
     const b = try c.author.body(function);
     const text = try b.parameter("text");
     const index = try b.parameter("index");
     const value = try b.parameter("value");
-    try a.require(
-        c,
-        b,
-        try b.less(try b.constant(u64, 0), try b.blobLength(text)),
-        "provider_retry_header",
-    );
     const active = try b.branch();
     const done = try b.branch();
     const overflow = try a.failure(c, "provider_retry_overflow");
@@ -442,30 +470,42 @@ fn secondsFunction(c: protean.Context) !Seconds {
         try active.constant(bool, false),
         try active.less(byte, try active.constant(u8, '9' + 1)),
     );
-    try a.require(c, active, digit, "provider_retry_header");
-    const next = try active.checked(.add, try active.checked(
+    const accepted = try active.branch();
+    const rejected = try active.branch();
+    const scaled = try accepted.checked(.add, try accepted.checked(
         .multiply,
         value,
-        try active.constant(i64, 10),
+        try accepted.constant(i64, 10),
         .{ .overflow = overflow },
-    ), try active.convertInteger(
+    ), try accepted.convertInteger(
         try c.schema(i64),
-        try active.checked(.subtract, byte, zero, .{ .overflow = overflow }),
+        try accepted.checked(.subtract, byte, zero, .{ .overflow = overflow }),
         .{},
     ), .{ .overflow = overflow });
-    const continued = try active.call(function, .{
+    const ceiling = try accepted.constant(i64, retry_seconds_ceiling);
+    const continued = try accepted.call(function, .{
         .text = text,
-        .index = try active.checked(
+        .index = try accepted.checked(
             .add,
             index,
-            try active.constant(u64, 1),
+            try accepted.constant(u64, 1),
             .{ .overflow = overflow },
         ),
-        .value = next,
+        .value = try accepted.select(try accepted.less(scaled, ceiling), scaled, ceiling),
     });
+    const scanned = try active.conditional(
+        digit,
+        try accepted.ret(continued),
+        try rejected.ret(try c.literal(?i64, null)),
+    );
+    const complete = try done.select(
+        try done.less(try done.constant(u64, 0), index),
+        try done.variant(try c.schema(?i64), "some", value),
+        try c.literal(?i64, null),
+    );
     try c.author.define(function, try b.ret(try b.conditional(try b.less(
         index,
         try b.blobLength(text),
-    ), try active.ret(continued), try done.ret(value))));
+    ), try active.ret(scanned), try done.ret(complete))));
     return function;
 }

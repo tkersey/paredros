@@ -3,6 +3,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const contract = @import("../app/github_contract.zig");
 const adapter = @import("../native/github_adapter.zig");
+const http = @import("../native/http.zig");
 const a = std.testing.allocator;
 const RawHeader = std.meta.Elem(@FieldType(@FieldType(t.ReadEvidence, "headers"), "items"));
 const repository: t.Repository = .{
@@ -421,7 +422,7 @@ test "github adapter typed rejections retain exact raw responses and safe metada
         const reason: contract.Failure = switch (status) {
             401, 403 => .permission,
             429 => .rate_limit,
-            304 => .incomplete,
+            304 => .unretained,
             200 => .malformed,
             else => .unavailable,
         };
@@ -533,4 +534,41 @@ fn allocationPath(allocator: std.mem.Allocator) !void {
 
 test "github adapter releases partial preparation interpretation and rejected capture allocations" {
     try std.testing.checkAllAllocationFailures(a, allocationPath, .{});
+}
+
+fn expectRefused(
+    request: contract.Request,
+    refusal: http.Refusal,
+    reason: contract.Failure,
+) !void {
+    var result = try adapter.classify(a, request, .{ .refused = .{
+        .request_digest = try requestDigest(a, request),
+        .refused = .{ .status = 200, .refusal = refusal },
+    } });
+    defer result.deinit();
+    try std.testing.expectEqual(reason, result.value.rejected.reason);
+    try std.testing.expectEqual(null, result.value.rejected.evidence);
+}
+
+test "github adapter classifies every received refusal and an unretained 304 by route" {
+    const after: contract.Request = .{ .repository = repository, .phase = .repository_after };
+    const page = try initial(1);
+    for (std.enums.values(http.Refusal)) |refusal| {
+        const ordinary: contract.Failure = switch (refusal) {
+            .body_interrupted, .local_resources => .unavailable,
+            else => .malformed,
+        };
+        try expectRefused(after, refusal, ordinary);
+        try expectRefused(page, refusal, if (refusal == .body_capacity) .incomplete else ordinary);
+    }
+    var forged = try adapter.classify(a, after, .{ .local = .permission });
+    defer forged.deinit();
+    try std.testing.expectEqual(.permission, forged.value.rejected.reason);
+    try std.testing.expectError(error.InvalidCapture, adapter.classify(a, page, .{ .refused = .{
+        .request_digest = try requestDigest(a, after),
+        .refused = .{ .status = 200, .refusal = .body_capacity },
+    } }));
+    var fixtures = std.heap.ArenaAllocator.init(a);
+    defer fixtures.deinit();
+    try expectRejected(after, try capture(fixtures.allocator(), after, 304, "", null), .unretained);
 }

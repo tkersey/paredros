@@ -204,6 +204,14 @@ account, slug, effort, and absolute SIWC executable and authentication-directory
 paths. Credentials stay in the launch environment; they are excluded from
 application inputs and snapshots.
 
+Once GitHub answers a read, the answer is a typed check result, never an unknown
+attempt. A body over 2 MiB, a malformed, truncated, or interrupted response, an
+echoed credential, or a `304` with no retained response is an incomplete check
+with its reason. An oversized comparison page raises the gap question, because the
+comparison cannot be acquired completely within that bound. A `Retry-After` or
+rate-limit reset that is not a decimal count of seconds, such as an HTTP-date,
+defers the next check by one hour from capture.
+
 [Installation and service configuration](docs/setup.md) includes the live
 configuration template, credential-file rules, and pending live qualification
 scenario.

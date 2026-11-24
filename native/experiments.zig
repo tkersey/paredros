@@ -185,6 +185,25 @@ pub fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !Ow
     return .{ .arena = arena, .value = value };
 }
 
+pub fn settled(record: idx.Record) !?t.ExperimentResult {
+    const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
+    const output = record.result orelse return null;
+    if (output != .experiment) return null;
+    var result = output.experiment;
+    result.accounting = snapshot.accounting;
+    return result;
+}
+
+pub fn measurements(accounting: t.Accounting) e.Measurements {
+    return .{
+        .model_calls = accounting.known_calls,
+        .input_tokens = accounting.known_input_tokens,
+        .output_tokens = accounting.known_output_tokens,
+        .possible_charged_calls = accounting.possible_charged_calls,
+        .retained_bytes = accounting.retained_bytes,
+    };
+}
+
 fn campaignValue(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !Campaign {
     var attempts: std.ArrayList(Attempt) = .empty;
     errdefer attempts.deinit(a);
@@ -194,7 +213,7 @@ fn campaignValue(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !C
             !std.meta.eql(record.input.experiment.campaign, id)) continue;
         const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
         var report: ?e.Report = null;
-        if (record.result != null and record.result.? == .experiment) {
+        if (try settled(record) != null) {
             const decoded = try methods.report(a, index, .{
                 .task = record.task,
                 .digest = record.result_digest orelse return error.MissingExperimentReport,
@@ -211,6 +230,9 @@ fn campaignValue(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !C
         });
     }
     if (attempts.items.len == 0) return error.UnknownCampaign;
+    for (attempts.items) |*attempt| {
+        if (attempt.report) |*report| report.campaign_totals = measurements(totals);
+    }
     std.mem.sort(Attempt, attempts.items, {}, struct {
         fn less(_: void, left: Attempt, right: Attempt) bool {
             return left.number < right.number;

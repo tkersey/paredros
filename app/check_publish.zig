@@ -394,15 +394,15 @@ fn newQuestion(
     diverged: a.Value(bool),
 ) !a.Value(?t.Question) {
     const acquired = try b.field(input, "acquired");
-    const tip = try b.field(acquired, "tip");
-    const absent = try b.caseOf(tip, "none");
-    const present = try b.caseOf(tip, "some");
+    const declared = try b.field(acquired, "base");
+    const unbased = try b.caseOf(declared, "none");
+    const based = try b.caseOf(declared, "some");
+    const bb = based.body();
+    const base = based.payload();
+    const tip = try bb.field(acquired, "tip");
+    const absent = try bb.caseOf(tip, "none");
+    const present = try bb.caseOf(tip, "some");
     const pb = present.body();
-    const base = try pb.variantPayload(
-        try pb.field(acquired, "base"),
-        "some",
-        try a.failure(c, "condition_baseline_missing"),
-    );
     const specification = try pb.field(head, "specification");
     const condition_type = @typeInfo(@FieldType(t.Question, "source_condition")).optional.child;
     const condition = try pb.product(try c.schema(condition_type), .{
@@ -432,13 +432,14 @@ fn newQuestion(
             "a new baseline at the comparison tip without claiming that all commits were read. " ++
             "Older outstanding observations remain owed." }),
     });
-    return b.match(
-        tip,
-        .{
-            .none = try absent.ret(try absent.body().field(head, "question")),
-            .some = try present.ret(try preserveQuestion(c, pb, head, question)),
-        },
-    );
+    const selected = try bb.match(tip, .{
+        .none = try absent.ret(try absent.body().field(head, "question")),
+        .some = try present.ret(try preserveQuestion(c, pb, head, question)),
+    });
+    return b.match(declared, .{
+        .none = try unbased.ret(try unbased.body().field(head, "question")),
+        .some = try based.ret(selected),
+    });
 }
 
 fn preserveQuestion(

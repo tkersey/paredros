@@ -186,9 +186,37 @@ test "native phase recovery honors Retry After rate reset and retained provider 
         .{ .rejection = request },
     ));
     try std.testing.expectEqual(300_200, available.source_not_before_ms);
-    evidence.retry_after = .{ .bytes = "bad" };
+}
+
+test "native phase recovery delays conservatively for an HTTP-date or unparseable Retry After" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    var evidence = readEvidence();
+    evidence.rate_remaining = .{ .bytes = "5" };
+    var request: recovery.RejectionInput = .{
+        .head = head(),
+        .reason = .unavailable,
+        .evidence = .{ .items = &.{evidence} },
+    };
+    for ([_][]const u8{ "Sun, 15 Nov 2026 00:00:00 GMT", "bad", "", "-1", "1.5" }, 0..) |text, i| {
+        evidence.retry_after = .{ .bytes = text };
+        request.evidence.items = &.{evidence};
+        const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "date-{d}", .{i});
+        const task = try fixture.execute(operation, .{ .rejection = request });
+        const delayed = try fixture.output(task);
+        try std.testing.expectEqual(3_600_200, delayed.source_not_before_ms);
+    }
+    evidence.retry_after = .{ .bytes = "99999999999999999999999999" };
     request.evidence.items = &.{evidence};
-    try fixture.rejected("bad-header", .{ .rejection = request }, "provider_retry_header");
+    const huge = try fixture.output(try fixture.execute("huge", .{ .rejection = request }));
+    try std.testing.expectEqual(1_000_000_000_000_200, huge.source_not_before_ms);
+    evidence.retry_after = null;
+    evidence.rate_reset = .{ .bytes = "Sun, 15 Nov 2026 00:00:00 GMT" };
+    request.evidence.items = &.{evidence};
+    request.reason = .rate_limit;
+    const reset = try fixture.output(try fixture.execute("reset-date", .{ .rejection = request }));
+    try std.testing.expectEqual(3_600_200, reset.source_not_before_ms);
 }
 
 fn rejectedComparison() check.Result {

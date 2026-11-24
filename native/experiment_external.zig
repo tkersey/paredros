@@ -50,7 +50,7 @@ pub fn clockDeclaration() native.Declaration {
 }
 
 fn stamp(ctx: native.Context, _: e.Stamp) !i64 {
-    return std.math.cast(i64, std.Io.Clock.real.now(ctx.io).toMilliseconds()) orelse
+    return std.math.cast(i64, std.Io.Clock.boot.now(ctx.io).toMilliseconds()) orelse
         error.ClockRange;
 }
 

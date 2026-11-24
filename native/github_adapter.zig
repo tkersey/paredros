@@ -3,6 +3,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const contract = @import("../app/github_contract.zig");
 const github = @import("github.zig");
+const transport = @import("http.zig");
 const projected_headers = .{
     .{ "provider_date", "date" },
     .{ "request_id", "x-github-request-id" },
@@ -28,6 +29,47 @@ pub const Prepared = struct {
 };
 
 pub const Interpreted = c.Decoded(contract.Reply);
+pub const Observation = union(enum) {
+    local: contract.Failure,
+    refused: struct { request_digest: t.Digest, refused: transport.Refused },
+    response: t.ReadEvidence,
+};
+
+pub fn classify(
+    a: std.mem.Allocator,
+    request: contract.Request,
+    observation: Observation,
+) !Interpreted {
+    const reason = switch (observation) {
+        .response => |evidence| return interpret(a, request, evidence),
+        .local => |reason| reason,
+        .refused => |refused| refused: {
+            var prepared = try prepare(a, request);
+            defer prepared.deinit();
+            if (!std.meta.eql(prepared.request_digest, refused.request_digest))
+                return error.InvalidCapture;
+            break :refused refusal(request, refused.refused.refusal);
+        },
+    };
+    return .{
+        .arena = std.heap.ArenaAllocator.init(a),
+        .value = .{ .rejected = .{ .reason = reason, .evidence = null } },
+    };
+}
+
+pub fn refusal(request: contract.Request, refused: transport.Refusal) contract.Failure {
+    return switch (refused) {
+        .body_capacity => if (request.phase == .page) .incomplete else .malformed,
+        .body_interrupted, .local_resources => .unavailable,
+        .head_capacity,
+        .head_malformed,
+        .body_malformed,
+        .body_unexpected,
+        .credential_echo,
+        .unrepresentable,
+        => .malformed,
+    };
+}
 
 pub fn prepare(a: std.mem.Allocator, request: contract.Request) !Prepared {
     const bound = binding(request.repository);
@@ -278,7 +320,7 @@ fn rejection(err: anyerror, evidence: t.ReadEvidence) contract.Failure {
         error.UnsupportedObjectFormat, error.UnsupportedObjectType => .unsupported_object,
         error.BehindHistory => .behind,
         error.DivergedHistory => .diverged,
-        error.MissingRetainedResponse,
+        error.MissingRetainedResponse => .unretained,
         error.IncompleteComparison,
         error.InconsistentMetadata,
         error.RewrittenHistory,

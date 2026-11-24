@@ -264,3 +264,29 @@ test "GitHub external preserves oversized raw header while rejecting its project
     try std.testing.expectEqual(null, retained.request_id);
     try std.testing.expectEqualSlices(u8, &identifier, retained.headers.items[0].value.bytes);
 }
+
+test "GitHub external received refusal interprets as a typed rejection without evidence" {
+    const a = std.testing.allocator;
+    const bytes = try c.encodeOwned(contract.Request, a, request());
+    defer a.free(bytes);
+    var prepared = try adapter.prepare(a, request());
+    defer prepared.deinit();
+    const Case = struct { refusal: http.Refusal, reason: contract.Failure };
+    for ([_]Case{
+        .{ .refusal = .body_capacity, .reason = .malformed },
+        .{ .refusal = .body_interrupted, .reason = .unavailable },
+        .{ .refusal = .unrepresentable, .reason = .malformed },
+    }) |case| {
+        const captured = try c.encodeOwned(external.Capture, a, .{ .refused = .{
+            .request_digest = prepared.request_digest,
+            .refused = .{ .status = 200, .refusal = case.refusal },
+        } });
+        defer a.free(captured);
+        const result = try external.interpret(projection(a), bytes, bytes, captured);
+        defer a.free(result.reply);
+        var reply = try c.decodeOwned(contract.Reply, a, result.reply);
+        defer reply.deinit();
+        try std.testing.expectEqual(case.reason, reply.value.rejected.reason);
+        try std.testing.expectEqual(null, reply.value.rejected.evidence);
+    }
+}

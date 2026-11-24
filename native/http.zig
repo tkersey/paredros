@@ -72,11 +72,35 @@ pub const Capture = struct {
         return found;
     }
 };
+pub const Refusal = enum {
+    head_capacity,
+    head_malformed,
+    body_capacity,
+    body_malformed,
+    body_interrupted,
+    body_unexpected,
+    credential_echo,
+    unrepresentable,
+    local_resources,
+};
+pub const Refused = struct { status: ?u16, refusal: Refusal };
+pub const Received = union(enum) { captured: Capture, refused: Refused };
 pub const Outcome = union(enum) {
     captured: Capture,
+    refused: Refused,
     definitely_not_sent: anyerror,
     unknown: anyerror,
 };
+pub const CaptureError = error{
+    ResponseHeaderCapacity,
+    ResponseBodyCapacity,
+    CredentialDisclosure,
+    UnexpectedResponseBody,
+    TruncatedResponse,
+    ReadFailed,
+    OutOfMemory,
+};
+const BodyError = std.http.Reader.BodyError;
 
 pub fn prepare(a: std.mem.Allocator, config: Config, request: Request) !Prepared {
     _ = try validateRequest(config, request);
@@ -168,7 +192,7 @@ fn validateRequest(config: Config, request: Request) !std.Uri {
     return uri;
 }
 
-fn rejectCredential(bytes: []const u8, credential: []const u8) !void {
+fn rejectCredential(bytes: []const u8, credential: []const u8) error{CredentialDisclosure}!void {
     if (credential.len == 0 or std.mem.find(u8, bytes, credential) != null)
         return error.CredentialDisclosure;
 }
@@ -238,7 +262,7 @@ pub fn captureResponse(
     reader: *std.Io.Reader,
     limits: Limits,
     credential: []const u8,
-) !Capture {
+) CaptureError!Capture {
     if (head.bytes.len > limits.response_header_bytes_max) return error.ResponseHeaderCapacity;
     const status: u16 = @intCast(@backingInt(head.status));
     const bodyless = noBody(status);
@@ -263,7 +287,7 @@ pub fn captureResponse(
     ) catch |err|
         switch (err) {
             error.StreamTooLong => return error.ResponseBodyCapacity,
-            else => return err,
+            error.ReadFailed, error.OutOfMemory => |failure| return failure,
         };
     try rejectCredential(body, credential);
     if (bodyless and body.len != 0) return error.UnexpectedResponseBody;
@@ -279,6 +303,56 @@ pub fn captureResponse(
     };
 }
 
+pub fn receive(
+    a: std.mem.Allocator,
+    head: std.http.Client.Response.Head,
+    reader: *std.Io.Reader,
+    limits: Limits,
+    credential: []const u8,
+    body_error: *const ?BodyError,
+) Received {
+    const status: u16 = @intCast(@backingInt(head.status));
+    const captured = captureResponse(a, head, reader, limits, credential) catch |err| return .{
+        .refused = .{ .status = status, .refusal = refusal(err, body_error.*) },
+    };
+    return .{ .captured = captured };
+}
+
+pub fn malformedHead(err: std.http.Client.Response.Head.ParseError) Refusal {
+    return switch (err) {
+        error.HttpConnectionHeaderUnsupported,
+        error.HttpContentEncodingUnsupported,
+        error.HttpHeaderContinuationsUnsupported,
+        error.HttpHeadersInvalid,
+        error.HttpTransferEncodingUnsupported,
+        error.InvalidContentLength,
+        => .head_malformed,
+    };
+}
+
+pub fn refusal(err: CaptureError, body_error: ?BodyError) Refusal {
+    return switch (err) {
+        error.ResponseHeaderCapacity => .head_capacity,
+        error.ResponseBodyCapacity => .body_capacity,
+        error.CredentialDisclosure => .credential_echo,
+        error.UnexpectedResponseBody => .body_unexpected,
+        error.TruncatedResponse => .body_interrupted,
+        error.OutOfMemory => .local_resources,
+        error.ReadFailed => if (body_error) |failure| switch (failure) {
+            error.HttpChunkInvalid => .body_malformed,
+            error.HttpChunkTruncated => .body_interrupted,
+            error.HttpHeadersOversize => .head_capacity,
+        } else .body_interrupted,
+    };
+}
+
+pub fn headRefusal(err: std.http.Reader.HeadError) ?Refusal {
+    return switch (err) {
+        error.HttpHeadersOversize => .head_capacity,
+        error.HttpRequestTruncated, error.HttpConnectionClosing, error.ReadFailed => null,
+    };
+}
+
 const Exchange = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -286,17 +360,17 @@ const Exchange = struct {
     prepared: *const Prepared,
     uri: std.Uri,
     sent: bool = false,
-    capture: ?Capture = null,
+    received: ?Received = null,
     failure: ?anyerror = null,
 
     fn perform(self: *Exchange) void {
-        self.capture = self.send() catch |err| {
+        self.received = self.send() catch |err| {
             self.failure = err;
             return;
         };
     }
 
-    fn send(self: *Exchange) !Capture {
+    fn send(self: *Exchange) !Received {
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const scratch = arena.allocator();
@@ -330,23 +404,26 @@ const Exchange = struct {
         });
         defer release(&request);
         try self.transmit(&request);
-        var response = try request.receiveHead(&.{});
-        const head_bytes = try scratch.dupe(u8, response.head.bytes);
-        const retained_head = try std.http.Client.Response.Head.parse(head_bytes);
-        const reader = if (noBody(@intCast(@backingInt(retained_head.status))))
+        const head = request.reader.receiveHead() catch |err| {
+            const refused = headRefusal(err) orelse return err;
+            return .{ .refused = .{ .status = null, .refusal = refused } };
+        };
+        const head_bytes = scratch.dupe(u8, head) catch
+            return .{ .refused = .{ .status = null, .refusal = .local_resources } };
+        const parsed = std.http.Client.Response.Head.parse(head_bytes) catch |err|
+            return .{ .refused = .{ .status = null, .refusal = malformedHead(err) } };
+        const reader = if (noBody(@intCast(@backingInt(parsed.status))))
             std.Io.Reader.ending
         else
-            response.reader(&.{});
-        return captureResponse(
+            request.reader.bodyReader(&.{}, parsed.transfer_encoding, parsed.content_length);
+        return receive(
             self.a,
-            retained_head,
+            parsed,
             reader,
             self.config.limits,
             self.config.token,
-        ) catch |err| switch (err) {
-            error.ReadFailed => return response.bodyErr() orelse err,
-            else => return err,
-        };
+            &request.reader.body_err,
+        );
     }
 
     fn transmit(self: *Exchange, request: *std.http.Client.Request) !void {
@@ -406,7 +483,10 @@ pub fn execute(
     };
     const first: ?Event = select.await() catch null;
     select.cancelDiscard();
-    if (exchange.capture) |capture| return .{ .captured = capture };
+    if (exchange.received) |received| return switch (received) {
+        .captured => |capture| .{ .captured = capture },
+        .refused => |refused| .{ .refused = refused },
+    };
     const failure = if (first == null) error.Canceled else if (first.? == .timer)
         error.Timeout
     else

@@ -213,6 +213,31 @@ test "native conversation describes exact hostile Unicode fields and binds attem
     try std.testing.expectEqual(1, proposal.identity.attempt);
 }
 
+test "native conversation describes neutralized scalars as exact escapes" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const allocator = fixture.arena.allocator();
+    const wording = try @import("native_render_frame.zig").hostileText(allocator);
+    var request = turnInput();
+    request.proposal_offers.items = &.{amendment(wording)};
+    const result = try checkedOutput(&fixture, try fixture.execute("neutral-description", request));
+    const proposal = result.proposals.items[0];
+    var parsed = try described(allocator, proposal);
+    defer parsed.deinit();
+    const body = parsed.value.object.get("body").?.object.get("directive").?.object.get("amend").?;
+    try std.testing.expectEqualStrings(wording, body.object.get("wording").?.string);
+    const text = proposal.description.?.bytes;
+    for (@import("native_render_frame.zig").neutralized) |point| {
+        if (point == '\n') continue;
+        var encoded: [4]u8 = undefined;
+        const length = try std.unicode.utf8Encode(point, &encoded);
+        try std.testing.expect(std.mem.find(u8, text, encoded[0..length]) == null);
+    }
+    try std.testing.expect(std.mem.find(u8, text, "\\u202e") != null);
+    try std.testing.expect(std.mem.find(u8, text, "\\udb40\\udc01") != null);
+}
+
 test "native conversation retains maximal exact proposal body without a description" {
     var fixture: Fixture = .{};
     defer fixture.deinit();

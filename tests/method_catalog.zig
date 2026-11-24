@@ -5,6 +5,8 @@ const e = @import("../app/experiment_contract.zig");
 const idx = @import("../native/index.zig");
 const catalog = @import("../native/method_catalog.zig");
 const method = @import("../native/method_external.zig");
+const experiments = @import("../native/experiments.zig");
+const retained = @import("../native/retained.zig");
 const a = std.testing.allocator;
 
 fn emptyReport() e.Report {
@@ -224,4 +226,67 @@ test "method catalog preserves returned source after releasing the retained inde
     defer source.deinit();
     fixture.index.deinit();
     try std.testing.expectEqualStrings("retained source bytes", source.value.bytes.bytes);
+}
+
+fn owned(record_value: idx.Record, accounting: t.Accounting) retained.Snapshot {
+    const value: retained.Value = .{
+        .schema_id = .{ .bytes = "experiment" },
+        .encoding = .contract,
+        .reference = .{ .digest = record_value.input_digest, .bytes = 0 },
+    };
+    return .{
+        .task = record_value.task,
+        .revision = record_value.revision,
+        .event_cut = record_value.revision,
+        .outcome = .completed,
+        .input = value,
+        .result = value,
+        .profile = .{ .digest = @splat(0), .bytes = 0 },
+        .inference_attempts = 0,
+        .inference_request_bytes = 0,
+        .inference_output_tokens = 0,
+        .evidence_bytes = 0,
+        .attempts = .{ .items = &.{} },
+        .unknown_calls = .{ .items = &.{} },
+        .accounting = accounting,
+    };
+}
+
+test "method catalog campaign totals and settled accounting share owner snapshot values" {
+    var fixture = try Fixture.init();
+    defer fixture.index.deinit();
+    fixture.index.records[0].owner_snapshot = owned(fixture.index.records[0], .{
+        .known_calls = 2,
+        .known_input_tokens = 30,
+        .known_output_tokens = 7,
+        .retained_bytes = 11,
+    });
+    fixture.index.records[1].owner_snapshot = owned(fixture.index.records[1], .{
+        .known_calls = 1,
+        .known_input_tokens = 5,
+        .possible_charged_calls = 1,
+        .failed_attempts = 1,
+    });
+    var observed = try experiments.campaign(a, &fixture.index, @splat(1));
+    defer observed.deinit();
+    const totals: t.Accounting = .{
+        .known_calls = 3,
+        .known_input_tokens = 35,
+        .known_output_tokens = 7,
+        .retained_bytes = 11,
+        .possible_charged_calls = 1,
+        .failed_attempts = 1,
+    };
+    try std.testing.expectEqualDeep(totals, observed.value.accounting);
+    try std.testing.expectEqual(2, observed.value.attempts.items.len);
+    for (observed.value.attempts.items, fixture.index.records) |attempt, row| {
+        try std.testing.expectEqualDeep(
+            experiments.measurements(totals),
+            attempt.report.?.campaign_totals,
+        );
+        const result = (try experiments.settled(row)).?;
+        try std.testing.expectEqualDeep(attempt.accounting, result.accounting);
+    }
+    try std.testing.expectEqual(3, experiments.measurements(totals).model_calls.?);
+    try std.testing.expectEqual(1, experiments.measurements(totals).possible_charged_calls.?);
 }

@@ -6,6 +6,7 @@ const t = @import("application_types");
 const a = @import("author.zig");
 const oid_text = @import("oid_text.zig");
 const bytes = @import("bytes.zig");
+const words = @import("render_text.zig");
 
 pub const Highlight = struct { oid: t.Oid, text: cts.Text(256) };
 pub const Commits = cts.Vector(t.Commit, null);
@@ -104,6 +105,7 @@ fn clipped(
 }
 
 fn clipFunction(c: protean.Context) !Clip {
+    const inert = try words.inert(c);
     const function = try c.author.function("bounded scalar-safe inert text", .{
         .state = try c.schema(ClipInput),
     }, try c.schema(ClipResult), &.{});
@@ -117,27 +119,11 @@ fn clipFunction(c: protean.Context) !Clip {
     });
     const result = try b.conditional(
         try b.less(try b.field(state, "index"), try b.blobLength(try b.field(state, "text"))),
-        try active.ret(try clipScalar(c, active, function, state)),
+        try active.ret(try clipScalar(c, active, function, inert, state)),
         try ended.ret(done),
     );
     try c.author.define(function, try b.ret(result));
     return function;
-}
-
-fn scalarLength(b: anytype, byte: a.Value(u8)) !a.Value(u64) {
-    return b.select(
-        try b.less(byte, try b.constant(u8, 128)),
-        try b.constant(u64, 1),
-        try b.select(
-            try b.less(byte, try b.constant(u8, 224)),
-            try b.constant(u64, 2),
-            try b.select(
-                try b.less(byte, try b.constant(u8, 240)),
-                try b.constant(u64, 3),
-                try b.constant(u64, 4),
-            ),
-        ),
-    );
 }
 
 fn escapedCost(b: anytype, byte: a.Value(u8), length: a.Value(u64)) !a.Value(u64) {
@@ -160,21 +146,19 @@ fn clipScalar(
     c: protean.Context,
     b: anytype,
     function: Clip,
+    inert: words.Inert,
     state: a.Value(ClipInput),
 ) !a.Value(ClipResult) {
     const text = try b.field(state, "text");
     const index = try b.field(state, "index");
     const byte = try b.variantPayload(try b.blobByte(text, index), "some", try failure(c));
-    const length = try scalarLength(b, byte);
+    const scalar = try words.scalar(c, b, inert, text, index, byte);
+    const length = try b.field(scalar, "width");
     const end = try add(c, b, index, length);
     const used = try add(c, b, try b.field(state, "used"), try escapedCost(b, byte, length));
     const fits = try b.branch();
     const full = try b.branch();
-    const control = try either(
-        fits,
-        try fits.less(byte, try fits.constant(u8, 32)),
-        try fits.equal(byte, try fits.constant(u8, 127)),
-    );
+    const control = try fits.booleanNot(try b.field(scalar, "permitted"));
     const replace = try fits.branch();
     const keep = try fits.branch();
     const pending = try fits.update(state, .{ .index = end, .used = used });
@@ -205,7 +189,7 @@ fn clipScalar(
 }
 
 // Bytes between start and index are complete, unchanged UTF-8 scalars.
-// Copy the span only when it ends or a control byte needs replacement.
+// Copy the span only when it ends or a neutralized scalar needs replacement.
 fn clipPrefix(c: protean.Context, b: anytype, state: a.Value(ClipInput)) !a.Value(cts.Utf8) {
     const span = try b.blobSlice(
         try c.schema(cts.Utf8),

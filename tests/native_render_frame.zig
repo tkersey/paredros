@@ -208,6 +208,52 @@ test "native render frame keeps Unicode mentions and URLs inert and flattens tex
     try std.testing.expect(std.mem.findScalar(u8, result.text.bytes, '\t') == null);
 }
 
+pub const neutralized = blk: {
+    var points: []const u21 = &.{};
+    for (0..0x20) |point| points = points ++ [_]u21{point};
+    points = points ++ [_]u21{0x7F};
+    for (0x80..0xA0) |point| points = points ++ [_]u21{point};
+    points = points ++ [_]u21{ 0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E };
+    points = points ++ [_]u21{ 0x2066, 0x2067, 0x2068, 0x2069, 0x200E, 0x200F, 0x061C };
+    points = points ++ [_]u21{ 0x00AD, 0x200B, 0x200D, 0x2060, 0xFEFF, 0xFFF9, 0xE0001 };
+    break :blk points;
+};
+
+pub fn hostileText(allocator: std.mem.Allocator) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    try text.append(allocator, 'x');
+    for (neutralized) |point| {
+        var encoded: [4]u8 = undefined;
+        const length = try std.unicode.utf8Encode(point, &encoded);
+        try text.appendSlice(allocator, encoded[0..length]);
+        try text.append(allocator, 'x');
+    }
+    return text.toOwnedSlice(allocator);
+}
+
+test "native render frame neutralizes every listed control separator and format scalar" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const allocator = fixture.arena.allocator();
+    const commits = [_]t.Commit{.{ .oid = oid(1), .message = .{ .bytes = "plain" } }};
+    var value = input(&commits);
+    value.summary.bytes = try hostileText(allocator);
+    const result = try run(&fixture, "neutral-scalars", value);
+    var expected: std.ArrayList(u8) = .empty;
+    try expected.appendSlice(allocator, "Method commentary (unverified): x");
+    for (neutralized) |_| try expected.appendSlice(allocator, " x");
+    try expected.append(allocator, '\n');
+    try expectText(result, expected.items);
+    for (neutralized) |point| {
+        if (point == '\n') continue;
+        var encoded: [4]u8 = undefined;
+        const length = try std.unicode.utf8Encode(point, &encoded);
+        try std.testing.expect(std.mem.find(u8, result.text.bytes, encoded[0..length]) == null);
+    }
+}
+
 test "native render frame empty evidence and invalid coverage remain explicit" {
     var fixture: Fixture = .{};
     defer fixture.deinit();

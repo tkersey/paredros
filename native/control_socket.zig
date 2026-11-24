@@ -39,6 +39,19 @@ const Status = struct { identity: Identity, uid: u32, mode: u32 };
 const Entry = struct { status: Status, format: u32 };
 const Lock = struct { fd: c_int, path: [:0]u8, identity: Identity };
 const lock_attempts = 64;
+const accept_backoff_ms_min = 10;
+const accept_backoff_ms_max = 1000;
+const AcceptError = error{
+    WouldBlock,
+    Interrupted,
+    ConnectionAborted,
+    ProtocolFailure,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    SocketNotListening,
+    Unexpected,
+};
 
 pub const Selection = struct {
     allocator: std.mem.Allocator,
@@ -56,6 +69,8 @@ pub const Server = struct {
     connections: []Connection,
     next_generation: u64 = 1,
     cursor: usize = 0,
+    accept_resume_ms: i128 = 0,
+    accept_backoff_ms: u32 = 0,
 
     pub fn init(a: std.mem.Allocator, path: []const u8, config: Config) !Server {
         if (config.max_frame_bytes == 0 or config.max_frame_bytes == std.math.maxInt(usize) or
@@ -175,13 +190,27 @@ pub const Server = struct {
     }
 
     fn acceptClients(self: *Server) !void {
+        const now = try milliseconds();
+        if (now < self.accept_resume_ms) return;
         for (0..self.config.accepts_per_poll) |_| {
-            const fd = c.accept(self.fd, null, null);
-            if (fd < 0) switch (std.posix.errno(fd)) {
-                .AGAIN, .INTR => return,
-                .CONNABORTED => continue,
-                else => return error.AcceptFailed,
+            const fd = acceptClient(self.fd) catch |err| switch (err) {
+                error.WouldBlock => return,
+                error.Interrupted, error.ConnectionAborted, error.ProtocolFailure => continue,
+                error.ProcessFdQuotaExceeded,
+                error.SystemFdQuotaExceeded,
+                error.SystemResources,
+                => {
+                    self.accept_backoff_ms = std.math.clamp(
+                        self.accept_backoff_ms *| 2,
+                        accept_backoff_ms_min,
+                        accept_backoff_ms_max,
+                    );
+                    self.accept_resume_ms = now + self.accept_backoff_ms;
+                    return;
+                },
+                error.SocketNotListening, error.Unexpected => return error.AcceptFailed,
             };
+            self.accept_backoff_ms = 0;
             configureSocket(fd) catch {
                 closeFd(fd);
                 continue;
@@ -274,6 +303,22 @@ pub const Server = struct {
         if (hungUp(connection.fd)) self.drop(connection);
     }
 };
+
+fn acceptClient(fd: c_int) AcceptError!c_int {
+    const client = c.accept(fd, null, null);
+    if (client >= 0) return client;
+    return switch (std.posix.errno(client)) {
+        .AGAIN => error.WouldBlock,
+        .INTR => error.Interrupted,
+        .CONNABORTED => error.ConnectionAborted,
+        .PROTO => error.ProtocolFailure,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOBUFS, .NOMEM => error.SystemResources,
+        .BADF, .INVAL, .NOTSOCK, .OPNOTSUPP, .FAULT => error.SocketNotListening,
+        else => error.Unexpected,
+    };
+}
 
 fn hungUp(fd: c_int) bool {
     var selected: c.pollfd = .{ .fd = fd, .events = c.POLL.OUT, .revents = 0 };

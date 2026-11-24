@@ -592,3 +592,28 @@ test "control socket answers a client that shut its write side after the request
     }
     try std.testing.expectEqualStrings("{\"ok\":1}\n", &frame);
 }
+
+test "control socket backs off exhausted descriptors on accept and keeps serving" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    var server = try transport.Server.init(a, directory.socket, .{
+        .operator_uid = transport.currentUid(),
+    });
+    defer server.deinit();
+    var pending = try transport.Client.init(a, directory.socket, .{ .timeout_ms = 3000 });
+    defer pending.deinit();
+    const original = try std.posix.getrlimit(.NOFILE);
+    var exhausted = original;
+    exhausted.cur = 0;
+    try std.posix.setrlimit(.NOFILE, exhausted);
+    const refused = server.pollNext();
+    try std.posix.setrlimit(.NOFILE, original);
+    try std.testing.expectEqual(null, try refused);
+    var client = try transport.Client.init(a, directory.socket, .{ .timeout_ms = 3000 });
+    defer client.deinit();
+    var exchange: Exchange = .{ .client = &client, .texts = &.{"{\"after\":1}"} };
+    const worker = try std.Thread.spawn(.{}, Exchange.run, .{&exchange});
+    defer worker.join();
+    try std.testing.expectEqual(1, try serve(&server, &.{&exchange}));
+    try std.testing.expectEqual(null, exchange.failure);
+}
