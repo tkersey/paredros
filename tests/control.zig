@@ -1088,7 +1088,9 @@ test "control malformed and unsupported intervals are refused without admission"
     const hex_id = std.fmt.bytesToHex(target, .lower);
     const longest = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max});
     const excess = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max + 1});
-    const overflow = "{\"notification_interval_ms\":31622400001}";
+    const overflow = try native.json.canonical(frame, try wire.toJson(t.Policies, frame, .{
+        .notification_interval_ms = config.interval_ms_max + 1,
+    }));
     const Refusal = struct { args: []const []const u8, error_name: []const u8 };
     for ([_]Refusal{
         .{
