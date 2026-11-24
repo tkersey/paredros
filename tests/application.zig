@@ -91,10 +91,9 @@ pub fn NativeTests(comptime native: type) type {
 
         fn intent() t.DeliveryIntent {
             return .{
-                .destination = fixtures.specification().destination,
                 .key = .{
                     .lineage = @splat(1),
-                    .purpose = .control,
+                    .purpose = .activation,
                     .identity = @splat(2),
                     .generation = 0,
                 },
@@ -119,18 +118,6 @@ pub fn NativeTests(comptime native: type) type {
             );
         }
 
-        fn audit(admitted: t.Delivery) t.Input {
-            return .{ .audit = .{
-                .envelope = admitted.envelope,
-                .delivery = admitted,
-                .ordinal = 0,
-                .oldest = .{ .bytes = "0" },
-                .latest = null,
-                .page_limit = 1,
-                .canary = null,
-            } };
-        }
-
         test "native application declarations match production capability schemas" {
             try std.testing.expectEqual(expected.len, bridge.Application.declarations.len);
             var registry = try native.Registry.init(allocator, bridge.Application.declarations);
@@ -150,27 +137,20 @@ pub fn NativeTests(comptime native: type) type {
             }
         }
 
-        test "native application completes local deliveries and refuses legacy and audit work" {
+        test "native application completes local deliveries and refuses future envelopes" {
             var f: Fixture = .{};
             defer f.deinit();
             try f.init();
             var admitted = try delivery();
             defer admitted.deinit();
-            const version = admitted.value.payload.renderer_version;
-            try std.testing.expectEqual(prepare.renderer_version, version);
             const task = try f.execute("local-delivery", .{ .delivery = admitted.value });
             try std.testing.expectEqualDeep(t.Output{ .delivery = .{ .confirmed = .{
                 .timestamp = .{ .bytes = "local" },
                 .metadata_observed = true,
             } } }, try f.output(task));
-            var legacy = admitted.value;
-            legacy.payload.renderer_version = prepare.legacy_renderer_version;
-            const refusal = "legacy_delivery_unsupported";
-            try f.rejected("legacy-delivery", .{ .delivery = legacy }, refusal);
             var future = admitted.value;
             future.envelope.version = 2;
             try f.rejected("future-delivery", .{ .delivery = future }, "unsupported_input_version");
-            try f.rejected("audit", audit(admitted.value), "audit_unavailable");
         }
     };
 }

@@ -35,24 +35,14 @@ fn inputContains(input: t.Input, key: t.DeliveryKey) bool {
         .genesis => |value| key.purpose == .activation and
             std.meta.eql(key.lineage, value.lineage) and
             std.meta.eql(key.identity, value.envelope.stable_request),
-        .turn => |value| key.purpose == .turn and
-            std.meta.eql(key.lineage, value.envelope.stable_request) and
-            std.meta.eql(key.identity, value.envelope.stable_request),
-        .directive => |value| key.purpose == .control and
-            std.meta.eql(key.identity, value.envelope.stable_request),
         else => false,
     };
 }
 
 fn outputContains(output: t.Output, key: t.DeliveryKey) bool {
-    switch (output) {
-        .genesis => |head| return headContains(head, key),
-        .step => |value| {
-            if (headContains(value.head, key)) return true;
-            for (value.notices.items) |notice| if (sameKey(notice.key, key)) return true;
-        },
-        .turn => |value| return matches(value.delivery, key),
-        else => {},
-    }
-    return false;
+    return switch (output) {
+        .genesis => |head| headContains(head, key),
+        .step => |value| headContains(value.head, key),
+        else => false,
+    };
 }

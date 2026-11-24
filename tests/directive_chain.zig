@@ -62,8 +62,6 @@ fn modePolicy(c: protean.Context) !chain.Apply {
         .head = try b.select(allowed, next, head),
         .outcome = outcome,
         .gap = try c.literal(?t.Batch, null),
-        .notice = try c.literal(?t.DeliveryIntent, null),
-        .audit_request = try c.literal(?t.AuditRequest, null),
     });
     try c.author.define(function, try b.ret(result));
     return function;

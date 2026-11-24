@@ -127,18 +127,6 @@ pub fn Driver(comptime Types: type) type {
             return progress.admitted != null;
         }
 
-        pub fn turnDeliveries(self: *Self, a: std.mem.Allocator) ![]t.Id {
-            if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            return outbound.admitTurnDeliveries(
-                self.service,
-                a,
-                &index,
-                try self.clock.now(self.clock.context),
-            );
-        }
-
         pub fn deliveries(self: *Self, a: std.mem.Allocator, target: t.Id) ![]t.Id {
             if (!self.attached) return error.DriverDetached;
             var index = try self.rebuild(a);
@@ -200,19 +188,6 @@ pub fn Driver(comptime Types: type) type {
             body: t.DirectiveBody,
             digest: t.Digest,
         ) !t.Id {
-            return self.directiveIngress(a, operation, origin, target, body, digest, null);
-        }
-
-        pub fn directiveIngress(
-            self: *Self,
-            a: std.mem.Allocator,
-            operation: []const u8,
-            origin: t.Origin,
-            target: t.Id,
-            body: t.DirectiveBody,
-            digest: t.Digest,
-            ingress: ?t.Ingress,
-        ) !t.Id {
             if (!self.attached or origin == .derived) return error.UnauthenticatedDirective;
             const request: admission.Request = .{
                 .operation = operation,
@@ -220,7 +195,6 @@ pub fn Driver(comptime Types: type) type {
                 .target = target,
                 .origin = origin,
                 .digest = try admission.directiveDigest(a, operation, digest),
-                .ingress = ingress,
             };
             const result = try admission.admit(
                 self.service,
@@ -268,7 +242,6 @@ pub fn Driver(comptime Types: type) type {
                         .operation = .{ .bytes = request.operation },
                         .stable_request = request.digest,
                         .origin = request.origin,
-                        .ingress = request.ingress,
                     },
                     .obligation = request.target.?,
                     .ordinal = try std.math.add(u64, ordinal, 1),
@@ -325,7 +298,6 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
         if (record.input == .step) continue;
         const target = materialize.factTarget(index, record) orelse continue;
         if (!std.meta.eql(target, obligation.task)) continue;
-        if (record.input == .audit and record.result == null) continue;
         if (materialize.unsettled(index, obligation, record)) return true;
     }
     if (!obligation.ordinaryDispatch()) return false;

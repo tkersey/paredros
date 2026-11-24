@@ -476,7 +476,6 @@ fn prompt(
         })),
     });
     return b.product(try c.schema(t.DeliveryIntent), .{
-        .destination = try b.field(specification, "destination"),
         .key = try b.product(try c.schema(t.DeliveryKey), .{
             .lineage = try b.field(head, "lineage"),
             .purpose = try c.literal(

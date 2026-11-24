@@ -2,10 +2,7 @@ const std = @import("std");
 const c = @import("protean_contracts");
 const t = @import("application_types");
 
-pub const renderer_version: u32 = 2;
-pub const legacy_renderer_version: u32 = 1;
 pub const message_schema = "paredros.message.v1";
-pub const Stored = enum { local, legacy };
 
 const Metadata = struct {
     delivery_key: []const u8,
@@ -54,7 +51,6 @@ pub fn markerDigest(a: std.mem.Allocator, wire_bytes: []const u8) !t.Digest {
 
 pub fn projectIntent(delivery: t.Delivery) t.DeliveryIntent {
     return .{
-        .destination = delivery.destination,
         .key = delivery.key,
         .payload = delivery.payload.logical,
     };
@@ -165,44 +161,31 @@ pub fn operation(a: std.mem.Allocator, key: t.DeliveryKey) ![]u8 {
     });
 }
 
-fn stableRequest(
-    a: std.mem.Allocator,
-    destination: t.Destination,
-    key: t.DeliveryKey,
-    payload: t.DeliveryPayload,
-) !t.Digest {
+fn stableRequest(a: std.mem.Allocator, key: t.DeliveryKey, payload: t.DeliveryPayload) !t.Digest {
     const request = try c.encodeOwned(struct {
-        destination: t.Destination,
         key: t.DeliveryKey,
         payload: t.DeliveryPayload,
-    }, a, .{ .destination = destination, .key = key, .payload = payload });
+    }, a, .{ .key = key, .payload = payload });
     defer a.free(request);
     return hash(request);
 }
 
-pub fn verifyStored(a: std.mem.Allocator, delivery: t.Delivery) !Stored {
+pub fn verifyStored(a: std.mem.Allocator, delivery: t.Delivery) !void {
     if (delivery.envelope.version != 1 or delivery.envelope.origin != .derived)
         return error.InvalidPayload;
-    const stored: Stored = switch (delivery.payload.renderer_version) {
-        renderer_version => .local,
-        legacy_renderer_version => .legacy,
-        else => return error.UnsupportedRenderer,
-    };
     const expected_operation = try operation(a, delivery.key);
     defer a.free(expected_operation);
     if (!std.mem.eql(u8, delivery.envelope.operation.bytes, expected_operation) or
         !std.meta.eql(
             delivery.envelope.stable_request,
-            try stableRequest(a, delivery.destination, delivery.key, delivery.payload),
+            try stableRequest(a, delivery.key, delivery.payload),
         )) return error.InvalidPayload;
-    if (stored == .legacy) return stored;
     const expected = try wire(a, projectIntent(delivery), delivery.payload.evidence_digest);
     defer a.free(expected);
     if (!std.mem.eql(u8, expected, delivery.payload.wire_json.bytes) or
         !std.meta.eql(hash(expected), delivery.payload.content_digest) or
         !std.meta.eql(try markerDigest(a, expected), delivery.payload.marker_digest))
         return error.InvalidPayload;
-    return stored;
 }
 
 pub fn materialize(
@@ -216,7 +199,6 @@ pub fn materialize(
     const scratch = arena.allocator();
     const body = try wire(scratch, intent, evidence);
     const payload: t.DeliveryPayload = .{
-        .renderer_version = renderer_version,
         .logical = intent.payload,
         .content_digest = hash(body),
         .marker_digest = try markerDigest(scratch, body),
@@ -226,10 +208,9 @@ pub fn materialize(
     const encoded = try c.encodeOwned(t.Delivery, scratch, .{
         .envelope = .{
             .operation = .{ .bytes = try operation(scratch, intent.key) },
-            .stable_request = try stableRequest(scratch, intent.destination, intent.key, payload),
+            .stable_request = try stableRequest(scratch, intent.key, payload),
             .origin = .{ .derived = .{ .predecessor = producer } },
         },
-        .destination = intent.destination,
         .key = intent.key,
         .payload = payload,
     });

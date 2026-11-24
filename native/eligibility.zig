@@ -23,8 +23,6 @@ pub fn permits(
         .turn => record.input.turn.envelope.origin != .derived and !index.outputHeld(),
         .experiment => |value| experimentPermitted(index, value, request.capability),
         .delivery,
-        .audit,
-        .lineage_audit,
         .genesis,
         .directive,
         .continuity_member,
@@ -32,40 +30,6 @@ pub fn permits(
         .restore,
         => false,
     };
-}
-
-fn equal(a: std.mem.Allocator, comptime T: type, x: T, y: T) !bool {
-    const left = try c.encodeOwned(T, a, x);
-    defer a.free(left);
-    const right = try c.encodeOwned(T, a, y);
-    defer a.free(right);
-    return std.mem.eql(u8, left, right);
-}
-
-pub fn turnDeliveryPermitted(
-    a: std.mem.Allocator,
-    source: *const idx.Record,
-    intent: t.DeliveryIntent,
-) !bool {
-    if (source.superseded or source.input != .turn or source.result == null or
-        source.result.? != .turn or source.result_digest == null) return false;
-    const turn = source.input.turn;
-    if (turn.envelope.origin != .slack) return false;
-    const origin = turn.envelope.origin.slack;
-    const destination = turn.destination;
-    if (!std.mem.eql(u8, origin.app.bytes, destination.app.bytes) or
-        !std.mem.eql(u8, origin.workspace.bytes, destination.workspace.bytes) or
-        !std.mem.eql(u8, origin.user.bytes, destination.operator.bytes) or
-        !std.mem.eql(u8, origin.channel.bytes, destination.channel.bytes)) return false;
-    const expected = source.result.?.turn.delivery orelse return false;
-    if (intent.key.purpose != .turn or
-        !std.meta.eql(intent.key.lineage, turn.envelope.stable_request) or
-        !std.meta.eql(intent.key.identity, turn.envelope.stable_request) or
-        intent.key.generation != turn.attempt or
-        !std.meta.eql(intent.payload.obligation, turn.target) or
-        intent.payload.specification_revision != (turn.expected_revision orelse 0)) return false;
-    return try equal(a, t.Destination, destination, intent.destination) and
-        try equal(a, t.DeliveryIntent, expected, intent);
 }
 
 fn experimentPermitted(

@@ -56,8 +56,7 @@ pub fn emit(c: protean.Context) !chain.Apply {
         try active.ret(next),
         try ended.ret(try refuse(c, ended, head, "final_head")),
     );
-    const result = try withNotice(c, b, directive, applied);
-    try c.author.define(function, try b.ret(result));
+    try c.author.define(function, try b.ret(applied));
     return function;
 }
 
@@ -79,8 +78,6 @@ fn applyBody(
     const revert = try b.caseOf(body, "revert");
     const answer = try b.caseOf(body, "answer");
     const release = try b.caseOf(body, "release");
-    const audit = try b.caseOf(body, "audit");
-    const frontier = try b.caseOf(body, "frontier_audit");
     const recovery_hold = try b.caseOf(body, "recovery_hold");
     const recovery_release = try b.caseOf(body, "recovery_release");
     const due = try check.body().update(
@@ -112,10 +109,6 @@ fn applyBody(
             directive,
             try release.body().field(release.payload(), "key"),
         )),
-        .audit = try audit.ret(try refuse(c, audit.body(), head, "audit_unavailable")),
-        .frontier_audit = try frontier.ret(
-            try refuse(c, frontier.body(), head, "audit_unavailable"),
-        ),
         .recovery_hold = try recovery_hold.ret(held),
         .recovery_release = try recovery_release.ret(released),
     });
@@ -193,8 +186,6 @@ fn outcomeResult(
         .head = head,
         .outcome = outcome,
         .gap = try c.literal(?t.Batch, null),
-        .notice = try c.literal(?t.DeliveryIntent, null),
-        .audit_request = try c.literal(?t.AuditRequest, null),
     });
 }
 
@@ -568,102 +559,6 @@ fn replacementText(
         .used = try b.constant(u64, 0),
     });
     return b.conditional(keep, try retained.ret(complete), try abbreviated.ret(summary));
-}
-
-fn withNotice(
-    c: protean.Context,
-    b: anytype,
-    directive: a.Value(t.Directive),
-    applied: a.Value(chain.Applied),
-) !a.Value(chain.Applied) {
-    const origin = try b.field(try b.field(directive, "envelope"), "origin");
-    const local = try b.caseOf(origin, "local");
-    const slack = try b.caseOf(origin, "slack");
-    const derived = try b.caseOf(origin, "derived");
-    const notice = try controlNotice(c, slack.body(), directive, applied);
-    const added = try slack.body().update(applied, .{
-        .notice = try slack.body().variant(try c.schema(?t.DeliveryIntent), "some", notice),
-    });
-    return b.match(origin, .{
-        .local = try local.ret(applied),
-        .slack = try slack.ret(added),
-        .derived = try derived.ret(applied),
-    });
-}
-
-fn controlNotice(
-    c: protean.Context,
-    b: anytype,
-    directive: a.Value(t.Directive),
-    applied: a.Value(chain.Applied),
-) !a.Value(t.DeliveryIntent) {
-    const head = try b.field(applied, "head");
-    const specification = try b.field(head, "specification");
-    const key = try b.product(try c.schema(t.DeliveryKey), .{
-        .lineage = try b.field(head, "lineage"),
-        .purpose = try c.literal(@FieldType(t.DeliveryKey, "purpose"), .control),
-        .identity = try b.field(try b.field(directive, "envelope"), "stable_request"),
-        .generation = try b.constant(u32, 0),
-    });
-    const payload = try b.product(try c.schema(t.LogicalPayload), .{
-        .schema_version = try b.constant(u32, 1),
-        .obligation = try b.variant(
-            try c.schema(?t.Id),
-            "some",
-            try b.field(directive, "obligation"),
-        ),
-        .specification_revision = try b.field(specification, "revision"),
-        .prior_sequence = try b.field(try b.field(head, "told"), "sequence"),
-        .through_sequence = try b.field(try b.field(head, "told"), "sequence"),
-        .frozen_text = try noticeText(c, b, directive, try b.field(applied, "outcome")),
-        .prompt = try c.literal(?t.Digest, null),
-        .supersedes = try c.literal(?t.DeliveryKey, null),
-        .coverage = try c.literal(?t.Frontier, null),
-        .issue = try b.constant(u32, 0),
-        .buttons = try c.literal(@FieldType(t.LogicalPayload, "buttons"), .{ .items = &.{} }),
-        .comparison = try c.literal(@FieldType(t.LogicalPayload, "comparison"), null),
-    });
-    return b.product(try c.schema(t.DeliveryIntent), .{
-        .destination = try b.field(specification, "destination"),
-        .key = key,
-        .payload = payload,
-    });
-}
-
-fn noticeText(
-    c: protean.Context,
-    b: anytype,
-    directive: a.Value(t.Directive),
-    outcome: a.Value(chain.Outcome),
-) !a.Value(t.Text) {
-    const body = try b.field(directive, "body");
-    var name = try c.literal(t.Text, .{ .bytes = "directive" });
-    inline for (comptime std.meta.fieldNames(t.DirectiveBody)) |field| {
-        name = try b.select(
-            try bodyIs(b, body, field),
-            try c.literal(t.Text, .{ .bytes = field }),
-            name,
-        );
-    }
-    const applied = try b.caseOf(outcome, "applied");
-    const rejected = try b.caseOf(outcome, "rejected");
-    const success = try join(
-        c,
-        applied.body(),
-        name,
-        try c.literal(t.Text, .{ .bytes = " applied." }),
-    );
-    const prefix = try join(
-        c,
-        rejected.body(),
-        name,
-        try c.literal(t.Text, .{ .bytes = " rejected: " }),
-    );
-    const failure = try join(c, rejected.body(), prefix, rejected.payload());
-    return b.match(
-        outcome,
-        .{ .applied = try applied.ret(success), .rejected = try rejected.ret(failure) },
-    );
 }
 
 fn choicesFunction(c: protean.Context) !Choices {

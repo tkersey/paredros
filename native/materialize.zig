@@ -6,7 +6,6 @@ const retained = @import("retained.zig");
 const admission = @import("admission.zig");
 const delivery = @import("delivery_fact.zig");
 const continuity = @import("continuity.zig");
-const legacy = @import("legacy.zig");
 const delivery_target = @import("delivery_target.zig");
 const measure = @import("render_measure.zig");
 
@@ -104,8 +103,6 @@ fn controlBoundary(pending: []const t.DirectiveFact) bool {
         .@"resume",
         .recovery_hold,
         .recovery_release,
-        .audit,
-        .frontier_audit,
         => return true,
         else => {},
     };
@@ -132,11 +129,9 @@ fn directives(
 }
 
 pub fn factTarget(index: *const idx.Index, record: idx.Record) ?t.Id {
-    if (legacy.interactionTarget(index, record)) |selected| return selected;
     return switch (record.input) {
         .step => |value| value.obligation,
         .delivery => |value| delivery_target.resolve(index, value),
-        .audit => |value| delivery_target.auditTarget(index, value.delivery),
         .turn => |value| value.target,
         .genesis,
         .directive,
@@ -144,7 +139,6 @@ pub fn factTarget(index: *const idx.Index, record: idx.Record) ?t.Id {
         .continuity_member,
         .continuity_cut,
         .restore,
-        .lineage_audit,
         => null,
     };
 }
@@ -190,7 +184,7 @@ fn facts(
         if (!unsettled(index, obligation, record)) continue;
         if (result.items.len == 128) break;
         const previous = priorFact(index, obligation, record.task);
-        try result.append(a, try settlement(a, index, record, previous));
+        try result.append(a, try settlement(a, record, previous));
     }
     return result.toOwnedSlice(a);
 }
@@ -202,31 +196,7 @@ pub fn unsettled(
 ) bool {
     if (!readyFact(record)) return false;
     const previous = priorFact(index, obligation, record.task) orelse return true;
-    if (previous.reference.revision == record.revision) return false;
-    return record.input != .delivery or !delivery.retiredDigest(record.input.delivery) or
-        !settledBefore(index, obligation, record.task);
-}
-
-pub fn retirable(index: *const idx.Index, record: idx.Record) bool {
-    if (record.input != .delivery or !delivery.retiredDigest(record.input.delivery)) return false;
-    const snapshot = record.owner_snapshot orelse return false;
-    if (snapshot.outcome == .completed or snapshot.outcome == .failed or
-        snapshot.outcome == .cancelled) return false;
-    const target = factTarget(index, record) orelse return false;
-    const obligation = index.obligation(target) orelse return false;
-    const previous = priorFact(index, obligation, record.task) orelse return false;
-    return previous.reference.revision == record.revision and previous.delivery == null;
-}
-
-fn settledBefore(index: *const idx.Index, obligation: *const idx.Obligation, task: t.Id) bool {
-    for (obligation.chain) |position| {
-        const input = index.records[position].input;
-        if (input != .step) continue;
-        for (input.step.facts.items) |fact| {
-            if (std.meta.eql(fact.reference.task, task) and fact.delivery != null) return true;
-        }
-    }
-    return false;
+    return previous.reference.revision != record.revision;
 }
 
 pub fn readyFact(record: idx.Record) bool {
@@ -234,34 +204,25 @@ pub fn readyFact(record: idx.Record) bool {
     const snapshot = record.owner_snapshot orelse return false;
     if (snapshot.outcome == .completed or snapshot.outcome == .failed or
         snapshot.outcome == .cancelled) return true;
-    if (delivery.retiredDigest(record.input.delivery)) return true;
     const evidence = record.owner_evidence orelse return false;
-    if (evidence.status == .unknown) return true;
-    for (snapshot.attempts.items) |attempt| if (attempt.capture) |capture| {
-        if (capture.reply != null) return true;
-    };
-    return false;
+    return evidence.status == .unknown;
 }
 
 fn settlement(
     a: std.mem.Allocator,
-    index: *const idx.Index,
     record: idx.Record,
     previous: ?t.Settlement,
 ) !t.Settlement {
     const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
     const bytes = try c.encodeOwned(retained.Snapshot, a, snapshot);
-    const bound_interaction = try legacy.interaction(a, index, record);
-    const disposition = if (bound_interaction) |value|
-        value
-    else if (record.input == .delivery)
+    const disposition = if (record.input == .delivery)
         (try delivery.settlement(
             a,
             snapshot,
             record.owner_evidence orelse return error.MissingOwnerEvidence,
-            .current,
         )).value
-    else if (record.input == .audit) try auditFact(record) else null;
+    else
+        null;
     return .{
         .reference = .{
             .task = record.task,
@@ -269,10 +230,9 @@ fn settlement(
             .digest = idx.digest(bytes),
         },
         .owner_snapshot = .{ .bytes = bytes },
-        .kind = if (bound_interaction != null) .interaction else switch (record.input) {
+        .kind = switch (record.input) {
             .step => if (record.superseded) .superseded else .phase,
             .delivery => .delivery,
-            .audit => .audit,
             .turn => .turn,
             else => return error.UnexpectedSettlement,
         },
@@ -280,26 +240,6 @@ fn settlement(
         .previous_accounting = if (previous) |value| value.accounting else .{},
         .previous_reference = if (previous) |value| value.reference else null,
         .delivery = disposition,
-    };
-}
-
-fn auditFact(record: idx.Record) !@FieldType(t.Settlement, "delivery") {
-    const output = record.result orelse return null;
-    if (output != .audit) return error.WrongTaskKind;
-    if (output.audit != .found) return null;
-    const admitted = record.input.audit.delivery;
-    const timestamp = output.audit.found.timestamp;
-    return .{
-        .admitted = admitted,
-        .outcome = .{ .confirmed = .{ .timestamp = timestamp, .metadata_observed = true } },
-        .receipt = .{
-            .key = admitted.key,
-            .destination = admitted.destination,
-            .timestamp = timestamp,
-            .payload_digest = admitted.payload.content_digest,
-            .evidence = .{ .task = record.task, .digest = record.result_digest.? },
-            .basis = .history_match,
-        },
     };
 }
 

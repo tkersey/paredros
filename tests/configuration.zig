@@ -22,14 +22,6 @@ fn fixture() configuration.Config {
             .name = "repository",
             .ref = "refs/heads/main",
         },
-        .slack = .{
-            .account = "slack-owner",
-            .app = "A100",
-            .workspace = "T100",
-            .operator = "U100",
-            .channel = "D100",
-            .bot_id = "B100",
-        },
     };
 }
 
@@ -89,11 +81,6 @@ test "configuration closed schema validates uid version and bindings" {
     const relative = try encoded(changed);
     defer a.free(relative);
     try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, relative, 42));
-    changed = fixture();
-    changed.slack.?.channel = "D 100";
-    const channel = try encoded(changed);
-    defer a.free(channel);
-    try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, channel, 42));
 }
 
 fn withModel() configuration.Config {
@@ -283,67 +270,33 @@ test "configuration offline profile permits authenticated local owner reads" {
     try std.testing.expect(launch.environment.model == null);
 }
 
-fn expectDestination(
-    bindings: configuration.Bindings,
-    expected: [5][]const u8,
-) !void {
-    const destination = bindings.destination;
-    const actual = [_][]const u8{
-        destination.account.bytes,
-        destination.app.bytes,
-        destination.workspace.bytes,
-        destination.operator.bytes,
-        destination.channel.bytes,
-    };
-    for (expected, actual) |left, right| try std.testing.expectEqualStrings(left, right);
-}
-
-test "configuration legacy Slack section keeps the destination and tenant of existing namespaces" {
-    const legacy =
+test "configuration refuses Slack fields as unknown and binds the local tenant" {
+    const prefix =
         \\{"version":1,"current_uid":42,"namespace_path":"/tmp/unused-paredros-namespace",
         \\"control_socket_path":"/tmp/unused-paredros-control",
         \\"repository":{"account":"offline","id":1,"owner":"fixture","name":"repository",
-        \\"ref":"refs/heads/main"},
-        \\"slack":{"account":"offline","app":"A1","workspace":"T1","operator":"U1",
-        \\"channel":"D1","bot_id":"B1"}}
+        \\"ref":"refs/heads/main"}
     ;
-    var parsed = try configuration.parse(a, legacy, 42);
+    const refused = [_][]const u8{
+        \\,"slack":{"account":"offline","app":"A1","workspace":"T1","operator":"U1",
+        \\"channel":"D1","bot_id":"B1"}}
+        ,
+        \\,"grants":{"slack_write":true}}
+        ,
+        \\,"slack_bot_credential_file":"/private/bot"}
+        ,
+    };
+    for (refused) |suffix| {
+        const bytes = try std.mem.concat(a, u8, &.{ prefix, suffix });
+        defer a.free(bytes);
+        try std.testing.expectError(error.UnknownField, configuration.parse(a, bytes, 42));
+    }
+    const bytes = try std.mem.concat(a, u8, &.{ prefix, "}" });
+    defer a.free(bytes);
+    var parsed = try configuration.parse(a, bytes, 42);
     defer parsed.deinit();
-    const bound = configuration.bindings(parsed.value);
-    try expectDestination(bound, .{ "offline", "A1", "T1", "U1", "D1" });
-    try std.testing.expectEqualStrings("T1", configuration.tenant(parsed.value));
     const launch = try configuration.prepare(a, std.testing.io, parsed.value, build);
     defer launch.deinit();
-    try std.testing.expectEqualStrings("T1", launch.profile.authority.tenant);
-    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "slack") == null);
-    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "B1") == null);
-    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "\"D1\"") != null);
-    var local = parsed.value;
-    local.slack = null;
-    try expectDestination(
-        configuration.bindings(local),
-        .{ "local", "paredros", "local", "owner", "cli" },
-    );
-    try std.testing.expectEqualStrings("local", configuration.tenant(local));
-    const fresh = try configuration.prepare(a, std.testing.io, local, build);
-    defer fresh.deinit();
-    try std.testing.expectEqualStrings("local", fresh.profile.authority.tenant);
-    try std.testing.expect(!std.mem.eql(u8, launch.profile.bytes, fresh.profile.bytes));
-}
-
-test "configuration refuses Slack grants and credential references" {
-    var refused: [4]configuration.Config = @splat(fixture());
-    refused[0].grants.slack_history = true;
-    refused[1].grants.slack_write = true;
-    refused[2].slack_bot_credential_file = "/private/bot";
-    refused[3].slack_app_credential_file = "/private/app";
-    for (refused) |config| {
-        const bytes = try encoded(config);
-        defer a.free(bytes);
-        try std.testing.expectError(error.SlackRemoved, configuration.parse(a, bytes, 42));
-        try std.testing.expectError(
-            error.SlackRemoved,
-            configuration.prepare(a, std.testing.io, config, build),
-        );
-    }
+    try std.testing.expectEqualStrings(configuration.tenant, launch.profile.authority.tenant);
+    try std.testing.expect(std.mem.indexOf(u8, launch.profile.bytes, "destination") == null);
 }

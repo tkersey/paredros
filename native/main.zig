@@ -287,7 +287,7 @@ fn audit(
         .bytes = try configuration.profileBytes(scratch, config, null),
         .authority = .{
             .principal = try std.fmt.allocPrint(scratch, "uid:{d}", .{config.current_uid}),
-            .tenant = configuration.tenant(config),
+            .tenant = configuration.tenant,
             .grants = &.{},
             .inference = false,
             .disclosure = true,

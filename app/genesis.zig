@@ -120,9 +120,7 @@ fn activation(
     b: anytype,
     input: a.Value(t.Genesis),
 ) !a.Value(t.DeliveryIntent) {
-    const specification = try b.field(input, "specification");
     return b.product(try c.schema(t.DeliveryIntent), .{
-        .destination = try b.field(specification, "destination"),
         .key = try b.product(try c.schema(t.DeliveryKey), .{
             .lineage = try b.field(input, "lineage"),
             .purpose = try c.literal(@FieldType(t.DeliveryKey, "purpose"), .activation),

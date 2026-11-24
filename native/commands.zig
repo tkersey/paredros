@@ -7,12 +7,10 @@ const dialogue = @import("dialogue.zig");
 const ingress_policy = @import("ingress_policy.zig");
 
 pub const TurnRequest = struct {
-    destination: t.Destination,
     text: t.Text,
     target: ?t.Id = null,
     genesis_template: ?t.Specification = null,
     anchor_template: bool = false,
-    ingress: ?t.Ingress = null,
     refusal: ?t.Name = null,
 };
 pub const Confirmation = struct { turn: t.Reference, ordinal: u32 };
@@ -63,7 +61,6 @@ pub fn genesis(
         specification,
         try admission.stableDigest(a, specification),
         false,
-        null,
     );
 }
 
@@ -83,7 +80,6 @@ pub fn monitor(
         specification,
         try admission.stableDigest(a, specification),
         true,
-        null,
     );
 }
 
@@ -95,7 +91,6 @@ fn admitGenesis(
     specification: t.Specification,
     digest: t.Digest,
     anchor_now: bool,
-    ingress: ?t.Ingress,
 ) !t.Id {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -106,7 +101,6 @@ fn admitGenesis(
         .target = null,
         .origin = origin,
         .digest = digest,
-        .ingress = ingress,
     };
     const Materializer = struct {
         driver: @TypeOf(driver),
@@ -150,7 +144,6 @@ fn genesisEnvelope(request: admission.Request) t.Envelope {
         .operation = .{ .bytes = request.operation },
         .stable_request = request.digest,
         .origin = request.origin,
-        .ingress = request.ingress,
     };
 }
 
@@ -188,7 +181,6 @@ pub fn turn(
         .kind = .turn,
         .target = requested_turn.target,
         .origin = origin,
-        .ingress = requested_turn.ingress,
         .digest = try admission.stableDigest(
             scratch,
             @as(struct { operation: c.Utf8, request: TurnRequest }, .{
@@ -236,7 +228,6 @@ fn turnInput(
         break :blk index.head(obligation).specification.policies.context_bytes;
     } else 64 * 1024;
     var context = try dialogue.materialize(a, index, .{
-        .destination = input.destination,
         .target = input.target,
         .context_bytes = @min(limit, 256 * 1024 - input.text.bytes.len - 256),
     });
@@ -246,12 +237,9 @@ fn turnInput(
             .operation = .{ .bytes = request.operation },
             .origin = request.origin,
             .stable_request = request.digest,
-            .ingress = request.ingress,
         },
         .ordinal = context.value.next_ordinal,
         .refusal = input.refusal,
-        .ingress_stable = if (input.ingress) |ingress| ingress.stable_request else null,
-        .destination = input.destination,
         .text = input.text,
         .context = context.value.text,
         .context_references = context.value.references,
@@ -364,7 +352,6 @@ pub fn admitConfirmation(
     operation: []const u8,
     origin: t.Origin,
     confirmation: Confirmation,
-    ingress: ?t.Ingress,
 ) !t.Id {
     try authenticate(driver, origin);
     const selected = try proposal(index, confirmation);
@@ -378,16 +365,14 @@ pub fn admitConfirmation(
             specification,
             digest,
             false,
-            ingress,
         ),
-        .directive => |body| try driver.directiveIngress(
+        .directive => |body| try driver.directiveRequest(
             a,
             operation,
             origin,
             selected.target orelse return error.InvalidProposalTarget,
             body,
             digest,
-            ingress,
         ),
     };
 }

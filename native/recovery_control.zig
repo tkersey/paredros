@@ -14,19 +14,7 @@ pub fn validateBindings(a: std.mem.Allocator, index: anytype, config: configurat
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
-        const repository_matches = try equal(
-            a,
-            t.Repository,
-            head.specification.repository,
-            bound.repository,
-        );
-        const destination_matches = try equal(
-            a,
-            t.Destination,
-            head.specification.destination,
-            bound.destination,
-        );
-        if (!repository_matches or !destination_matches)
+        if (!try equal(a, t.Repository, head.specification.repository, bound.repository))
             return error.RecoveryResourceMismatch;
     }
 }

@@ -203,7 +203,6 @@ pub fn importBundle(
         .digest = try admission.stableDigest(a, .{
             .request = request,
             .repository = config.repository.value(),
-            .destination = configuration.bindings(config).destination,
         }),
     };
     const maximum: ?usize = if (request.bytes_max) |value|
@@ -249,7 +248,7 @@ fn resumeImport(
 ) !void {
     var bundle = try c.decodeBorrowed(transfer.Bundle, a, bytes);
     defer bundle.deinit();
-    try transfer.validateDestination(a, bundle.value, configuration.bindings(config));
+    try transfer.validateBindings(a, bundle.value, configuration.bindings(config));
     if (index.operations.contains(request.operation))
         _ = try admission.admit(driver.service, a, request, Frozen{});
 }

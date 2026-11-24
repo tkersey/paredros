@@ -360,7 +360,6 @@ test "native model candidate new monitor preserves configured bindings and ancho
     const proposal = result.candidate.conversation.proposals.items[0];
     const genesis = proposal.body.genesis;
     try std.testing.expectEqualDeep(selected.genesis_template.?.repository, genesis.repository);
-    try std.testing.expectEqualDeep(selected.genesis_template.?.destination, genesis.destination);
     try std.testing.expectEqual(selected.genesis_template.?.anchor_ms, genesis.anchor_ms);
     try std.testing.expectEqual(selected.genesis_template.?.revision, genesis.revision);
     try std.testing.expectEqual(120000, genesis.interval_ms);

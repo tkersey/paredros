@@ -191,7 +191,6 @@ test "native settlements require coherent previous revisions and monotone known 
 
 fn intent() t.DeliveryIntent {
     return .{
-        .destination = contracts.specification().destination,
         .key = .{
             .lineage = @splat(2),
             .purpose = .digest,
@@ -234,7 +233,6 @@ fn admitted() t.Delivery {
     const logical = intent();
     return .{
         .envelope = contracts.genesis().envelope,
-        .destination = logical.destination,
         .key = logical.key,
         .payload = .{
             .logical = logical.payload,
@@ -248,7 +246,6 @@ fn admitted() t.Delivery {
 
 fn projected(value: t.Delivery) t.DeliveryIntent {
     return .{
-        .destination = value.destination,
         .key = value.key,
         .payload = value.payload.logical,
     };
@@ -257,11 +254,9 @@ fn projected(value: t.Delivery) t.DeliveryIntent {
 fn receipt() t.Receipt {
     return .{
         .key = intent().key,
-        .destination = intent().destination,
         .timestamp = .{ .bytes = "1700000000.000001" },
         .payload_digest = admitted().payload.content_digest,
         .evidence = .{ .task = @splat(9), .digest = @splat(10) },
-        .basis = .captured_response,
     };
 }
 
@@ -318,20 +313,11 @@ test "native settlements advance only exact contiguous confirmed coverage and re
         .head = previous,
         .facts = .{ .items = &.{current} },
     })));
-    var audit = current;
-    audit.kind = .audit;
-    audit.delivery.?.receipt.?.basis = .history_match;
-    expected.told_receipt = audit.delivery.?.receipt;
-    try std.testing.expectEqualDeep(expected, try fixture.output(try fixture.execute("audit", .{
-        .head = previous,
-        .facts = .{ .items = &.{audit} },
-    })));
 }
 
 const Mismatch = enum {
     generation,
     identity,
-    destination,
     content,
     frozen_text,
     button_count,
@@ -340,7 +326,6 @@ const Mismatch = enum {
     comparison_missing,
     coverage,
     receipt_generation,
-    receipt_destination,
     receipt_content,
     receipt_timestamp,
     confirmed_timestamp,
@@ -363,7 +348,6 @@ fn mismatched(case: Mismatch, previous: *t.Head, current: *t.Settlement) void {
     switch (case) {
         .generation => value.admitted.key.generation += 1,
         .identity => value.admitted.key.identity = @splat(99),
-        .destination => value.admitted.destination.channel = .{ .bytes = "other-channel" },
         .content => value.admitted.payload.content_digest = @splat(99),
         .frozen_text => value.admitted.payload.logical.frozen_text = .{ .bytes = "changed text" },
         .button_count => value.admitted.payload.logical.buttons = .{ .items = &.{} },
@@ -372,7 +356,6 @@ fn mismatched(case: Mismatch, previous: *t.Head, current: *t.Settlement) void {
         .comparison_missing => value.admitted.payload.logical.comparison = null,
         .coverage => value.admitted.payload.logical.coverage.?.tip = @splat('z'),
         .receipt_generation => value.receipt.?.key.generation += 1,
-        .receipt_destination => value.receipt.?.destination.operator = .{ .bytes = "other-user" },
         .receipt_content => value.receipt.?.payload_digest = @splat(99),
         .receipt_timestamp => value.receipt.?.timestamp = .{ .bytes = "1700000000.000002" },
         .confirmed_timestamp => value.outcome.confirmed.timestamp = .{ .bytes = "other-time" },
@@ -647,10 +630,8 @@ fn activationFact(previous: t.Head, kind: ActivationCase) t.Settlement {
     const activation = previous.activation.?;
     var result = deliveryFact();
     result.accounting = .{};
-    result.delivery.?.admitted.destination = activation.destination;
     result.delivery.?.admitted.key = activation.key;
     result.delivery.?.admitted.payload.logical = activation.payload;
-    result.delivery.?.receipt.?.destination = activation.destination;
     result.delivery.?.receipt.?.key = activation.key;
     switch (kind) {
         .confirmed => {},

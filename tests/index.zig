@@ -178,7 +178,6 @@ pub fn successor(value: t.Step) t.Output {
         .head = output,
         .batch = null,
         .dispositions = .{ .items = &.{} },
-        .notices = .{ .items = &.{} },
     } };
 }
 
@@ -658,7 +657,6 @@ test "index copied batches must be the contiguous outstanding prefix" {
 
 pub fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
     const delivery = try preparation.materialize(a, .{
-        .destination = fixture.specification().destination,
         .key = .{
             .lineage = @splat(8),
             .purpose = .digest,
@@ -686,23 +684,6 @@ pub fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery 
     return delivery.value;
 }
 
-pub fn legacyDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
-    var delivery = try pendingDelivery(a, producer);
-    delivery.payload.renderer_version = preparation.legacy_renderer_version;
-    delivery.payload.wire_json = .{ .bytes = "{\"channel\":\"D1\",\"metadata\":{}}" };
-    const request = try c.encodeOwned(struct {
-        destination: t.Destination,
-        key: t.DeliveryKey,
-        payload: t.DeliveryPayload,
-    }, a, .{
-        .destination = delivery.destination,
-        .key = delivery.key,
-        .payload = delivery.payload,
-    });
-    delivery.envelope.stable_request = preparation.hash(request);
-    return delivery;
-}
-
 test "index authenticates copied delivery input and outcome before settlement" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -724,7 +705,7 @@ test "index authenticates copied delivery input and outcome before settlement" {
         switch (variant) {
             0 => {},
             1 => fact.delivery.?.admitted.key.generation += 1,
-            2 => fact.delivery.?.admitted.destination.channel.bytes = "DOTHER",
+            2 => fact.delivery.?.admitted.payload.logical.issue += 1,
             3 => fact.delivery.?.admitted.payload.logical.frozen_text.bytes = "different",
             4 => fact.delivery.?.outcome = .{ .rejected = .{ .code = .{ .bytes = "denied" } } },
             else => unreachable,
@@ -781,28 +762,16 @@ const confirmation: t.DeliveryOutcome = .{ .confirmed = .{
     .metadata_observed = true,
 } };
 
-fn testReceipt(
-    source: idx.Row,
-    admitted: t.Delivery,
-    basis: @FieldType(t.Receipt, "basis"),
-) t.Receipt {
+fn testReceipt(source: idx.Row, admitted: t.Delivery) t.Receipt {
     return .{
         .key = admitted.key,
-        .destination = admitted.destination,
         .timestamp = confirmation.confirmed.timestamp,
         .payload_digest = admitted.payload.content_digest,
         .evidence = ref(source),
-        .basis = basis,
     };
 }
 
-fn testSettlement(
-    a: std.mem.Allocator,
-    source: idx.Row,
-    admitted: t.Delivery,
-    kind: @FieldType(t.Settlement, "kind"),
-    basis: @FieldType(t.Receipt, "basis"),
-) !t.Settlement {
+fn testSettlement(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Settlement {
     const bytes = try snapshotBytes(a, source);
     return .{
         .reference = .{
@@ -811,26 +780,14 @@ fn testSettlement(
             .digest = idx.digest(bytes),
         },
         .owner_snapshot = .{ .bytes = bytes },
-        .kind = kind,
+        .kind = .delivery,
         .accounting = .{},
         .delivery = .{
             .admitted = admitted,
             .outcome = confirmation,
-            .receipt = testReceipt(source, admitted, basis),
+            .receipt = testReceipt(source, admitted),
         },
     };
-}
-
-fn audited(a: std.mem.Allocator, admitted: t.Delivery, result: t.AuditResult) !idx.Row {
-    return row(a, 2, .{ .audit = .{
-        .envelope = envelope("audit-1"),
-        .delivery = admitted,
-        .ordinal = 1,
-        .oldest = .{ .bytes = "1700000000.000000" },
-        .latest = .{ .bytes = "1700000001.000000" },
-        .page_limit = 2,
-        .canary = null,
-    } }, .{ .audit = result });
 }
 
 test "index rejects authentic retained input with invalid delivery seals or envelope" {
@@ -870,18 +827,17 @@ test "index confirmed delivery receipt binds actual retained response reference"
     const initial = try genesis(a);
     const admitted = try pendingDelivery(a, ref(initial));
     const sent = try row(a, 2, .{ .delivery = admitted }, .{ .delivery = confirmation });
-    const original = try testSettlement(a, sent, admitted, .delivery, .captured_response);
-    for (0..8) |variant| {
+    const original = try testSettlement(a, sent, admitted);
+    for (0..7) |variant| {
         var selected = original;
         switch (variant) {
             0 => {},
             1 => selected.delivery.?.receipt.?.key.generation += 1,
-            2 => selected.delivery.?.receipt.?.destination.channel.bytes = "DOTHER",
+            2 => selected.delivery.?.receipt.?.key.purpose = .question,
             3 => selected.delivery.?.receipt.?.payload_digest[0] ^= 1,
             4 => selected.delivery.?.receipt.?.evidence.task[0] ^= 1,
             5 => selected.delivery.?.receipt.?.evidence.digest[0] ^= 1,
-            6 => selected.delivery.?.receipt.?.basis = .history_match,
-            7 => selected.delivery.?.receipt.?.timestamp.bytes = "1700000000.000002",
+            6 => selected.delivery.?.receipt.?.timestamp.bytes = "1700000000.000002",
             else => unreachable,
         }
         try expectFact(
@@ -892,66 +848,6 @@ test "index confirmed delivery receipt binds actual retained response reference"
             if (variant == 0) null else error.InvalidDeliveryReceipt,
         );
     }
-}
-
-test "index audit timestamp derives receipt from authenticated target and actual audit result" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const admitted = try pendingDelivery(a, ref(initial));
-    const source = try audited(a, admitted, .{ .found = .{
-        .timestamp = confirmation.confirmed.timestamp,
-    } });
-    const original = try testSettlement(a, source, admitted, .audit, .history_match);
-    for (0..13) |variant| {
-        var selected = original;
-        switch (variant) {
-            0 => {},
-            1 => selected.delivery.?.receipt.?.key.generation += 1,
-            2 => selected.delivery.?.receipt.?.destination.channel.bytes = "DOTHER",
-            3 => selected.delivery.?.receipt.?.payload_digest[0] ^= 1,
-            4 => selected.delivery.?.receipt.?.evidence.task[0] ^= 1,
-            5 => selected.delivery.?.receipt.?.evidence.digest[0] ^= 1,
-            6 => selected.delivery.?.receipt.?.basis = .captured_response,
-            7 => selected.delivery.?.receipt.?.timestamp.bytes = "1700000000.000002",
-            8 => selected.delivery.?.outcome.confirmed.timestamp.bytes = "1700000000.000002",
-            9 => selected.delivery.?.outcome.confirmed.metadata_observed = false,
-            10 => selected.delivery.?.outcome.confirmed.rendering_fault = true,
-            11 => selected.delivery.?.admitted.payload.logical.frozen_text.bytes = "different",
-            12 => selected.delivery.?.receipt = null,
-            else => unreachable,
-        }
-        const expected: ?anyerror = if (variant == 0)
-            null
-        else if (variant >= 8 and variant <= 11)
-            error.CopiedDeliveryMismatch
-        else
-            error.InvalidDeliveryReceipt;
-        try expectFact(a, initial, source, selected, expected);
-    }
-}
-
-test "index inconclusive audit carries no confirmation and validates its sealed target" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    var admitted = try pendingDelivery(a, ref(initial));
-    const result: t.AuditResult = .{ .inconclusive = .{ .bytes = "budget" } };
-    const source = try audited(a, admitted, result);
-    var selected = try testSettlement(a, source, admitted, .audit, .history_match);
-    try expectFact(a, initial, source, selected, error.FactKindMismatch);
-    selected.delivery = null;
-    try expectFact(a, initial, source, selected, null);
-    admitted.payload.wire_json.bytes = "{}";
-    const corrupt = try audited(a, admitted, result);
-    try std.testing.expectError(error.InvalidPayload, idx.Index.init(
-        Native,
-        std.testing.allocator,
-        &.{ corrupt, initial },
-        &.{},
-    ));
 }
 
 test "index materialization freezes ordered controls and owner facts into a valid successor" {
@@ -1177,7 +1073,6 @@ fn conversation(a: std.mem.Allocator, id: u8, ordinal: u64, text: []const u8) !i
     return row(a, id, .{ .turn = .{
         .envelope = envelope(text),
         .ordinal = ordinal,
-        .destination = fixture.specification().destination,
         .target = @splat(1),
         .text = .{ .bytes = text },
         .context = .{ .bytes = "" },
@@ -1201,7 +1096,6 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     var index = try idx.Index.init(Native, a, &.{ old, initial, recent }, &.{});
     const dialogue = @import("../native/dialogue.zig");
     var context = try dialogue.materialize(std.testing.allocator, &index, .{
-        .destination = fixture.specification().destination,
         .target = @splat(1),
         .recent_turns = 1,
     });
@@ -1215,9 +1109,6 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     try std.testing.expect(
         std.mem.indexOf(u8, context.value.text.bytes, "older operator text") == null,
     );
-    try std.testing.expect(
-        std.mem.indexOf(u8, context.value.text.bytes, "\"reply_delivery_confirmed\":false") != null,
-    );
     try std.testing.expectEqual(5, context.value.offers.items.len);
     try std.testing.expectEqual(
         fixture.specification().revision,
@@ -1225,7 +1116,7 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     );
 }
 
-test "index dialogue context reports omitted whole records and rejects other destination" {
+test "index dialogue context reports omitted whole records" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1234,7 +1125,6 @@ test "index dialogue context reports omitted whole records and rejects other des
     defer index.deinit();
     const dialogue = @import("../native/dialogue.zig");
     var context = try dialogue.materialize(std.testing.allocator, &index, .{
-        .destination = fixture.specification().destination,
         .target = @splat(1),
         .context_bytes = 256,
     });
@@ -1243,16 +1133,6 @@ test "index dialogue context reports omitted whole records and rejects other des
     try std.testing.expectEqual(0, context.value.references.items.len);
     try std.testing.expect(
         std.mem.indexOf(u8, context.value.text.bytes, "\"omitted_records\":1") != null,
-    );
-    var other = fixture.specification().destination;
-    other.channel.bytes = "DOTHER";
-    try std.testing.expectError(
-        error.ConversationBindingMismatch,
-        dialogue.materialize(
-            std.testing.allocator,
-            &index,
-            .{ .destination = other, .target = @splat(1) },
-        ),
     );
 }
 
@@ -1270,76 +1150,6 @@ test "index driver admits a clock regression before the stale due instant" {
     try std.testing.expect(driver.needsStep(&index, obligation, std.math.minInt(i64)));
 }
 
-const message_ts = "1700000000.000001";
-
-fn clicked(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Directive {
-    const legacy = @import("../native/legacy.zig");
-    const destination = admitted.destination;
-    const button = admitted.payload.logical.buttons.items[0];
-    const origin: t.Origin = .{ .slack = .{
-        .app = destination.app,
-        .workspace = destination.workspace,
-        .user = destination.operator,
-        .channel = destination.channel,
-    } };
-    const action_ts = "1700000000.000009";
-    const identity = legacy.interactionDigest(
-        origin.slack,
-        message_ts,
-        action_ts,
-        button.block_id.bytes,
-        button.action_id.bytes,
-        button.value.bytes,
-    );
-    var value = directive("unused", 1, null, .{ .pause = {} });
-    value.envelope = .{
-        .operation = .{ .bytes = try std.fmt.allocPrint(a, "slack:{s}", .{
-            std.fmt.bytesToHex(identity, .lower),
-        }) },
-        .stable_request = identity,
-        .origin = origin,
-        .ingress = .{
-            .stable_request = identity,
-            .timestamp = .{ .bytes = action_ts },
-            .interaction = .{
-                .delivery = inputRef(source),
-                .message_timestamp = .{ .bytes = message_ts },
-                .block_id = button.block_id,
-                .action_id = button.action_id,
-                .value = button.value,
-                .bot_id = .{ .bytes = "B1" },
-                .message = .{ .bytes = "{}" },
-            },
-        },
-    };
-    return value;
-}
-
-fn captured(a: std.mem.Allocator, admitted: t.Delivery, timestamp: []const u8) !idx.Row {
-    return row(a, 2, .{ .delivery = admitted }, .{ .delivery = .{ .confirmed = .{
-        .timestamp = .{ .bytes = timestamp },
-        .metadata_observed = true,
-    } } });
-}
-
-fn interactionFact(a: std.mem.Allocator, rows: []const idx.Row, click: idx.Row) !t.Settlement {
-    const index = try a.create(idx.Index);
-    index.* = try idx.Index.init(Native, a, rows, &.{});
-    const bound = try @import("../native/legacy.zig").interaction(
-        a,
-        index,
-        index.record(click.input.task).?.*,
-    );
-    const bytes = try snapshotBytes(a, click);
-    return .{
-        .reference = .{ .task = click.input.task, .revision = 5, .digest = idx.digest(bytes) },
-        .owner_snapshot = .{ .bytes = bytes },
-        .kind = .interaction,
-        .accounting = .{},
-        .delivery = bound,
-    };
-}
-
 fn rebuildFolded(
     a: std.mem.Allocator,
     rows: []const idx.Row,
@@ -1354,89 +1164,13 @@ fn rebuildFolded(
     index.deinit();
 }
 
-test "index rebuilds an interaction folded before its delivery capture became known" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const admitted = try legacyDelivery(a, ref(initial));
-    const pending = try row(a, 2, .{ .delivery = admitted }, null);
-    const click = try row(a, 4, .{ .directive = try clicked(a, pending, admitted) }, null);
-    const early = try interactionFact(a, &.{ click, pending, initial }, click);
-    try std.testing.expect(early.delivery.?.outcome.confirmed.metadata_observed);
-    const same = try captured(a, admitted, message_ts);
-    const duplicate = try captured(a, admitted, "1700000000.000005");
-    for ([_]idx.Row{ pending, same, duplicate }) |source| {
-        try rebuildFolded(a, &.{ click, source, initial }, early, null);
-    }
-    const late = try interactionFact(a, &.{ click, same, initial }, click);
-    try std.testing.expect(!late.delivery.?.outcome.confirmed.metadata_observed);
-    try rebuildFolded(a, &.{ click, same, initial }, late, null);
-    for ([_]idx.Row{ pending, duplicate }) |source| {
-        try rebuildFolded(a, &.{ click, source, initial }, late, error.CopiedInteractionMismatch);
-    }
-    var forged = early;
-    forged.delivery.?.receipt.?.timestamp.bytes = "1700000000.000005";
-    try rebuildFolded(a, &.{ click, same, initial }, forged, error.CopiedInteractionMismatch);
-}
-
-fn object(bytes: []const u8) retained_views.Object {
-    return .{ .digest = idx.digest(bytes), .bytes = bytes.len };
-}
-
-fn notificationAttempt(id: u8, reply: ?[]const u8) retained_views.Attempt {
-    return .{
-        .id = @splat(id),
-        .occurrence = @splat(id),
-        .capability = .{ .bytes = @import("../native/legacy.zig").notification_identity },
-        .inference = false,
-        .request = object("request"),
-        .prepared = object("prepared"),
-        .capture = if (reply) |bytes| .{
-            .disposition = .complete,
-            .response = object("capture"),
-            .reply = object(bytes),
-            .output_tokens = null,
-        } else null,
-        .usage = null,
-    };
-}
-
-fn retrying(a: std.mem.Allocator, admitted: t.Delivery) !idx.Row {
-    const horos = @import("horos");
-    const outcome = try c.encodeOwned(t.DeliveryOutcome, a, .{ .rejected = .{
-        .code = .{ .bytes = "ratelimited" },
-        .retryable = true,
-    } });
-    const reply: horos.data.invocation.Result = .{
-        .request_identity = @splat(1),
-        .value = outcome,
-    };
-    const bytes = try a.alloc(
-        u8,
-        try horos.data.invocation.encodedLength(horos.data.invocation.Result, reply),
-    );
-    _ = try horos.data.invocation.encode(horos.data.invocation.Result, a, reply, bytes);
-    var source = try row(a, 2, .{ .delivery = admitted }, null);
-    const attempts = try a.dupe(retained_views.Attempt, &.{
-        notificationAttempt(1, bytes),
-        notificationAttempt(2, null),
-    });
-    source.owner_snapshot.?.attempts.items = attempts;
-    source.owner_evidence.?.attempts = try a.dupe(retained_views.AttemptEvidence, &.{
-        .{ .id = attempts[0].id, .response = "capture", .reply = bytes },
-        .{ .id = attempts[1].id, .response = null, .reply = null },
-    });
-    return source;
-}
-
-test "index rebuilds an unsettled delivery fact after its task status becomes unknown" {
+test "index rebuilds an unsettled local delivery fact across task status changes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const initial = try genesis(a);
     const admitted = try pendingDelivery(a, ref(initial));
-    var source = try retrying(a, admitted);
+    var source = try row(a, 2, .{ .delivery = admitted }, null);
     const bytes = try snapshotBytes(a, source);
     var fact: t.Settlement = .{
         .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
@@ -1453,38 +1187,5 @@ test "index rebuilds an unsettled delivery fact after its task status becomes un
         .outcome = .{ .indeterminate = .{ .bytes = "possibly_transmitted" } },
         .receipt = null,
     };
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    source.owner_evidence.?.status = null;
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    fact.delivery.?.outcome = .{ .rejected = .{ .code = .{ .bytes = "ratelimited" } } };
-    try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
-}
-
-test "index keeps folded pre-removal facts and settles an unsent retired digest once" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const admitted = try legacyDelivery(a, ref(initial));
-    const source = try row(a, 2, .{ .delivery = admitted }, null);
-    const bytes = try snapshotBytes(a, source);
-    var fact: t.Settlement = .{
-        .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
-        .owner_snapshot = .{ .bytes = bytes },
-        .kind = .delivery,
-        .accounting = .{},
-        .delivery = null,
-    };
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    const index = try idx.Index.init(Native, a, &.{ source, initial }, &.{});
-    const materialize = @import("../native/materialize.zig");
-    try std.testing.expect(materialize.readyFact(index.record(source.input.task).?.*));
-    const folded = try materialize.step(a, &index, @splat(1), 0, null);
-    const settled = folded.value.facts.items[0].delivery.?;
-    try std.testing.expectEqualStrings("slack_removed", settled.outcome.rejected.code.bytes);
-    try std.testing.expect(settled.outcome.rejected.retryable);
-    fact.delivery = settled;
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    fact.delivery.?.outcome.rejected.code.bytes = "no_transmitted_write";
     try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
 }

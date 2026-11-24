@@ -15,7 +15,6 @@ const experiment = @import("experiment.zig");
 const github = @import("github_contract.zig");
 const m = @import("model_contract.zig");
 
-const local_renderer_version: u32 = 2;
 const Function = a.Function(struct { input: t.Input }, t.Output);
 const Functions = struct {
     genesis: genesis.Function,
@@ -94,8 +93,6 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
     const advance = try b.caseOf(input, "step");
     const directive = try b.caseOf(input, "directive");
     const delivery = try b.caseOf(input, "delivery");
-    const inspect = try b.caseOf(input, "audit");
-    const lineage = try b.caseOf(input, "lineage_audit");
     const converse = try b.caseOf(input, "turn");
     const compare = try b.caseOf(input, "experiment");
     const member = try b.caseOf(input, "continuity_member");
@@ -111,13 +108,11 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
             directive.payload(),
         )),
         .delivery = try delivery.ret(try deliver(c, delivery)),
-        .audit = try inspect.fail(try c.schema(t.Output), try unavailable(c)),
         .turn = try converse.ret(try invoke(c, converse, functions.turn, "turn")),
         .experiment = try compare.ret(try invoke(c, compare, functions.experiment, "experiment")),
         .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
         .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
         .restore = try restore.ret(try preserve(c, restore, "restore")),
-        .lineage_audit = try lineage.fail(try c.schema(t.Output), try unavailable(c)),
     });
     try c.author.define(function, try b.ret(result));
     return function;
@@ -127,20 +122,9 @@ fn deliver(c: protean.Context, case: anytype) !a.Value(t.Output) {
     const b = case.body();
     const input = case.payload();
     try envelope(c, b, input);
-    const version = try b.field(try b.field(input, "payload"), "renderer_version");
-    try a.require(
-        c,
-        b,
-        try b.equal(version, try b.constant(u32, local_renderer_version)),
-        "legacy_delivery_unsupported",
-    );
     return b.variant(try c.schema(t.Output), "delivery", try c.literal(t.DeliveryOutcome, .{
         .confirmed = .{ .timestamp = .{ .bytes = "local" }, .metadata_observed = true },
     }));
-}
-
-fn unavailable(c: protean.Context) !a.Value(t.Failure) {
-    return c.literal(t.Failure, .{ .code = .{ .bytes = "audit_unavailable" } });
 }
 
 fn preserve(c: protean.Context, case: anytype, comptime tag: []const u8) !a.Value(t.Output) {

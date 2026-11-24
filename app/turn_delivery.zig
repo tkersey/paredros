@@ -406,7 +406,6 @@ fn intent(
         .some = try some.ret(some.payload()),
     });
     return b.product(try c.schema(t.DeliveryIntent), .{
-        .destination = try b.field(turn, "destination"),
         .key = try b.product(try c.schema(t.DeliveryKey), .{
             .lineage = identity,
             .purpose = try c.literal(@FieldType(t.DeliveryKey, "purpose"), .turn),

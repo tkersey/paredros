@@ -21,7 +21,6 @@ pub fn Daemon(comptime Types: type) type {
             retained,
             import_turns,
             recover_turns,
-            turn_deliveries,
             select_obligation,
             import_controls: t.Id,
             step: t.Id,
@@ -210,13 +209,8 @@ pub fn Daemon(comptime Types: type) type {
                         self.config.obligations_per_poll,
                     );
                     defer a.free(replacements);
-                    self.scheduling = .turn_deliveries;
-                    return replacements.len != 0;
-                },
-                .turn_deliveries => {
-                    const changed = try self.outputs(a, .turns);
                     self.scheduling = .select_obligation;
-                    return changed;
+                    return replacements.len != 0;
                 },
                 .select_obligation => {
                     var index = try self.driver.rebuild(a);
@@ -242,24 +236,17 @@ pub fn Daemon(comptime Types: type) type {
                     return changed;
                 },
                 .deliveries => |target| {
-                    const changed = try self.outputs(a, .{ .deliveries = target });
+                    const changed = try self.outputs(a, target);
                     self.scheduling = .retained;
                     return changed;
                 },
             }
         }
 
-        fn outputs(
-            self: *Self,
-            a: std.mem.Allocator,
-            selection: union(enum) { turns, deliveries: t.Id },
-        ) !bool {
+        fn outputs(self: *Self, a: std.mem.Allocator, target: t.Id) !bool {
             var index = try self.driver.rebuild(a);
             defer index.deinit();
-            const tasks = switch (selection) {
-                .turns => try self.driver.turnDeliveries(a),
-                .deliveries => |target| try self.driver.deliveries(a, target),
-            };
+            const tasks = try self.driver.deliveries(a, target);
             defer a.free(tasks);
             for (tasks) |task| if (index.record(task) == null) return true;
             return false;

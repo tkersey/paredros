@@ -10,7 +10,6 @@ const Fixture = @import("native_fixture.zig").Fixture(witness.Types, witness.App
 
 fn intent() t.DeliveryIntent {
     return .{
-        .destination = contracts.specification().destination,
         .key = .{
             .lineage = @splat(2),
             .purpose = .digest,
@@ -129,7 +128,7 @@ fn expectRejected(value: chain.Result, index: usize, reason: []const u8) !void {
     );
 }
 
-test "native directive policy composes modes coalesced checks and refuses final head audits" {
+test "native directive policy composes modes coalesced checks and refuses final heads" {
     var f: Fixture = .{};
     defer f.deinit();
     try f.init();
@@ -153,21 +152,18 @@ test "native directive policy composes modes coalesced checks and refuses final 
     try std.testing.expectEqualDeep(expected, resumed.head);
     const cancel = directive(6, 1, null, .{ .cancel = {} });
     const revive = directive(7, 2, cancel.reference, .{ .@"resume" = {} });
-    const audit = directive(8, 3, revive.reference, .{ .audit = .{ .key = intent().key } });
-    const frontier = directive(9, 4, audit.reference, .{ .frontier_audit = {} });
-    const final = try execute(&f, "final-audits", head(), &.{ cancel, revive, audit, frontier });
-    expected = selected(head(), frontier);
+    const late = directive(8, 3, revive.reference, .{ .check = {} });
+    const final = try execute(&f, "final-controls", head(), &.{ cancel, revive, late });
+    expected = selected(head(), late);
     expected.mode = .cancelled;
     expected.desired_mode = .cancelled;
     try std.testing.expectEqualDeep(expected, final.head);
-    for (1..4) |i| try expectRejected(final, i, "final_head");
-    try std.testing.expectEqual(0, final.audit_requests.items.len);
+    for (1..3) |i| try expectRejected(final, i, "final_head");
     const transfer = directive(10, 1, null, .{ .transfer = {} });
     const transferred = try execute(&f, "transfer", head(), &.{transfer});
     expected = selected(head(), transfer);
     expected.mode = .transferred;
     try std.testing.expectEqualDeep(expected, transferred.head);
-    try std.testing.expectEqual(0, final.notices.items.len);
 }
 
 fn retainedMethod() t.Method {
@@ -441,48 +437,6 @@ test "native directive policy abbreviates full escaped digests with a duplicate 
     try std.testing.expect(prepared.value.payload.wire_json.bytes.len != 0);
 }
 
-fn slackOrigin() t.Origin {
-    const destination = contracts.specification().destination;
-    return .{ .slack = .{
-        .app = destination.app,
-        .workspace = destination.workspace,
-        .user = destination.operator,
-        .channel = destination.channel,
-    } };
-}
-
-test "native directive policy refuses audits and keeps legacy origin notices in fold order" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
-    var first = directive(2, 1, null, .{ .pause = {} });
-    first.value.envelope.origin = slackOrigin();
-    var second = directive(3, 2, first.reference, .{ .audit = .{ .key = intent().key } });
-    second.value.envelope.origin = slackOrigin();
-    var third = directive(4, 3, second.reference, .{ .frontier_audit = {} });
-    third.value.envelope.origin = slackOrigin();
-    const value = try execute(&f, "notices", head(), &.{ first, second, third });
-    try std.testing.expectEqual(3, value.notices.items.len);
-    try std.testing.expectEqual(0, value.audit_requests.items.len);
-    try expectApplied(value, 0);
-    for (1..3) |i| try expectRejected(value, i, "audit_unavailable");
-    const texts = [_][]const u8{
-        "pause applied.",
-        "audit rejected: audit_unavailable",
-        "frontier_audit rejected: audit_unavailable",
-    };
-    for (value.notices.items, texts) |notice, text|
-        try std.testing.expectEqualStrings(text, notice.payload.frozen_text.bytes);
-    for (value.notices.items, [_]t.DirectiveFact{ first, second, third }) |notice, fact| {
-        try std.testing.expectEqualDeep(head().specification.destination, notice.destination);
-        try std.testing.expectEqualDeep(fact.value.envelope.stable_request, notice.key.identity);
-        try std.testing.expectEqual(.control, notice.key.purpose);
-        try std.testing.expectEqual(@as(?t.Id, @splat(1)), notice.payload.obligation);
-    }
-    try std.testing.expectEqual(t.Mode.paused, value.head.mode);
-    try std.testing.expectEqual(t.DeliveryHold.uncertain_transmission, value.head.digest.?.hold);
-}
-
 const ExcessGaps = struct {
     pub fn emit(c: protean.Context) !horos.source.Module {
         const apply = try c.author.function("invalid duplicate gap witness", .{
@@ -496,8 +450,6 @@ const ExcessGaps = struct {
             .head = try b.field(input, "head"),
             .outcome = try c.literal(chain.Outcome, .{ .applied = {} }),
             .gap = try c.literal(?t.Batch, expectedGap(previous)),
-            .notice = try c.literal(?t.DeliveryIntent, null),
-            .audit_request = try c.literal(?t.AuditRequest, null),
         });
         try c.author.define(apply, try b.ret(result));
         return c.author.module(try chain.emit(c, apply), try c.schema(t.Failure));

@@ -484,7 +484,7 @@ test "native daemon scheduled observation preserves queued mutation order and ad
     setup.server.?.config.io_bytes_per_poll = budget;
     try send(&last, "view\n");
     _ = try setup.poll(0);
-    try std.testing.expect(setup.daemon.?.scheduling == .turn_deliveries);
+    try std.testing.expect(setup.daemon.?.scheduling == .select_obligation);
     try std.testing.expectEqual(2, setup.control.count);
     try std.testing.expect(setup.control.durable_before_ack);
     try response(&setup, &first, "observed-active");

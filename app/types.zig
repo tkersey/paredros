@@ -32,7 +32,6 @@ pub const RevisionReference = struct { task: Id, revision: u64, digest: Digest }
 pub const GenesisIdentity = union(enum) { self: void, task: Id };
 pub const Origin = union(enum) {
     local: struct { uid: u32 },
-    slack: struct { app: Name, workspace: Name, user: Name, channel: Name },
     derived: struct { predecessor: Reference },
 };
 pub const Envelope = struct {
@@ -40,27 +39,6 @@ pub const Envelope = struct {
     operation: OperationId,
     stable_request: Digest,
     origin: Origin,
-    ingress: ?Ingress = null,
-};
-pub const Ingress = struct {
-    stable_request: Digest,
-    timestamp: Timestamp,
-    interaction: ?struct {
-        delivery: InputReference,
-        message_timestamp: Timestamp,
-        block_id: c.Text(255),
-        action_id: c.Text(255),
-        value: c.Text(2000),
-        bot_id: Name,
-        message: c.Bytes(128 * 1024),
-    } = null,
-};
-pub const Destination = struct {
-    account: Name,
-    app: Name,
-    workspace: Name,
-    operator: Name,
-    channel: Name,
 };
 pub const Repository = struct {
     account: Name,
@@ -82,7 +60,6 @@ pub const Policies = struct {
 pub const Specification = struct {
     revision: u64,
     repository: Repository,
-    destination: Destination,
     interval_ms: u64,
     anchor_ms: i64,
     wording: Text,
@@ -116,17 +93,15 @@ pub const Accounting = struct {
 };
 pub const DeliveryKey = struct {
     lineage: Digest,
-    purpose: enum { activation, digest, question, control, turn, failure },
+    purpose: enum { activation, digest, question, turn, failure },
     identity: Digest,
     generation: u32,
 };
 pub const Receipt = struct {
     key: DeliveryKey,
-    destination: Destination,
     timestamp: Timestamp,
     payload_digest: Digest,
     evidence: Reference,
-    basis: enum { captured_response, history_match, bound_interaction },
 };
 pub const Button = struct {
     block_id: c.Text(255),
@@ -149,12 +124,10 @@ pub const LogicalPayload = struct {
     comparison: ?struct { repository: Repository, base: Oid, tip: Oid } = null,
 };
 pub const DeliveryIntent = struct {
-    destination: Destination,
     key: DeliveryKey,
     payload: LogicalPayload,
 };
 pub const DeliveryPayload = struct {
-    renderer_version: u32 = 1,
     logical: LogicalPayload,
     content_digest: Digest,
     marker_digest: Digest,
@@ -163,7 +136,6 @@ pub const DeliveryPayload = struct {
 };
 pub const Delivery = struct {
     envelope: Envelope,
-    destination: Destination,
     key: DeliveryKey,
     payload: DeliveryPayload,
 };
@@ -282,8 +254,6 @@ pub const DirectiveBody = union(enum) {
     amend: Amendment,
     answer: struct { question: Digest, choice: Name },
     release: struct { key: DeliveryKey },
-    audit: struct { key: DeliveryKey },
-    frontier_audit: void,
     adopt: struct { expected_revision: u64, method: Method },
     revert: struct { expected_revision: u64 },
     transfer: void,
@@ -338,7 +308,7 @@ pub const Batch = struct {
 pub const Settlement = struct {
     reference: RevisionReference,
     owner_snapshot: c.Bytes(null) = .{ .bytes = "" },
-    kind: enum { phase, delivery, audit, interaction, turn, experiment, superseded },
+    kind: enum { phase, delivery, turn, experiment, superseded },
     accounting: Accounting,
     previous_accounting: Accounting = .{},
     previous_reference: ?RevisionReference = null,
@@ -357,7 +327,6 @@ pub const ContinuityKind = enum {
     directive,
     turn,
     delivery,
-    audit,
     settlement,
     method_source,
     method_report,
@@ -443,35 +412,7 @@ pub const StepResult = struct {
     head: Head,
     batch: ?Batch,
     dispositions: c.Vector(DirectiveDisposition, 128),
-    notices: c.Vector(DeliveryIntent, 128),
-    audit_requests: c.Vector(AuditRequest, 128) = .{ .items = &.{} },
 };
-pub const AuditRequest = union(enum) { delivery: DeliveryKey, frontier: void };
-pub const Audit = struct {
-    envelope: Envelope,
-    delivery: Delivery,
-    ordinal: u64,
-    oldest: Timestamp,
-    latest: ?Timestamp,
-    page_limit: u32,
-    canary: ?struct { receipt: Receipt, admitted: Delivery },
-};
-pub const AuditResult = union(enum) {
-    found: struct { timestamp: Timestamp },
-    not_observed: struct { oldest: Timestamp, latest: Timestamp, canary: Receipt },
-    inconclusive: Name,
-};
-pub const LineageAudit = struct {
-    envelope: Envelope,
-    obligation: Id,
-    predecessor: Reference,
-    lineage: Digest,
-    destination: Destination,
-    oldest: Timestamp,
-    latest: ?Timestamp,
-    page_limit: u32,
-};
-pub const LineageAuditResult = union(enum) { complete: void, inconclusive: Name };
 pub const Proposal = struct {
     identity: struct { operation: OperationId, ordinal: u32, attempt: u32 = 0 },
     target: ?Id,
@@ -496,9 +437,7 @@ pub const Turn = struct {
     continuity: ?TurnContinuity = null,
     replacement: ?TurnReplacement = null,
     refusal: ?Name = null,
-    ingress_stable: ?Digest = null,
     ordinal: u64 = 0,
-    destination: Destination,
     text: Text,
     context: c.Text(256 * 1024),
     context_references: c.Vector(RevisionReference, 128),
@@ -533,26 +472,22 @@ pub const Input = union(enum) {
     step: Step,
     directive: Directive,
     delivery: Delivery,
-    audit: Audit,
     turn: Turn,
     experiment: Experiment,
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     restore: Restore,
-    lineage_audit: LineageAudit,
 };
 pub const Output = union(enum) {
     genesis: Head,
     step: StepResult,
     directive: Directive,
     delivery: DeliveryOutcome,
-    audit: AuditResult,
     turn: TurnResult,
     experiment: ExperimentResult,
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     restore: Restore,
-    lineage_audit: LineageAuditResult,
 };
 pub const Failure = struct { code: Name };
 pub const Message = union(enum) { pause: struct { directive: InputReference } };

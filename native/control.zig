@@ -27,7 +27,7 @@ pub const Request = struct {
         monitor_add: struct { wording: t.Text, interval_ms: ?u64 },
         monitor_show: t.Id,
         monitor_directives: struct { target: t.Id, after: ?u64, limit: u32 },
-        messages: struct { target: ?t.Id, after: ?u64, limit: u32 },
+        messages: struct { target: t.Id, after: ?u64, limit: u32 },
         directive: struct { target: t.Id, body: t.DirectiveBody },
         ask: struct { text: t.Text, target: ?t.Id },
         proposal_confirm: commands.ProposalSelector,
@@ -294,7 +294,6 @@ fn admitCommand(
             operation_id,
             origin,
             .{
-                .destination = configuration.bindings(config).destination,
                 .text = value.text,
                 .target = value.target,
                 .anchor_template = true,
@@ -428,7 +427,7 @@ fn confirmProposal(
         selected.target orelse return error.InvalidProposalTarget,
         selected.body.directive,
     );
-    return commands.admitConfirmation(driver, a, &index, operation_id, origin, confirmation, null);
+    return commands.admitConfirmation(driver, a, &index, operation_id, origin, confirmation);
 }
 
 fn proposal(
@@ -450,7 +449,6 @@ fn specification(
     return .{
         .revision = 0,
         .repository = config.repository.value(),
-        .destination = configuration.bindings(config).destination,
         .interval_ms = interval_ms,
         .anchor_ms = 0,
         .wording = wording,
@@ -722,7 +720,7 @@ fn pendingDirectives(
 fn messagePage(
     a: std.mem.Allocator,
     index: *const idx.Index,
-    target: ?t.Id,
+    target: t.Id,
     after: ?u64,
     limit: u32,
 ) !native.json.Value {

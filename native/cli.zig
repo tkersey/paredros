@@ -13,7 +13,7 @@ pub const help =
     \\  monitor list | show ID | check ID | pause ID | resume ID | cancel ID
     \\  monitor directives ID [--after ORDINAL] [--limit N]
     \\  monitor amend ID REVISION [--interval-ms N] [--wording TEXT]
-    \\  messages [ID] [--after ORDINAL] [--limit N]  Read local updates
+    \\  messages ID [--after ORDINAL] [--limit N]  Read local updates
     \\  question answer ID QUESTION_DIGEST CHOICE
     \\  proposal show | confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
     \\  task show ID                     Inspect admitted input and result
@@ -256,9 +256,7 @@ fn directivePage(args: []const []const u8) !Command {
 }
 
 fn messagePage(args: []const []const u8) !Command {
-    if (args.len % 2 == 1) return .{ .messages = try page(@FieldType(Command, "messages"), args) };
-    const cursor = try paging(args);
-    return .{ .messages = .{ .target = null, .after = cursor.after, .limit = cursor.limit } };
+    return .{ .messages = try page(@FieldType(Command, "messages"), args) };
 }
 
 fn page(comptime Page: type, args: []const []const u8) !Page {

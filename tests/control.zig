@@ -27,14 +27,6 @@ fn configuration() config.Config {
             .name = "repo",
             .ref = "refs/heads/main",
         },
-        .slack = .{
-            .account = "slack",
-            .app = "A1",
-            .workspace = "T1",
-            .operator = "U1",
-            .channel = "D1",
-            .bot_id = "B1",
-        },
     };
 }
 
@@ -397,7 +389,7 @@ test "control pages pending directives and status within one frame" {
     try std.testing.expect(data.object.get("pending_directives_next").? != .null);
 }
 
-test "control reads messages without admission and refuses removed Slack commands" {
+test "control reads messages without admission and rejects malformed pages" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -447,44 +439,11 @@ test "control reads messages without admission and refuses removed Slack command
     var after = try driver.rebuild(frame);
     defer after.deinit();
     try std.testing.expectEqual(records, after.records.len);
-    const key = "{}";
     for ([_][]const []const u8{
         &.{ "messages", &hex_id, "--after", "1", "--after", "2" },
-        &.{ "delivery", "audit", key },
-        &.{ "delivery", "audit", &hex_id, key },
-        &.{ "recovery", "candidates" },
-        &.{ "recovery", "candidates", "0", "16" },
+        &.{"messages"},
+        &.{ "messages", "--after", "2", "--limit", "3" },
     }) |args| try std.testing.expectError(error.InvalidArguments, cli.request(frame, args, "id"));
-}
-
-test "control reads messages addressed to no obligation without an ID" {
-    var fixture: Fixture = .{};
-    defer fixture.deinit();
-    try fixture.init();
-    const frame = fixture.arena.allocator();
-    var clock: Clock = .{};
-    var driver: Driver = .{
-        .service = &fixture.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-    };
-    try driver.attach(frame);
-    defer driver.detach();
-    const wire = try cli.request(frame, &.{ "messages", "--after", "2", "--limit", "3" }, "x");
-    const parsed = try native.values.fromJson(control.Request, frame, try decode(frame, wire));
-    try std.testing.expectEqual(@as(?t.Id, null), parsed.command.messages.target);
-    try std.testing.expectEqual(2, parsed.command.messages.after.?);
-    try std.testing.expectEqual(3, parsed.command.messages.limit);
-    const response = try dispatch(frame, &driver, try cli.request(frame, &.{"messages"}, "x"), 501);
-    try std.testing.expectEqualStrings(
-        "observed",
-        try native.json.text(response.object.get("status").?),
-    );
-    const data = response.object.get("data").?.object;
-    try std.testing.expectEqual(0, data.get("messages").?.array.items.len);
-    try std.testing.expectError(
-        error.InvalidArguments,
-        cli.request(frame, &.{ "messages", "--after", "1", "--after", "2" }, "x"),
-    );
 }
 
 test "control malformed and unsupported frames are rejected without admission" {
@@ -562,7 +521,6 @@ pub const ConsumerApplication = struct {
             )),
             .step = try (try b.caseOf(input, "step")).fail(output, failure),
             .delivery = try (try b.caseOf(input, "delivery")).fail(output, failure),
-            .audit = try (try b.caseOf(input, "audit")).fail(output, failure),
             .experiment = try (try b.caseOf(input, "experiment")).fail(output, failure),
             .continuity_member = try (try b.caseOf(input, "continuity_member")).fail(
                 output,
@@ -570,7 +528,6 @@ pub const ConsumerApplication = struct {
             ),
             .continuity_cut = try (try b.caseOf(input, "continuity_cut")).fail(output, failure),
             .restore = try (try b.caseOf(input, "restore")).fail(output, failure),
-            .lineage_audit = try (try b.caseOf(input, "lineage_audit")).fail(output, failure),
         });
         try context.author.define(function, try b.ret(result));
         return context.author.module(function, try context.schema(t.Failure));
@@ -632,7 +589,6 @@ fn consumerTurn(target: t.Id) t.Turn {
             .stable_request = @splat(77),
             .origin = .{ .local = .{ .uid = 501 } },
         },
-        .destination = @import("contracts.zig").specification().destination,
         .text = .{ .bytes = "Update every field exactly." },
         .context = .{ .bytes = "" },
         .context_references = .{ .items = &.{} },

@@ -359,10 +359,5 @@ fn output(
         .head = head,
         .batch = batch,
         .dispositions = try b.field(controls, "dispositions"),
-        .notices = try b.field(controls, "notices"),
-        .audit_requests = try b.field(
-            controls,
-            "audit_requests",
-        ),
     });
 }

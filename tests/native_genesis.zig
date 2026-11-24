@@ -67,7 +67,6 @@ pub fn expectedFresh(input: t.Genesis) t.Head {
 
 fn expectedActivation(input: t.Genesis) t.DeliveryIntent {
     return .{
-        .destination = input.specification.destination,
         .key = .{
             .lineage = input.lineage,
             .purpose = .activation,

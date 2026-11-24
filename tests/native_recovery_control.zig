@@ -12,7 +12,6 @@ const Driver = @import("native_restore.zig").Driver;
 fn config() configuration.Config {
     const specification = contracts.specification();
     const repository = specification.repository;
-    const destination = specification.destination;
     return .{
         .version = 1,
         .current_uid = 501,
@@ -24,14 +23,6 @@ fn config() configuration.Config {
             .owner = repository.owner.bytes,
             .name = repository.name.bytes,
             .ref = repository.ref.bytes,
-        },
-        .slack = .{
-            .account = destination.account.bytes,
-            .app = destination.app.bytes,
-            .workspace = destination.workspace.bytes,
-            .operator = destination.operator.bytes,
-            .channel = destination.channel.bytes,
-            .bot_id = "B1",
         },
     };
 }
@@ -114,13 +105,6 @@ fn refusedReleases(
         "RecoveryResourceMismatch",
     );
     try std.testing.expectEqual(before, try count(a, driver));
-    changed = config();
-    changed.slack.?.channel = "D-other";
-    try reject(
-        try call(a, driver, changed, "wrong-destination", release),
-        "RecoveryResourceMismatch",
-    );
-    try std.testing.expectEqual(before, try count(a, driver));
     const direct: @FieldType(control.Request, "command") = .{ .directive = .{
         .target = target,
         .body = .{ .recovery_release = .{ .recovery = reference, .exclusive_owner = true } },
@@ -168,7 +152,6 @@ test "native recovery control validates bindings before mutation and replays exa
     const before = try count(a, &driver);
     var changed = config();
     changed.repository.id += 1;
-    changed.slack.?.channel = "D-other";
     const replay = try taskId(try call(a, &driver, changed, "control-release", command));
     try std.testing.expectEqualDeep(released, replay);
     try std.testing.expectEqual(before, try count(a, &driver));

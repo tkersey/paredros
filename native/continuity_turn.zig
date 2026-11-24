@@ -181,7 +181,6 @@ fn mappedInput(
         portable.metadata.bundle,
         item.identity,
     ) };
-    result.envelope.ingress = null;
     result.continuity = .{
         .member = local,
         .original = .{
@@ -288,38 +287,4 @@ pub fn admit(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !Progress 
     progress.admitted = admitted.receipt.task;
     progress.remaining -= 1;
     return progress;
-}
-
-pub fn ingress(
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-    name: []const u8,
-    authenticated: t.Origin,
-    stable: t.Digest,
-) !?t.Id {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    var fallback: ?t.Id = null;
-    for (index.portable) |portable| {
-        for (portable.bundle.members.items) |item| {
-            if (item.data.kind != .turn and item.data.kind != .directive) continue;
-            const envelope = if (item.data.kind == .turn)
-                try originalEnvelope(scratch, portable.bundle, item)
-            else
-                (try continuity.decode(.directive, scratch, item.data)).value.envelope;
-            if (!std.mem.eql(u8, envelope.operation.bytes, name)) continue;
-            const original = envelope.ingress orelse return error.OperationConflict;
-            if (!try continuity.equal(scratch, t.Origin, envelope.origin, authenticated) or
-                !std.meta.eql(original.stable_request, stable)) return error.OperationConflict;
-            const local = try continuity.binding(portable.metadata.members.items, item.identity);
-            const mapped_name = if (item.data.kind == .turn)
-                try operation(scratch, portable.metadata.bundle, item.identity)
-            else
-                try continuity.directiveOperation(scratch, portable.metadata.bundle, item.identity);
-            if (byOperation(index, mapped_name)) |record| return record.task;
-            if (fallback == null) fallback = local.task;
-        }
-    }
-    return fallback;
 }

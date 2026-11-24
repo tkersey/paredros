@@ -113,7 +113,6 @@ fn turnInput() t.Turn {
             .stable_request = @splat(7),
             .origin = .{ .local = .{ .uid = 501 } },
         },
-        .destination = fixtures.specification().destination,
         .text = .{ .bytes = "pause?" },
         .context = .{ .bytes = "old head" },
         .context_references = .{ .items = &.{} },
@@ -141,7 +140,6 @@ test "native conversation turn binds distinct proposals and freezes model contex
         try std.testing.expect(proposal.body.directive == .pause);
     }
     const delivery = result.delivery.?;
-    try std.testing.expectEqualDeep(request.destination, delivery.destination);
     try std.testing.expectEqualDeep(request.envelope.stable_request, delivery.key.identity);
     try std.testing.expectEqual(.turn, delivery.key.purpose);
     try std.testing.expectEqual(2, delivery.payload.buttons.items.len);
@@ -182,7 +180,6 @@ test "native conversation final failure and absent configuration cannot invoke t
     request.model = null;
     const absent = try fixture.output(try fixture.execute("unconfigured", request));
     try std.testing.expectEqual(0, absent.proposals.items.len);
-    try std.testing.expectEqualDeep(request.destination, absent.delivery.?.destination);
     try std.testing.expect(std.mem.find(u8, absent.reply.bytes, "No model") != null);
     request.attempt = 3;
     const invalid = try fixture.execute("excess-attempt", request);
@@ -246,7 +243,7 @@ test "native conversation describes exact hostile Unicode fields and binds attem
     ) != null);
 }
 
-test "native conversation retains maximal exact proposal body for CLI without a Slack button" {
+test "native conversation retains maximal exact proposal body for CLI without a button" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -319,7 +316,6 @@ test "native conversation refuses an invalid confirmation without invoking a con
     var request = turnInput();
     request.context.bytes = "completion would reject this context";
     request.refusal = .{ .bytes = "unknown_proposal" };
-    request.ingress_stable = @splat(19);
     const result = try checkedOutput(
         &fixture,
         try fixture.execute("refused-confirmation", request),
@@ -329,7 +325,6 @@ test "native conversation refuses an invalid confirmation without invoking a con
         "This confirmation could not be admitted. No action was taken.",
         result.reply.bytes,
     );
-    try std.testing.expectEqualDeep(request.destination, result.delivery.?.destination);
     try std.testing.expectEqualDeep(
         request.envelope.stable_request,
         result.delivery.?.key.identity,

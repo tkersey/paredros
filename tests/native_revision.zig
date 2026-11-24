@@ -34,7 +34,6 @@ fn method() t.Method {
 
 fn delivery() t.DeliveryIntent {
     return .{
-        .destination = contracts.specification().destination,
         .key = .{
             .lineage = @splat(2),
             .purpose = .digest,
@@ -72,11 +71,9 @@ fn head() t.Head {
     result.told = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') };
     result.told_receipt = .{
         .key = delivery().key,
-        .destination = delivery().destination,
         .timestamp = .{ .bytes = "1700000000.000001" },
         .payload_digest = @splat(17),
         .evidence = .{ .task = @splat(18), .digest = @splat(19) },
-        .basis = .history_match,
     };
     result.last_observation = .{
         .sequence = 17,

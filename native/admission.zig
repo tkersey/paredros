@@ -8,7 +8,6 @@ pub const Request = struct {
     target: ?t.Id,
     origin: t.Origin,
     digest: t.Digest,
-    ingress: ?t.Ingress = null,
 };
 
 pub fn stableDigest(a: std.mem.Allocator, value: anytype) !t.Digest {
@@ -71,7 +70,6 @@ fn target(input: t.Input) ?t.Id {
         .step => |value| value.obligation,
         .turn => |value| value.target,
         .delivery => |value| value.payload.logical.obligation,
-        .audit => |value| value.delivery.payload.logical.obligation,
         else => null,
     };
 }
@@ -88,9 +86,4 @@ fn matches(a: std.mem.Allocator, request: Request, input: t.Input) !void {
     const frozen_origin = try c.encodeOwned(t.Origin, a, frozen.origin);
     defer a.free(frozen_origin);
     if (!std.mem.eql(u8, expected_origin, frozen_origin)) return error.OperationConflict;
-    const expected_ingress = try c.encodeOwned(?t.Ingress, a, request.ingress);
-    defer a.free(expected_ingress);
-    const frozen_ingress = try c.encodeOwned(?t.Ingress, a, frozen.ingress);
-    defer a.free(frozen_ingress);
-    if (!std.mem.eql(u8, expected_ingress, frozen_ingress)) return error.OperationConflict;
 }

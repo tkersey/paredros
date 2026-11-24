@@ -50,7 +50,6 @@ pub const Bundle = struct {
 };
 pub const TurnFact = struct { input: t.Turn, result: ?t.TurnResult };
 pub const DeliveryFact = struct { input: t.Delivery, result: ?t.DeliveryOutcome };
-pub const AuditFact = struct { input: t.Audit, result: ?t.AuditResult };
 pub const ExperimentFact = struct { input: t.Experiment, result: t.ExperimentResult };
 pub const ContextFact = struct {
     text: c.Text(256 * 1024),
@@ -129,7 +128,6 @@ pub fn Payload(comptime kind: t.ContinuityKind) type {
         .directive => t.Directive,
         .turn => TurnFact,
         .delivery => DeliveryFact,
-        .audit => AuditFact,
         .settlement => SourceFact,
         .method_source => t.RetainedMethodSource,
         .method_report => ExperimentFact,
@@ -320,7 +318,6 @@ fn validateResponsibilities(a: std.mem.Allocator, bundle: Bundle) !void {
             .directive => |value| try retainedInput(a, bundle, item, .directive, value),
             .turn => |value| try retainedInput(a, bundle, item, .turn, value),
             .delivery => |value| try retainedInput(a, bundle, item, .delivery, value),
-            .audit => |value| try retainedInput(a, bundle, item, .audit, value),
             else => {},
         }
     }
@@ -420,23 +417,8 @@ pub fn rebaseHead(
             question.evidence.retained,
         );
     };
-    if (head.told_receipt) |*receipt| {
-        receipt.evidence = if (receipt.basis == .bound_interaction)
-            mapReference(bundle, mappings, .turn, receipt.evidence) catch |err| switch (err) {
-                error.MissingContinuityReference => try mapReference(
-                    bundle,
-                    mappings,
-                    .directive,
-                    receipt.evidence,
-                ),
-                else => return err,
-            }
-        else
-            try mapReference(bundle, mappings, if (receipt.basis == .captured_response)
-                .delivery
-            else
-                .audit, receipt.evidence);
-    }
+    if (head.told_receipt) |*receipt|
+        receipt.evidence = try mapReference(bundle, mappings, .delivery, receipt.evidence);
     if (head.method == .retained) {
         head.method.retained.source = try mapReference(
             bundle,
@@ -681,7 +663,7 @@ fn producedPayload(a: std.mem.Allocator, item: Member, input: t.Input, output: ?
             if (input != .directive) return error.ContinuityProducerMismatch;
             try samePayload(a, item, .directive, input.directive);
         },
-        inline .turn, .delivery, .audit => |kind| {
+        inline .turn, .delivery => |kind| {
             if (!std.mem.eql(u8, @tagName(input), @tagName(kind)))
                 return error.ContinuityProducerMismatch;
             try samePayload(a, item, kind, .{

@@ -119,7 +119,7 @@ test "HTTP captures raw body selected metadata and preserves redirects without f
         "Date: Sun, 15 Nov 2026 00:00:00 GMT\r\nRetry-After: 60\r\n" ++
         "X-RateLimit-Remaining: 0\r\nLink: <https://evil.test/>; rel=next\r\n" ++
         "ETag: W/\"a\"\r\nX-GitHub-Request-Id: github-id\r\n" ++
-        "X-Slack-Req-Id: slack-id\r\nContent-Type: application/json\r\n" ++
+        "X-Vendor-Req-Id: vendor-id\r\nContent-Type: application/json\r\n" ++
         "Authorization: Bearer must-not-retain\r\nSet-Cookie: secret=value\r\n\r\n");
     var reader = std.Io.Reader.fixed("test");
     var captured = try http.captureResponse(
@@ -135,7 +135,7 @@ test "HTTP captures raw body selected metadata and preserves redirects without f
     try std.testing.expectEqualStrings("60", (try captured.header("retry-after")).?);
     try std.testing.expectEqualStrings("0", (try captured.header("x-ratelimit-remaining")).?);
     try std.testing.expectEqualStrings("github-id", (try captured.header("x-github-request-id")).?);
-    try std.testing.expectEqual(null, try captured.header("x-slack-req-id"));
+    try std.testing.expectEqual(null, try captured.header("x-vendor-req-id"));
     try std.testing.expectEqual(null, try captured.header("authorization"));
     try std.testing.expectEqual(null, try captured.header("set-cookie"));
     try std.testing.expect(captured.identity_encoding);

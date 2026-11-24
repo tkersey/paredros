@@ -6,7 +6,6 @@ const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
 
 pub const Options = struct {
-    destination: t.Destination,
     target: ?t.Id,
     context_bytes: u64 = 64 * 1024,
     recent_turns: u32 = 8,
@@ -75,18 +74,11 @@ fn build(a: std.mem.Allocator, index: *const idx.Index, options: Options) !Conte
     for (index.records, 0..) |record, position| {
         if (record.input != .turn) continue;
         ordinal = @max(ordinal, record.input.turn.ordinal);
-        if (try same(a, t.Destination, options.destination, record.input.turn.destination))
-            try positions.append(a, position);
+        try positions.append(a, position);
     }
     for (index.obligations) |obligation| {
         const position = obligation.chain[obligation.chain.len - 1];
         const head = index.head(&obligation);
-        if (!try same(
-            a,
-            t.Destination,
-            options.destination,
-            head.specification.destination,
-        )) continue;
         if (head.mode == .cancelled or head.mode == .transferred) continue;
         try appendHead(&builder, index.records[position], obligation.task, head);
     }
@@ -100,9 +92,9 @@ fn build(a: std.mem.Allocator, index: *const idx.Index, options: Options) !Conte
         }
     }.less);
     for (positions.items[0..@min(positions.items.len, options.recent_turns)]) |position|
-        try appendTurn(&builder, index, index.records[position]);
+        try appendTurn(&builder, index.records[position]);
     const local_count = @min(positions.items.len, options.recent_turns);
-    try appendImportedTurns(&builder, index, options, options.recent_turns - local_count);
+    try appendImportedTurns(&builder, index, options.recent_turns - local_count);
     try appendEvidence(&builder, index, options);
     const footer = try std.fmt.allocPrint(
         a,
@@ -115,13 +107,6 @@ fn build(a: std.mem.Allocator, index: *const idx.Index, options: Options) !Conte
     else
         null;
     const head = if (target) |obligation| index.head(obligation) else null;
-    if (head) |value| if (!try same(
-        a,
-        t.Destination,
-        options.destination,
-        value.specification.destination,
-    ))
-        return error.ConversationBindingMismatch;
     return .{
         .text = .{ .bytes = try builder.text.toOwnedSlice(a) },
         .references = .{ .items = try builder.references.toOwnedSlice(a) },
@@ -129,12 +114,6 @@ fn build(a: std.mem.Allocator, index: *const idx.Index, options: Options) !Conte
         .expected_revision = if (head) |value| value.specification.revision else null,
         .offers = .{ .items = if (head) |value| try offers(a, value) else &.{} },
     };
-}
-
-fn same(a: std.mem.Allocator, comptime T: type, left: T, right: T) !bool {
-    const x = try c.encodeOwned(T, a, left);
-    const y = try c.encodeOwned(T, a, right);
-    return std.mem.eql(u8, x, y);
 }
 
 fn appendHead(builder: *Builder, record: idx.Record, target: t.Id, head: t.Head) !void {
@@ -154,33 +133,14 @@ fn appendHead(builder: *Builder, record: idx.Record, target: t.Id, head: t.Head)
     });
 }
 
-fn appendTurn(builder: *Builder, index: *const idx.Index, record: idx.Record) !void {
+fn appendTurn(builder: *Builder, record: idx.Record) !void {
     const result = if (record.result) |value| if (value == .turn) value.turn else null else null;
-    var confirmed = false;
-    if (record.result_digest) |digest| for (index.records) |delivery| {
-        if (delivery.input != .delivery or delivery.input.delivery.envelope.origin != .derived)
-            continue;
-        const source = delivery.input.delivery.envelope.origin.derived.predecessor;
-        if (!std.meta.eql(source, t.Reference{ .task = record.task, .digest = digest })) continue;
-        const snapshot = delivery.owner_snapshot orelse continue;
-        const evidence = delivery.owner_evidence orelse continue;
-        const fact = try @import("delivery_fact.zig").settlement(
-            builder.a,
-            snapshot,
-            evidence,
-            .current,
-        );
-        if (fact.value) |value| {
-            if (value.outcome == .confirmed and try builder.reference(delivery)) confirmed = true;
-        }
-    };
     try builder.append(record, .{
         .kind = "prior_turn",
         .operator_text = record.input.turn.text.bytes,
         .operator_authority = "authenticated_instruction",
         .reply = if (result) |value| value.reply.bytes else "",
         .reply_authority = "assistant_output_unverified",
-        .reply_delivery_confirmed = confirmed,
         .proposals = if (result) |value| value.proposals.items else &.{},
         .ordinal = record.input.turn.ordinal,
     });
@@ -189,13 +149,6 @@ fn appendTurn(builder: *Builder, index: *const idx.Index, record: idx.Record) !v
 fn appendEvidence(builder: *Builder, index: *const idx.Index, options: Options) !void {
     var remaining = options.recent_commits;
     for (index.obligations) |obligation| {
-        const head = index.head(&obligation);
-        if (!try same(
-            builder.a,
-            t.Destination,
-            options.destination,
-            head.specification.destination,
-        )) continue;
         var position = obligation.chain.len;
         while (position > 0 and remaining > 0) {
             position -= 1;
@@ -238,7 +191,7 @@ const ImportedTurn = struct {
     source_snapshot: retained.Snapshot,
 };
 
-fn importedTurns(a: std.mem.Allocator, index: *const idx.Index, options: Options) ![]ImportedTurn {
+fn importedTurns(a: std.mem.Allocator, index: *const idx.Index) ![]ImportedTurn {
     var result: std.ArrayList(ImportedTurn) = .empty;
     var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     for (index.portable) |imported| {
@@ -246,9 +199,7 @@ fn importedTurns(a: std.mem.Allocator, index: *const idx.Index, options: Options
             if (member.data.kind != .turn or seen.contains(member.identity)) continue;
             try seen.put(a, member.identity, {});
             const value = try continuity.decode(.turn, a, member.data);
-            if (value.value.result == null or
-                !try same(a, t.Destination, options.destination, value.value.input.destination))
-                continue;
+            if (value.value.result == null) continue;
             try result.append(a, .{
                 .member = member,
                 .local = try continuity.binding(imported.metadata.members.items, member.identity),
@@ -274,10 +225,9 @@ fn importedTurns(a: std.mem.Allocator, index: *const idx.Index, options: Options
 fn appendImportedTurns(
     builder: *Builder,
     index: *const idx.Index,
-    options: Options,
     remaining: usize,
 ) !void {
-    const turns = try importedTurns(builder.a, index, options);
+    const turns = try importedTurns(builder.a, index);
     builder.omitted = try std.math.add(
         u64,
         builder.omitted,
@@ -300,7 +250,6 @@ fn appendImportedTurns(
             .original_context_references = turn.value.input.context_references.items,
             .reply = turn.value.result.?.reply.bytes,
             .reply_authority = "assistant_output_unverified",
-            .reply_delivery_confirmation = "not_assessed_from_imported_history",
             .proposals = turn.value.result.?.proposals.items,
         });
     }

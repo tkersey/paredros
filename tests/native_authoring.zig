@@ -222,7 +222,6 @@ test "native authoring temporal agrees with independent schedule oracle at exact
 
 fn delivery() t.DeliveryIntent {
     return .{
-        .destination = contracts_fixture.specification().destination,
         .key = .{
             .lineage = @splat(2),
             .purpose = .digest,
@@ -269,11 +268,9 @@ fn populatedHead() t.Head {
     head.told = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') };
     head.told_receipt = .{
         .key = delivery().key,
-        .destination = delivery().destination,
         .timestamp = .{ .bytes = "1700000000.000001" },
         .payload_digest = @splat(16),
         .evidence = .{ .task = @splat(17), .digest = @splat(18) },
-        .basis = .history_match,
     };
     head.last_observation = populatedObservation();
     head.digest = .{

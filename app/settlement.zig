@@ -104,14 +104,7 @@ fn foldOne(
 fn deliveryKind(c: protean.Context, b: anytype, fact: a.Value(t.Settlement)) !a.Value(bool) {
     const Kind = @FieldType(t.Settlement, "kind");
     const kind = try b.enumTag(try b.field(fact, "kind"));
-    const delivery = try b.equal(kind, try b.enumTag(try c.literal(Kind, .delivery)));
-    const audit = try b.equal(kind, try b.enumTag(try c.literal(Kind, .audit)));
-    const interaction = try b.equal(kind, try b.enumTag(try c.literal(Kind, .interaction)));
-    return b.select(
-        delivery,
-        try b.constant(bool, true),
-        try b.select(audit, try b.constant(bool, true), interaction),
-    );
+    return b.equal(kind, try b.enumTag(try c.literal(Kind, .delivery)));
 }
 
 fn accounting(
@@ -291,7 +284,6 @@ fn projectIntent(
     delivery: a.Value(t.Delivery),
 ) !a.Value(t.DeliveryIntent) {
     return b.product(try c.schema(t.DeliveryIntent), .{
-        .destination = try b.field(delivery, "destination"),
         .key = try b.field(delivery, "key"),
         .payload = try b.field(try b.field(delivery, "payload"), "logical"),
     });
@@ -395,13 +387,6 @@ fn receiptMatches(
         try b.field(delivery, "key"),
         try b.field(receipt, "key"),
     );
-    const destination = try same(
-        c,
-        b,
-        t.Destination,
-        try b.field(delivery, "destination"),
-        try b.field(receipt, "destination"),
-    );
     const content = try same(
         c,
         b,
@@ -421,15 +406,7 @@ fn receiptMatches(
         try b.blobLength(try b.field(receipt, "timestamp")),
     );
     const no = try b.constant(bool, false);
-    return b.select(
-        key,
-        try b.select(
-            destination,
-            try b.select(content, try b.select(timestamp, nonempty, no), no),
-            no,
-        ),
-        no,
-    );
+    return b.select(key, try b.select(content, try b.select(timestamp, nonempty, no), no), no);
 }
 
 fn advanceCoverage(

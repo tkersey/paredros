@@ -10,8 +10,6 @@ pub const Applied = struct {
     head: t.Head,
     outcome: Outcome,
     gap: ?t.Batch = null,
-    notice: ?t.DeliveryIntent = null,
-    audit_request: ?t.AuditRequest = null,
 };
 pub const Apply = a.Function(struct { input: ApplyInput }, Applied);
 pub const Input = struct {
@@ -23,8 +21,6 @@ pub const Result = struct {
     head: t.Head,
     dispositions: cts.Vector(t.DirectiveDisposition, 128),
     gap: ?t.Batch = null,
-    notices: cts.Vector(t.DeliveryIntent, 128) = .{ .items = &.{} },
-    audit_requests: cts.Vector(t.AuditRequest, 128) = .{ .items = &.{} },
 };
 pub const Function = a.Function(struct { input: Input }, Result);
 const State = struct { input: Input, result: Result, index: u64 };
@@ -45,8 +41,6 @@ pub fn emit(c: protean.Context, apply: Apply) !Function {
         .head = try b.field(input, "head"),
         .dispositions = try c.literal(@FieldType(Result, "dispositions"), .{ .items = &.{} }),
         .gap = try c.literal(?t.Batch, null),
-        .notices = try c.literal(@FieldType(Result, "notices"), .{ .items = &.{} }),
-        .audit_requests = try c.literal(@FieldType(Result, "audit_requests"), .{ .items = &.{} }),
     });
     const value = try b.call(loop, .{ .state = try b.product(try c.schema(State), .{
         .input = input,
@@ -142,20 +136,6 @@ fn foldOne(
             .capacity = try a.failure(c, "directive_disposition_capacity"),
         }),
         .gap = try appendGap(c, b, try b.field(result, "gap"), try b.field(applied, "gap")),
-        .notices = try appendOptional(
-            c,
-            b,
-            t.DeliveryIntent,
-            try b.field(result, "notices"),
-            try b.field(applied, "notice"),
-        ),
-        .audit_requests = try appendOptional(
-            c,
-            b,
-            t.AuditRequest,
-            try b.field(result, "audit_requests"),
-            try b.field(applied, "audit_request"),
-        ),
     });
 }
 
@@ -221,19 +201,4 @@ fn appendGap(
         "multiple_directive_gaps",
     );
     return b.match(next, .{ .none = try none.ret(previous), .some = try some.ret(next) });
-}
-
-fn appendOptional(
-    c: protean.Context,
-    b: anytype,
-    comptime T: type,
-    previous: a.Value(cts.Vector(T, 128)),
-    next: a.Value(?T),
-) !a.Value(cts.Vector(T, 128)) {
-    const none = try b.caseOf(next, "none");
-    const some = try b.caseOf(next, "some");
-    const appended = try some.body().append(previous, some.payload(), .{
-        .capacity = try a.failure(c, "directive_emission_capacity"),
-    });
-    return b.match(next, .{ .none = try none.ret(previous), .some = try some.ret(appended) });
 }

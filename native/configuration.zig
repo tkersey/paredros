@@ -10,8 +10,6 @@ const github = @import("github.zig");
 
 pub const Grants = struct {
     github_read: bool = false,
-    slack_history: bool = false,
-    slack_write: bool = false,
     model: bool = false,
 };
 pub const Repository = struct {
@@ -31,28 +29,6 @@ pub const Repository = struct {
         };
     }
 };
-pub const LegacySlack = struct {
-    account: []const u8,
-    app: []const u8,
-    workspace: []const u8,
-    operator: []const u8,
-    channel: []const u8,
-    bot_id: []const u8,
-};
-const Destination = struct {
-    account: []const u8,
-    app: []const u8,
-    workspace: []const u8,
-    operator: []const u8,
-    channel: []const u8,
-};
-const local_destination: Destination = .{
-    .account = "local",
-    .app = "paredros",
-    .workspace = "local",
-    .operator = "owner",
-    .channel = "cli",
-};
 pub const Model = struct {
     account: []const u8,
     slug: []const u8,
@@ -70,43 +46,19 @@ pub const Config = struct {
     control_socket_path: []const u8,
     backup_directory: ?[]const u8 = null,
     repository: Repository,
-    slack: ?LegacySlack = null,
     mode: enum { offline, live } = .offline,
     grants: Grants = .{},
     interval_ms: u64 = 900_000,
     policies: t.Policies = .{},
     model: ?Model = null,
     github_credential_file: ?[]const u8 = null,
-    slack_bot_credential_file: ?[]const u8 = null,
-    slack_app_credential_file: ?[]const u8 = null,
 };
 pub const OwnedConfig = std.json.Parsed(Config);
-pub const Bindings = struct { repository: t.Repository, destination: t.Destination };
-
-fn destination(config: Config) Destination {
-    const legacy = config.slack orelse return local_destination;
-    return .{
-        .account = legacy.account,
-        .app = legacy.app,
-        .workspace = legacy.workspace,
-        .operator = legacy.operator,
-        .channel = legacy.channel,
-    };
-}
+pub const Bindings = struct { repository: t.Repository };
+pub const tenant = "local";
 
 pub fn bindings(config: Config) Bindings {
-    const selected = destination(config);
-    return .{ .repository = config.repository.value(), .destination = .{
-        .account = .{ .bytes = selected.account },
-        .app = .{ .bytes = selected.app },
-        .workspace = .{ .bytes = selected.workspace },
-        .operator = .{ .bytes = selected.operator },
-        .channel = .{ .bytes = selected.channel },
-    } };
-}
-
-pub fn tenant(config: Config) []const u8 {
-    return destination(config).workspace;
+    return .{ .repository = config.repository.value() };
 }
 pub const Build = struct { runtime_identity: t.Digest, image_identity: t.Digest };
 
@@ -140,11 +92,6 @@ fn validate(value: Config, current_uid: u32) !void {
         .name = value.repository.name,
         .ref = value.repository.ref,
     });
-    if (value.slack) |legacy| inline for (@typeInfo(LegacySlack).@"struct".field_names) |name|
-        try visible(@field(legacy, name), 128);
-    if (value.grants.slack_history or value.grants.slack_write or
-        value.slack_bot_credential_file != null or value.slack_app_credential_file != null)
-        return error.SlackRemoved;
     if (value.github_credential_file) |path| try absolute(path);
     if (value.model) |model| {
         try visible(model.account, 64);
@@ -282,7 +229,6 @@ pub fn profileBytes(a: std.mem.Allocator, config: Config, billing: ?t.Digest) ![
             .model = config.mode == .live and config.grants.model,
         },
         .repository = config.repository,
-        .destination = destination(config),
         .interval_ms = config.interval_ms,
         .policies = config.policies,
         .model_account = if (billing != null)
@@ -329,7 +275,7 @@ fn finish(self: *OwnedLaunch, build: Build, billing: ?t.Digest) !void {
         .environment = &self.environment,
         .authority = .{
             .principal = try std.fmt.allocPrint(a, "uid:{d}", .{config.current_uid}),
-            .tenant = tenant(config),
+            .tenant = tenant,
             .grants = &.{},
             .inference = billing != null,
             .disclosure = true,

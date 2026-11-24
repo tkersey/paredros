@@ -249,7 +249,6 @@ fn createModelCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
         .{ .local = .{ .uid = 501 } },
         .{
             .target = target,
-            .destination = examples.specification().destination,
             .text = .{ .bytes = "Keep the original conversation context." },
         },
     );

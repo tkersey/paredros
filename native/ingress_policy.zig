@@ -19,7 +19,6 @@ pub fn directive(
     body: t.DirectiveBody,
 ) !void {
     switch (body) {
-        .audit, .frontier_audit => return error.AuditUnavailable,
         .recovery_hold, .recovery_release => return,
         else => {},
     }

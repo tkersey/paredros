@@ -33,8 +33,6 @@ fn recordLineage(index: *const idx.Index, record: idx.Record) !t.Digest {
         .directive => |value| value.obligation,
         .turn => |value| value.target,
         .delivery => |value| return deliveryLineage(index, value.key.lineage),
-        .audit => |value| return deliveryLineage(index, value.delivery.key.lineage),
-        .lineage_audit => |value| return deliveryLineage(index, value.lineage),
         else => null,
     };
     const source = if (target) |value| index.record(value) else null;
@@ -185,15 +183,6 @@ const Builder = struct {
                     .result = if (value.result) |output| output.delivery else null,
                 });
             },
-            .audit => |input| {
-                _ = try self.add(.audit, lineage_id, value, try rowReference(
-                    value,
-                    value.result != null,
-                ), .{
-                    .input = input,
-                    .result = if (value.result) |output| output.audit else null,
-                });
-            },
             .step => if (value.selected and value.result != null) {
                 if (value.result.?.step.batch) |batch|
                     _ = try self.add(
@@ -210,7 +199,7 @@ const Builder = struct {
                     .result = output.experiment,
                 });
             },
-            .genesis, .continuity_member, .continuity_cut, .restore, .lineage_audit => {},
+            .genesis, .continuity_member, .continuity_cut, .restore => {},
         }
     }
 };
@@ -381,12 +370,11 @@ pub const ImportProgress = struct {
 pub const members_per_step = 64;
 pub const mappedOperation = continuity.mappedOperation;
 
-pub fn validateDestination(
+pub fn validateBindings(
     a: std.mem.Allocator,
     bundle: Bundle,
     bindings: configuration.Bindings,
 ) !void {
-    try validatePendingTurns(a, bundle, bindings);
     for (bundle.lineages.items) |root| {
         var head = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
         defer head.deinit();
@@ -396,31 +384,6 @@ pub fn validateDestination(
             t.Repository,
             head.value.specification.repository,
             bindings.repository,
-        ) or
-            !try continuity.equal(
-                a,
-                t.Destination,
-                head.value.specification.destination,
-                bindings.destination,
-            )) return error.ContinuityResourceMismatch;
-    }
-}
-
-fn validatePendingTurns(
-    a: std.mem.Allocator,
-    bundle: Bundle,
-    bindings: configuration.Bindings,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    for (try @import("continuity_turn.zig").pendingTurns(scratch, bundle)) |item| {
-        const value = try continuity.decode(.turn, scratch, item.data);
-        if (!try continuity.equal(
-            scratch,
-            t.Destination,
-            value.value.input.destination,
-            bindings.destination,
         )) return error.ContinuityResourceMismatch;
     }
 }
@@ -466,7 +429,7 @@ pub fn validateImport(
     try continuity.validate(a, bundle);
     const identity = try continuity.digest(a, Bundle, bundle);
     try validateTarget(index, namespace, bundle, identity);
-    try validateDestination(a, bundle, configuration.bindings(config));
+    try validateBindings(a, bundle, configuration.bindings(config));
     const view = index.continuity_import orelse return null;
     return index.records[view.position].task;
 }
@@ -570,7 +533,7 @@ pub fn advanceImport(driver: anytype, a: std.mem.Allocator, index: *const idx.In
     const view = index.continuity_import orelse return false;
     if (view.phase == .manifest_pending or view.phase == .materialized) return false;
     const bindings = driver.bindings orelse return error.MissingResourceBindings;
-    validateDestination(a, view.bundle.?, bindings) catch |err| switch (err) {
+    validateBindings(a, view.bundle.?, bindings) catch |err| switch (err) {
         error.ContinuityResourceMismatch => return false,
         else => return err,
     };
@@ -959,14 +922,4 @@ pub fn admitPendingTurns(
     origin: t.Origin,
 ) !PendingTurnProgress {
     return @import("continuity_turn.zig").admit(driver, a, origin);
-}
-
-pub fn importedIngress(
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-    operation: []const u8,
-    origin: t.Origin,
-    stable: t.Digest,
-) !?t.Id {
-    return @import("continuity_turn.zig").ingress(a, index, operation, origin, stable);
 }

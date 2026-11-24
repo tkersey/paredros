@@ -145,7 +145,6 @@ test "native driver freezes turn context on first admission and rejects changed 
     const target = try driver.genesis(a, "driver-new", origin, spec);
     try finish(&fixture, target);
     const request: @import("../native/commands.zig").TurnRequest = .{
-        .destination = spec.destination,
         .target = target,
         .text = .{ .bytes = "yes" },
     };
@@ -202,7 +201,6 @@ test "native driver bounds turn replacement and preserves its original context t
     try driver.attach(a);
     defer driver.detach();
     const initial = try driver.turn(a, "turn-cancelled", .{ .local = .{ .uid = 501 } }, .{
-        .destination = fixture_values.specification().destination,
         .text = .{ .bytes = "inspect" },
     });
     try cancelTurn(&fixture, initial, "test-cancel-initial");
@@ -325,7 +323,6 @@ test "native driver replaces a parked turn under changed runtime with frozen con
     try driver.attach(a);
     defer driver.detach();
     const old = try driver.turn(a, "upgrade-turn", .{ .local = .{ .uid = 501 } }, .{
-        .destination = fixture_values.specification().destination,
         .text = .{ .bytes = "inspect the same retained evidence" },
     });
     driver.detach();

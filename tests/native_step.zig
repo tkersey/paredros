@@ -94,7 +94,6 @@ test "native bounded step folds controls before one phase and preserves exact li
     try std.testing.expectEqual(1, paused.head.sequence);
     try std.testing.expectEqual(1, paused.head.folded_directive_ordinal);
     try std.testing.expectEqualDeep(next.predecessor, paused.head.predecessor.?);
-    try std.testing.expectEqual(0, paused.notices.items.len);
     try std.testing.expectEqual(1, paused.dispositions.items.len);
     const resume_fact = control(.{ .@"resume" = {} }, 2, pause.reference);
     next = input(paused.head);
@@ -146,7 +145,6 @@ test "native bounded step prioritizes source except for backlog fairness and pro
 
 fn pending(head: t.Head) t.DigestIntent {
     return .{ .hold = .none, .not_before_ms = 0, .delivery = .{
-        .destination = head.specification.destination,
         .key = .{
             .lineage = head.lineage,
             .purpose = .digest,
@@ -175,7 +173,6 @@ fn confirmed(intent: t.DeliveryIntent) t.Settlement {
         .delivery = .{
             .admitted = .{
                 .envelope = fixtures.genesis().envelope,
-                .destination = intent.destination,
                 .key = intent.key,
                 .payload = .{
                     .logical = intent.payload,
@@ -188,11 +185,9 @@ fn confirmed(intent: t.DeliveryIntent) t.Settlement {
             .outcome = .{ .confirmed = .{ .timestamp = timestamp, .metadata_observed = true } },
             .receipt = .{
                 .key = intent.key,
-                .destination = intent.destination,
                 .timestamp = timestamp,
                 .payload_digest = @splat(6),
                 .evidence = .{ .task = @splat(9), .digest = @splat(10) },
-                .basis = .captured_response,
             },
         },
     };

@@ -5,7 +5,6 @@ const preparation = @import("delivery_prepare.zig");
 const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
 const restore = @import("restore.zig");
-const legacy = @import("legacy.zig");
 const admission = @import("admission.zig");
 
 pub const Encoding = enum { contract, json };
@@ -150,7 +149,6 @@ pub const Index = struct {
         const scratch = self.arena.allocator();
         var obligations: std.ArrayList(Obligation) = .empty;
         try validateOperations(self, scratch);
-        for (self.records) |item| _ = try legacy.interaction(scratch, self, item);
         const recovery_view = try restore.inspect(scratch, self);
         self.recovery = recovery_view.recovery;
         self.recovery_hold = recovery_view.recovery_hold;
@@ -291,8 +289,7 @@ fn decodeRow(
 fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
     for (self.records, 0..) |item, position| {
         switch (item.input) {
-            .delivery => |delivery| _ = try preparation.verifyStored(a, delivery),
-            .audit => |audit| _ = try preparation.verifyStored(a, audit.delivery),
+            .delivery => |delivery| try preparation.verifyStored(a, delivery),
             .directive => |directive| try restore.validateRetainedDirective(
                 self,
                 directive.obligation,
@@ -742,7 +739,7 @@ fn validateFacts(self: *Index, step: t.Step, chain: []const usize) !void {
             frozen.result = null;
             frozen.result_digest = null;
         }
-        try validateDeliveryFact(self, a, fact, frozen, snapshot.value);
+        try validateDeliveryFact(a, fact, frozen, snapshot.value);
         for (step.facts.items[0..position]) |prior|
             if (sameCut(prior.reference, fact.reference)) return error.DuplicateConsumption;
         for (chain) |prior| for (recordHead(self.records[prior]).?.consumed.items) |used|
@@ -839,91 +836,27 @@ fn validateRetainedAttempt(
 }
 
 fn validateDeliveryFact(
-    self: *const Index,
     a: std.mem.Allocator,
     fact: t.Settlement,
     item: Record,
     snapshot: retained.Snapshot,
 ) !void {
-    if (fact.kind == .interaction) {
-        const claimed = fact.delivery orelse return error.CopiedInteractionMismatch;
-        if (claimed.outcome != .confirmed) return error.CopiedInteractionMismatch;
-        const metadata = claimed.outcome.confirmed.metadata_observed;
-        const expected = try legacy.copiedInteraction(a, self, item, metadata);
-        if (expected == null or !try sameValue(
-            a,
-            @FieldType(t.Settlement, "delivery"),
-            fact.delivery,
-            expected,
-        )) return error.CopiedInteractionMismatch;
-        return;
-    }
-    if (fact.kind != .delivery and fact.kind != .audit) {
+    if (fact.kind != .delivery) {
         if (fact.delivery != null) return error.UnexpectedDeliveryFact;
         return;
     }
-    if (fact.kind == .delivery) {
-        if (item.input != .delivery) return error.FactKindMismatch;
-        var evidence = item.owner_evidence orelse return error.MissingOwnerEvidence;
-        evidence.status = if (fact.delivery) |claimed|
-            if (claimed.outcome == .indeterminate) .unknown else null
-        else
-            null;
-        var expected = try @import("delivery_fact.zig").settlement(
-            a,
-            snapshot,
-            evidence,
-            if (fact.delivery == null) .before_removal else .current,
-        );
-        defer expected.deinit();
-        if ((fact.delivery == null) != (expected.value == null))
-            return error.CopiedDeliveryMismatch;
-        if (fact.delivery) |claimed| {
-            const actual = expected.value.?;
-            if (!try sameValue(a, t.Delivery, claimed.admitted, actual.admitted) or
-                !try sameValue(a, t.DeliveryOutcome, claimed.outcome, actual.outcome))
-                return error.CopiedDeliveryMismatch;
-            if (!try sameValue(a, ?t.Receipt, claimed.receipt, actual.receipt))
-                return error.InvalidDeliveryReceipt;
-        }
-        return;
-    }
-    const result = item.result orelse {
-        if (item.input != .audit or fact.delivery != null) return error.FactKindMismatch;
-        return;
-    };
-    if (fact.kind == .audit and result == .audit and result.audit != .found) {
-        if (item.input != .audit or fact.delivery != null) return error.FactKindMismatch;
-        return;
-    }
-    try validateAuditFact(a, fact, item);
-}
-
-fn validateAuditFact(a: std.mem.Allocator, fact: t.Settlement, item: Record) !void {
-    const result = item.result orelse return error.MissingFact;
-    if (item.input != .audit or result != .audit) return error.FactKindMismatch;
-    const claimed = fact.delivery orelse return error.MissingDeliveryFact;
-    const target = item.input.audit.delivery;
-    if (!try sameValue(a, t.Delivery, claimed.admitted, target))
+    if (item.input != .delivery) return error.FactKindMismatch;
+    const evidence = item.owner_evidence orelse return error.MissingOwnerEvidence;
+    var expected = try @import("delivery_fact.zig").settlement(a, snapshot, evidence);
+    defer expected.deinit();
+    if ((fact.delivery == null) != (expected.value == null)) return error.CopiedDeliveryMismatch;
+    const claimed = fact.delivery orelse return;
+    const actual = expected.value.?;
+    if (!try sameValue(a, t.Delivery, claimed.admitted, actual.admitted) or
+        !try sameValue(a, t.DeliveryOutcome, claimed.outcome, actual.outcome))
         return error.CopiedDeliveryMismatch;
-    if (result.audit != .found or claimed.receipt == null) return error.InvalidDeliveryReceipt;
-    const timestamp = result.audit.found.timestamp;
-    const receipt: t.Receipt = .{
-        .key = target.key,
-        .destination = target.destination,
-        .payload_digest = target.payload.content_digest,
-        .timestamp = timestamp,
-        .evidence = .{ .task = item.task, .digest = item.result_digest.? },
-        .basis = .history_match,
-    };
-    if (!try sameValue(a, t.Receipt, claimed.receipt.?, receipt))
+    if (!try sameValue(a, ?t.Receipt, claimed.receipt, actual.receipt))
         return error.InvalidDeliveryReceipt;
-    const outcome: t.DeliveryOutcome = .{ .confirmed = .{
-        .timestamp = timestamp,
-        .metadata_observed = true,
-    } };
-    if (!try sameValue(a, t.DeliveryOutcome, claimed.outcome, outcome))
-        return error.CopiedDeliveryMismatch;
 }
 
 pub fn readCancellation(
