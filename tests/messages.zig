@@ -115,10 +115,7 @@ test "messages project each published head in chain order" {
         try std.testing.expectEqual(ordinal, item.ordinal);
         try std.testing.expectEqual(purpose, item.purpose);
         try std.testing.expectEqual(sequence, item.sequence);
-        try std.testing.expectEqualStrings(
-            &std.fmt.bytesToHex(@as(t.Id, @splat(task)), .lower),
-            item.task.bytes,
-        );
+        try std.testing.expectEqualDeep(@as(t.Id, @splat(task)), item.task);
     }
     try std.testing.expectEqualStrings("question", items[2].text.bytes);
     try std.testing.expectEqualDeep(digest().purpose.digest.through, items[1].through.?);
@@ -222,7 +219,7 @@ test "messages keep earlier ordinals and drop answer commands once a later head 
     const again = try messages.page(a, &index, @splat(1), null, 64, "/etc/p.json");
     try std.testing.expectEqual(4, again.total);
     for (seen.messages.items, again.messages.items[0..3]) |before, after| {
-        try std.testing.expectEqualStrings(before.task.bytes, after.task.bytes);
+        try std.testing.expectEqualDeep(before.task, after.task);
         try std.testing.expectEqual(before.ordinal, after.ordinal);
         try std.testing.expectEqual(before.sequence, after.sequence);
     }

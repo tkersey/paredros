@@ -4,6 +4,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const cli = @import("../native/cli.zig");
 const control = @import("../native/control.zig");
+const wire = @import("../native/wire.zig");
 const config = @import("../native/configuration.zig");
 const app = @import("../native/application.zig");
 const Driver = @import("../native/driver.zig").Driver(t);
@@ -56,7 +57,7 @@ fn taskId(value: native.json.Value) !t.Id {
         "admitted",
         try native.json.text(value.object.get("status").?),
     );
-    return cli.hex(t.Id, try native.json.text(value.object.get("data").?.object.get("task").?));
+    return wire.parse(t.Id, try native.json.text(value.object.get("data").?.object.get("task").?));
 }
 
 fn finish(fixture: *Fixture, id: t.Id) !void {
@@ -76,12 +77,12 @@ test "control CLI preserves exact revisions and rejects ambiguous arguments" {
     defer arena.deinit();
     const frame = arena.allocator();
     const id = "00112233445566778899aabbccddeeff";
-    const wire = try cli.request(frame, &.{
+    const encoded = try cli.request(frame, &.{
         "monitor",     "amend",  id, "18446744073709551615", "--wording",
         "<& UTF8 λ>",
         "--operation", "unique",
     }, "unused");
-    const value = try native.values.fromJson(control.Request, frame, try decode(frame, wire));
+    const value = try wire.fromJson(control.Request, frame, try decode(frame, encoded));
     try std.testing.expectEqual(
         std.math.maxInt(u64),
         value.command.directive.body.amend.expected_revision,
@@ -121,7 +122,15 @@ test "control CLI preserves the caller's directory for a relative import path" {
     const current = try std.process.currentPathAlloc(io, frame);
     const expected = try std.fs.path.join(frame, &.{ current, "backups/h.paredros" });
     const supplied: []const []const u8 = &.{
-        "transfer", "--operation", "import", "import", "backups/h.paredros", "--bytes-max", "9",
+        "transfer",
+        "--operation",
+        "import",
+        "import",
+        "backups/h.paredros",
+        "--bytes-max",
+        "9",
+        "--sha256",
+        "abababababababababababababababababababababababababababababababab",
     };
     const resolved = try cli.callerArguments(frame, io, supplied);
     try std.testing.expectEqualStrings(expected, resolved[2]);
@@ -138,16 +147,18 @@ test "control CLI preserves the caller's directory for a relative import path" {
     );
     const encoded = try cli.request(frame, resolved, "id");
     const parsed = try native.json.parse(frame, encoded, .{});
-    const request = try native.values.fromJson(control.Request, frame, parsed.value);
+    const request = try wire.fromJson(control.Request, frame, parsed.value);
     try std.testing.expectEqualStrings(expected, request.command.transfer_import.path.bytes);
     try std.testing.expectEqual(@as(?u64, 9), request.command.transfer_import.bytes_max);
+    const digest: t.Digest = @splat(0xab);
+    try std.testing.expectEqualDeep(digest, request.command.transfer_import.digest);
     try std.testing.expectError(
         error.RelativeTransferPath,
         cli.request(frame, &.{ "transfer", "import", "h.paredros" }, "id"),
     );
 }
 
-test "control CLI preserves one import identity across leading options and path spellings" {
+test "control CLI preserves one import identity across leading options for each path spelling" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const frame = arena.allocator();
@@ -155,7 +166,6 @@ test "control CLI preserves one import identity across leading options and path 
     const current = try std.process.currentPathAlloc(io, frame);
     const parent = std.fs.path.dirname(current).?;
     const leaf = std.fs.path.basename(current);
-    const expected = try std.fs.path.join(frame, &.{ current, "h.paredros" });
     const spellings = [_][]const u8{
         "h.paredros",
         "./h.paredros",
@@ -163,15 +173,16 @@ test "control CLI preserves one import identity across leading options and path 
         try std.fmt.allocPrint(frame, "../{s}/h.paredros", .{leaf}),
         try std.fmt.allocPrint(frame, "{s}/./{s}/h.paredros", .{ parent, leaf }),
     };
-    var operations: [spellings.len][]const u8 = undefined;
-    for (spellings, &operations) |path, *operation| {
+    const digest = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    for (spellings) |path| {
+        const expected = try cli.joinPath(frame, current, path);
         const leading = try cli.callerArguments(
             frame,
             io,
-            &.{ "--operation", "chosen", "transfer", "import", path },
+            &.{ "--operation", "chosen", "transfer", "import", path, "--sha256", digest },
         );
         const encoded = try cli.request(frame, leading, "unused");
-        const request = try native.values.fromJson(
+        const request = try wire.fromJson(
             control.Request,
             frame,
             try decode(frame, encoded),
@@ -180,7 +191,7 @@ test "control CLI preserves one import identity across leading options and path 
         try std.testing.expectEqualStrings("chosen", request.operation.?.bytes);
         const plain = try cli.callerArguments(frame, io, &.{ "transfer", "import", path });
         try std.testing.expectEqualStrings(expected, plain[2]);
-        operation.* = try cli.defaultOperation(
+        const operation = try cli.defaultOperation(
             frame,
             io,
             "/ns",
@@ -193,14 +204,13 @@ test "control CLI preserves one import identity across leading options and path 
             &.{ "transfer", "--operation", "chosen", "import", path },
         );
         try std.testing.expectEqualStrings(
-            operation.*,
+            operation,
             try cli.defaultOperation(frame, io, "/ns", "/backup", (try cli.invocation(
                 frame,
                 split,
             )).command),
         );
     }
-    for (operations[1..]) |operation| try std.testing.expectEqualStrings(operations[0], operation);
     try std.testing.expectEqualStrings(
         "ask",
         (try cli.invocation(frame, &.{ "--operation", "chosen", "ask", "hello" })).command[0],
@@ -255,12 +265,6 @@ test "control protocol freezes monitor retry and acknowledges persisted restrict
     var receipt = (try fixture.service.?.operationLookup(frame, "pause-one")).?;
     defer receipt.deinit();
     try std.testing.expectEqualDeep(pause_id, receipt.value.task);
-    const system = try control.encode(frame, .{
-        .version = 1,
-        .operation = .{ .bytes = "caller-transfer" },
-        .command = .{ .directive = .{ .target = id, .body = .{ .transfer = {} } } },
-    });
-    try expectRejected(try dispatch(frame, &driver, system, 501), "SystemDirective");
     const show = try cli.request(frame, &.{ "monitor", "show", &hex_id }, "unused");
     const response = try dispatch(frame, &driver, show, 501);
     const data = response.object.get("data").?;
@@ -268,7 +272,7 @@ test "control protocol freezes monitor retry and acknowledges persisted restrict
         "paused",
         try native.json.text(data.object.get("effective_mode").?),
     );
-    const backlog = try native.values.fromJson(
+    const backlog = try wire.fromJson(
         @import("../native/materialize.zig").Backlog,
         frame,
         data.object.get("backlog").?,
@@ -305,7 +309,7 @@ fn expectDirectivePages(
         const bytes = try cli.request(frame, &.{
             "monitor", "directives", hex_id, "--after", cursor, "--limit", "7",
         }, "unused");
-        const request = try native.values.fromJson(
+        const request = try wire.fromJson(
             control.Request,
             frame,
             try decode(frame, bytes),
@@ -316,11 +320,11 @@ fn expectDirectivePages(
         const items = page.object.get("pending_directives").?.array.items;
         try std.testing.expect(items.len > 0 and items.len <= 7);
         for (items) |item| {
-            const actual = try native.values.fromJson(t.Directive, frame, item);
+            const actual = try wire.fromJson(t.Directive, frame, item);
             try std.testing.expectEqualDeep(expected[count], actual);
             count += 1;
         }
-        const next = try native.values.fromJson(
+        const next = try wire.fromJson(
             ?u64,
             frame,
             page.object.get("pending_directives_next").?,
@@ -369,7 +373,7 @@ test "control pages pending directives with exact frozen contents" {
     ), 501);
     const data = shown.object.get("data").?;
     try std.testing.expectEqual(16, data.object.get("pending_directives").?.array.items.len);
-    try std.testing.expectEqual(35, try native.values.fromJson(
+    try std.testing.expectEqual(35, try wire.fromJson(
         u64,
         frame,
         data.object.get("pending_directives_total").?,
@@ -449,7 +453,7 @@ fn expectStatusPages(frame: std.mem.Allocator, driver: *Driver, expected: usize)
             item.object.get("pending_directives").?.array.items.len,
         );
         seen += items.len;
-        after = try native.values.fromJson(?t.Id, frame, page.object.get("next").?);
+        after = try wire.fromJson(?t.Id, frame, page.object.get("next").?);
         if (after == null) break;
     }
     try std.testing.expectEqual(expected, seen);
@@ -512,10 +516,10 @@ test "control reads messages without admission and rejects malformed pages" {
     ), 501));
     try finish(&fixture, id);
     const hex_id = std.fmt.bytesToHex(id, .lower);
-    const wire = try cli.request(frame, &.{
+    const encoded = try cli.request(frame, &.{
         "messages", &hex_id, "--after", "3", "--limit", "5", "--operation", "ignored",
     }, "unused");
-    const parsed = try native.values.fromJson(control.Request, frame, try decode(frame, wire));
+    const parsed = try wire.fromJson(control.Request, frame, try decode(frame, encoded));
     try std.testing.expect(parsed.operation == null);
     try std.testing.expectEqualDeep(id, parsed.command.messages.target);
     try std.testing.expectEqual(3, parsed.command.messages.after.?);
@@ -589,6 +593,7 @@ const horos = @import("horos");
 const authored = @import("../app/author.zig");
 const model_contract = @import("../app/model_contract.zig");
 const commands = @import("../native/commands.zig");
+const admission = @import("../native/admission.zig");
 const ConsumerFixture = @import("native_fixture.zig").Fixture(t, ConsumerApplication);
 
 pub const ConsumerApplication = struct {
@@ -836,7 +841,7 @@ test "control proposal consumer shows and confirms maximal retained body by auth
         "observed",
         try native.json.text(response.object.get("status").?),
     );
-    const shown = try native.values.fromJson(t.Proposal, frame, response.object.get("data").?);
+    const shown = try wire.fromJson(t.Proposal, frame, response.object.get("data").?);
     try std.testing.expectEqualDeep(offered, shown.body);
     try std.testing.expectEqualDeep(input.target, shown.target);
     try std.testing.expectEqual(0, shown.identity.ordinal);
@@ -1204,7 +1209,7 @@ test "control pages pending status with the widest next cursor within one frame"
     const probe = (try decodeFrame(frame, probe_bytes)).object.get("data").?;
     try std.testing.expectEqual(2, shownPending(probe));
     const next = try native.json.canonical(frame, probe.object.get("next").?);
-    try std.testing.expect(next.len >= 50);
+    try std.testing.expectEqual(2 + 2 * @sizeOf(t.Id), next.len);
     const wording = try frame.alloc(u8, control.frame_bytes_max + 2 - probe_bytes.len);
     @memset(wording, 'a');
     head.specification.wording.bytes = wording;
@@ -1217,6 +1222,295 @@ test "control pages pending status with the widest next cursor within one frame"
     try std.testing.expectEqual(1, shownPending(shown));
     try std.testing.expectEqualDeep(
         @as(?t.Id, id),
-        try native.values.fromJson(?t.Id, frame, shown.object.get("next").?),
+        try wire.fromJson(?t.Id, frame, shown.object.get("next").?),
     );
+}
+
+test "control CLI preserves absolute caller paths byte for byte" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const io = std.testing.io;
+    for ([_][]const u8{ "/home/u/link/../bundle.bin", "/a//b/./c" }) |path| {
+        try std.testing.expectEqualStrings(path, try cli.callerPath(frame, io, path));
+        const resolved = try cli.callerArguments(frame, io, &.{ "transfer", "import", path });
+        try std.testing.expectEqualStrings(path, resolved[2]);
+    }
+    try std.testing.expectEqualStrings("/x", try cli.joinPath(frame, "/", "x"));
+    try std.testing.expectEqualStrings("/a/../b", try cli.joinPath(frame, "/a/", "../b"));
+    try std.testing.expectEqualStrings("/a/./b", try cli.joinPath(frame, "/a", "./b"));
+    const current = try std.process.currentPathAlloc(io, frame);
+    try std.testing.expectEqualStrings(
+        try cli.joinPath(frame, current, "../x"),
+        try cli.callerPath(frame, io, "../x"),
+    );
+    try std.testing.expectError(error.InvalidArguments, cli.joinPath(frame, "relative", "x"));
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    try directory.dir.writeFile(io, .{ .sub_path = "bundle.bin", .data = "bundle bytes" });
+    var buffer: [4096]u8 = undefined;
+    const length = try directory.dir.realPath(io, &buffer);
+    const file = try std.fmt.allocPrint(frame, "{s}/bundle.bin", .{buffer[0..length]});
+    const plain: []const []const u8 = &.{ "transfer", "import", file };
+    try std.testing.expectError(error.MissingBundleDigest, cli.request(frame, plain, "id"));
+    const hashed = try cli.bundleArguments(frame, io, plain);
+    var digest: t.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash("bundle bytes", &digest, .{});
+    try std.testing.expectEqualStrings("--sha256", hashed[3]);
+    try std.testing.expectEqualDeep(digest, try wire.parse(t.Digest, hashed[4]));
+    try std.testing.expectEqual(hashed, try cli.bundleArguments(frame, io, hashed));
+}
+
+inline fn sample(comptime T: type) T {
+    @setEvalBranchQuota(1_000_000);
+    if (c.native.wrapped(T)) {
+        if (T.protean_value_kind == .vector) return .{ .items = &[_]T.Child{sample(T.Child)} };
+        if (T.protean_value_kind == .bytes) return .{ .bytes = "\x00\xff" };
+        return .{ .bytes = "printed" };
+    }
+    switch (@typeInfo(T)) {
+        .void => return {},
+        .bool => return true,
+        .int => return std.math.maxInt(T),
+        .@"enum" => {
+            const values = std.enums.values(T);
+            return values[values.len - 1];
+        },
+        .optional => |info| return @as(T, sample(info.child)),
+        .array => |info| {
+            var value: T = undefined;
+            for (&value, 0..) |*item, position| item.* = if (info.child == u8)
+                @intCast((position * 37 + 11) % 256)
+            else
+                sample(info.child);
+            return value;
+        },
+        .@"struct" => |info| {
+            var value: T = undefined;
+            inline for (info.field_names, info.field_types) |name, Field|
+                @field(value, name) = sample(Field);
+            return value;
+        },
+        .@"union" => |info| {
+            const last = info.field_names.len - 1;
+            return @unionInit(T, info.field_names[last], sample(info.field_types[last]));
+        },
+        else => @compileError("no sample for " ++ @typeName(T)),
+    }
+}
+
+fn expectArgument(comptime T: type, frame: std.mem.Allocator, value: T) !void {
+    const printed = try wire.printed(frame, try wire.toJson(T, frame, value));
+    try std.testing.expectEqualDeep(value, try wire.argument(T, frame, printed));
+}
+
+test "control CLI preserves every printed identifier and cursor as command input" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    inline for (.{
+        t.Id,
+        t.Digest,
+        commands.ProposalIdentity,
+        u32,
+        u64,
+        t.InputReference,
+        @import("../native/messages.zig").Page,
+        t.Method,
+        t.Policies,
+    }) |T| try expectArgument(T, frame, comptime sample(T));
+    const Command = @FieldType(control.Request, "command");
+    const info = @typeInfo(Command).@"union";
+    inline for (info.field_names, info.field_types) |name, Payload| {
+        const request: control.Request = .{
+            .version = 1,
+            .operation = .{ .bytes = "printed" },
+            .command = @unionInit(Command, name, comptime sample(Payload)),
+        };
+        const encoded = try control.encode(frame, request);
+        const decoded = try wire.fromJson(control.Request, frame, try decode(frame, encoded));
+        try std.testing.expectEqualDeep(request, decoded);
+    }
+}
+
+test "control pages pending status through printed next cursors" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    var ids: [3]t.Id = undefined;
+    for (&ids, 0..) |*id, position| {
+        const name = try std.fmt.allocPrint(frame, "printed-monitor-{d}", .{position});
+        id.* = try taskId(try dispatch(frame, &driver, try cli.request(
+            frame,
+            &.{ "monitor", "add", "--wording", name },
+            name,
+        ), 501));
+        try finish(&fixture, id.*);
+    }
+    var seen: std.ArrayList(t.Id) = .empty;
+    var after: ?[]const u8 = null;
+    for (0..ids.len + 1) |_| {
+        const args: []const []const u8 = if (after) |cursor|
+            &.{ "status", "--limit", "1", "--after", cursor }
+        else
+            &.{ "status", "--limit", "1" };
+        const page = (try dispatch(frame, &driver, try cli.request(frame, args, "x"), 501))
+            .object.get("data").?;
+        for (page.object.get("obligations").?.array.items) |item| {
+            const shown = try native.json.text(item.object.get("id").?);
+            const request = try cli.request(frame, &.{ "monitor", "show", shown }, "x");
+            const observed = try dispatch(frame, &driver, request, 501);
+            try std.testing.expectEqualStrings(
+                "observed",
+                try native.json.text(observed.object.get("status").?),
+            );
+            try seen.append(frame, try wire.parse(t.Id, shown));
+        }
+        const next = page.object.get("next").?;
+        if (next == .null) break;
+        after = try wire.printed(frame, next);
+    }
+    std.mem.sort(t.Id, &ids, {}, struct {
+        fn less(_: void, left: t.Id, right: t.Id) bool {
+            return std.mem.order(u8, &left, &right) == .lt;
+        }
+    }.less);
+    try std.testing.expectEqualDeep(@as([]const t.Id, &ids), @as([]const t.Id, seen.items));
+}
+
+test "control protocol freezes replies for operations admitted before tightened validation" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const origin: t.Origin = .{ .local = .{ .uid = 501 } };
+    const settings = configuration();
+    const legacy = try commands.monitor(&driver, frame, "legacy:monitor", origin, .{
+        .wording = .{ .bytes = "Report new commits with source links." },
+        .interval_ms = null,
+    }, .{
+        .revision = 0,
+        .repository = settings.repository.value(),
+        .interval_ms = settings.interval_ms,
+        .anchor_ms = 0,
+        .wording = .{ .bytes = "" },
+        .policies = settings.policies,
+    });
+    try finish(&fixture, legacy);
+    const resent = try cli.request(frame, &.{ "monitor", "add" }, "legacy:monitor");
+    try std.testing.expectEqualDeep(legacy, try taskId(try dispatch(frame, &driver, resent, 501)));
+    const body: t.DirectiveBody = .{ .amend = .{
+        .expected_revision = 0,
+        .interval_ms = config.interval_ms_max + 1,
+        .wording = null,
+        .policies = null,
+        .repository_route = null,
+    } };
+    const Stable = struct { target: t.Id, body: t.DirectiveBody };
+    const stable = try admission.stableDigest(frame, Stable{ .target = legacy, .body = body });
+    const admitted = try fixture.service.?.submit(frame, "legacy-amend", .{ .directive = .{
+        .envelope = .{
+            .operation = .{ .bytes = "legacy-amend" },
+            .stable_request = try admission.directiveDigest(frame, "legacy-amend", stable),
+            .origin = origin,
+        },
+        .obligation = legacy,
+        .ordinal = 1,
+        .predecessor = null,
+        .body = body,
+    } });
+    const hex_id = wire.hex(legacy);
+    const excess = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max + 1});
+    const args: []const []const u8 = &.{
+        "monitor", "amend", &hex_id, "0", "--interval-ms", excess,
+    };
+    const amend = try cli.request(frame, args, "legacy-amend");
+    try std.testing.expectEqualDeep(
+        admitted.receipt.task,
+        try taskId(try dispatch(frame, &driver, amend, 501)),
+    );
+    const fresh = try cli.request(frame, args, "fresh-amend");
+    try expectRejected(try dispatch(frame, &driver, fresh, 501), "IntervalTooLong");
+}
+
+test "control malformed and unsupported system directives are refused at caller ingress" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const add = try cli.request(frame, &.{ "monitor", "add" }, "system-monitor");
+    const id = try taskId(try dispatch(frame, &driver, add, 501));
+    try finish(&fixture, id);
+    var before = try driver.rebuild(frame);
+    const records = before.records.len;
+    before.deinit();
+    const Wide = struct {
+        version: u32,
+        operation: ?t.OperationId,
+        command: union(enum) { directive: struct { target: t.Id, body: t.DirectiveBody } },
+    };
+    for ([_]t.DirectiveBody{.{ .transfer = {} }}, 0..) |body, position| {
+        const operation = try std.fmt.allocPrint(frame, "system-{d}", .{position});
+        const bytes = try native.json.canonical(frame, try wire.toJson(Wide, frame, .{
+            .version = 1,
+            .operation = .{ .bytes = operation },
+            .command = .{ .directive = .{ .target = id, .body = body } },
+        }));
+        try expectRejected(try dispatch(frame, &driver, bytes, 501), "SystemDirective");
+        try std.testing.expectError(
+            error.SystemDirective,
+            cli.request(frame, &.{ "request", bytes }, "unused"),
+        );
+    }
+    var after = try driver.rebuild(frame);
+    defer after.deinit();
+    try std.testing.expectEqual(records, after.records.len);
+}
+
+test "control protocol freezes caller requests across configuration edits" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    var edited = configuration();
+    edited.interval_ms = 60_000;
+    edited.repository.name = "renamed";
+    for ([_][]const []const u8{
+        &.{ "monitor", "add", "--wording", "edited" },
+        &.{ "ask", "What changed?" },
+    }, [_][]const u8{ "edited-monitor", "edited-ask" }) |args, operation| {
+        const request = try cli.request(frame, args, operation);
+        const first = try taskId(try dispatch(frame, &driver, request, 501));
+        const retried = try control.dispatch(frame, &driver, edited, 501, request);
+        try std.testing.expectEqualDeep(first, try taskId(try decode(frame, retried)));
+    }
 }

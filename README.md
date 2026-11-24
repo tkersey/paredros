@@ -147,15 +147,25 @@ paredros --config /absolute/config.json monitor pause OBLIGATION_ID
 
 `--help` lists the typed commands. `stdio` accepts one JSON request per line over
 the same authenticated local socket. Mutations accept `--operation ID` anywhere
-on the command line; reuse an ID only for the same request. An ID is printable
-ASCII without `:`, which is reserved for operations the daemon derives itself; an
-ID containing it is refused with `ReservedOperationId`. An admission response
-means the operation is durable. It does not mean that a step has folded it or
-published a resulting message yet.
+on the command line; reuse an ID only for the same request. The daemon first
+looks the ID up: a recorded operation returns its original disposition (or
+`OperationConflict` for different bytes), and only an unrecorded one is validated
+and admitted. A new ID is printable ASCII without `:`, which is reserved for
+operations the daemon derives itself; a new ID containing it is refused with
+`ReservedOperationId`. The directive the daemon derives itself (`transfer`) is
+refused from callers with `SystemDirective`. An admission response means the
+operation is durable. It does not mean that a step has folded it or published a
+resulting message yet.
 
-A monitor interval (`--interval-ms`, an amendment, a confirmed proposal, or the
-configured default) must be between 1 ms and 366 days (31622400000 ms); a longer
-one is refused with `IntervalTooLong`.
+A new monitor interval (`--interval-ms`, an amendment, or a confirmed proposal)
+must be between 1 ms and 366 days (31622400000 ms); a longer one is refused with
+`IntervalTooLong`. A configuration whose `interval_ms` exceeds that bound fails
+to load with `IntervalMsExceedsMaximum`.
+
+Every identifier, digest and cursor in a reply uses the form its command accepts:
+task IDs and digests are lowercase hex, proposal identities are
+`REQUEST_DIGEST:ATTEMPT:ORDINAL`, and ordinals are decimal. Copy `data.next` from
+`status` into `status --after` until it is null.
 
 `status` reports the running daemon's application version and executable SHA-256
 under `data.daemon`. `data.namespace_bytes` sums the logical lengths of the live
@@ -286,14 +296,20 @@ the file is written, it prints that operation; rerun the same export command wit
 Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's
 manifest; the daemon then materializes its members and lineages in bounded steps,
-including across a restart, while other control ingress waits. The client
-resolves a relative PATH against its own working directory and normalizes `.` and
-`..` before sending it, so every spelling of one path repeats the same import.
-The daemon refuses a relative path (`RelativeTransferPath`). Repeat `transfer
+including across a restart, while other control ingress waits. The client sends
+an absolute PATH byte for byte and joins a relative PATH onto its own working
+directory with one separator, without collapsing `.` or `..`, so the daemon opens
+the file the caller named. The daemon refuses a relative path (`RelativeTransferPath`). Repeat `transfer
 import PATH` to observe progress; exit 75 means the daemon is still materializing.
-The import operation is bound to its path and size limit; resource bindings are
-checked separately, so a configured owner/name rename does not change it. Reusing
-an import operation for a different file is refused as an operation conflict.
+The client hashes the file once per command and sends its SHA-256 with the path
+(`--sha256 DIGEST` supplies it explicitly). The import operation is bound to its
+path, size limit and that digest. The daemon looks the operation up first and
+reports progress from stored state without reading the file; only a new import
+reads it, and a file whose bytes no longer match the digest is refused with
+`BundleDigestMismatch`. Resource bindings are checked against the stored manifest
+on every import command, so a configured owner/name rename does not change the
+operation. Reusing an import operation for a different file is refused as an
+operation conflict.
 Import preserves portable observations, pending controls, method source, and
 known and unknown costs. Each imported obligation starts in its prior mode with no
 hold: an active one resumes checks and renders once its imported pending controls

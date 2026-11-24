@@ -5,7 +5,7 @@ const t = @import("application_types");
 
 fn candidate() compatibility.Candidate {
     return .{
-        .image = @splat(1),
+        .image = .{ .sha256 = @splat(1) },
         .runtime = @splat(2),
         .has_controller = false,
         .principal = "uid:42",
@@ -57,7 +57,7 @@ test "compatibility does not turn an unresolved profile into a continuation clai
         .profile_unresolved,
         std.meta.activeTag(try compatibility.classify(selected, task())),
     );
-    selected.image = @splat(9);
+    selected.image = .{ .sha256 = @splat(9) };
     try std.testing.expectEqual(
         .image,
         (try compatibility.classify(selected, task())).requires_supersession,

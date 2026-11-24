@@ -207,6 +207,8 @@ pub fn Driver(comptime Types: type) type {
                 const head = index.head(obligation);
                 if (head.mode == .cancelled or head.mode == .transferred)
                     return error.FinalObligation;
+                if (self.body == .amend) if (self.body.amend.interval_ms) |interval_ms|
+                    try admission.interval(interval_ms);
                 if (self.body == .adopt)
                     try @import("method_catalog.zig").adoption(a, &index, self.body.adopt.method);
                 var ordinal = head.folded_directive_ordinal;

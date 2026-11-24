@@ -2,7 +2,20 @@ const std = @import("std");
 const c = @import("protean_contracts");
 const native = @import("protean_native");
 const t = @import("application_types");
+const wire = @import("wire.zig");
 pub const Object = @FieldType(native.Namespace.AuditTaskView, "image");
+
+pub const ImageDigest = struct {
+    sha256: t.Digest,
+
+    pub fn of(image: []const u8) ImageDigest {
+        return .{ .sha256 = digest(image) };
+    }
+
+    pub fn names(self: ImageDigest, object: Object) bool {
+        return std.meta.eql(object.digest, self.sha256);
+    }
+};
 
 pub const ProfileBinding = struct {
     digest: t.Digest,
@@ -10,7 +23,7 @@ pub const ProfileBinding = struct {
 };
 
 pub const Candidate = struct {
-    image: t.Digest,
+    image: ImageDigest,
     runtime: t.Digest,
     has_controller: bool,
     principal: []const u8,
@@ -29,6 +42,17 @@ pub const Task = struct {
     id: t.Id,
     revision: u64,
     disposition: Disposition,
+
+    pub fn jsonStringify(self: Task, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("id");
+        try writer.write(&wire.hex(self.id));
+        try writer.objectField("revision");
+        try writer.write(self.revision);
+        try writer.objectField("disposition");
+        try writer.write(self.disposition);
+        try writer.endObject();
+    }
 };
 
 pub const Report = struct {
@@ -63,7 +87,7 @@ fn digest(bytes: []const u8) t.Digest {
 
 pub fn fromProfile(
     a: std.mem.Allocator,
-    image: t.Digest,
+    image: ImageDigest,
     has_controller: bool,
     profile: native.tasks.Profile,
 ) !Candidate {
@@ -87,8 +111,7 @@ pub fn classify(candidate: Candidate, task: native.Namespace.AuditTaskView) !Dis
     if (!same(task.principal, candidate.principal) or !same(task.tenant, candidate.tenant))
         return error.IncompatibleOwner;
     if (task.terminal) return .{ .terminal_reusable = {} };
-    if (!std.meta.eql(task.image.digest, candidate.image))
-        return .{ .requires_supersession = .image };
+    if (!candidate.image.names(task.image)) return .{ .requires_supersession = .image };
     if (!std.meta.eql(task.runtime_identity, candidate.runtime))
         return .{ .requires_supersession = .runtime };
     if (task.has_controller != candidate.has_controller)

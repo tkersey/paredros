@@ -823,7 +823,7 @@ fn genesisRunnable(service: anytype, a: std.mem.Allocator, task: t.Id) !bool {
     defer arena.deinit();
     const candidate = try compatibility.fromProfile(
         arena.allocator(),
-        continuity.hash(service.assets.image),
+        compatibility.ImageDigest.of(service.assets.image),
         service.application.controller != null,
         service.profile,
     );

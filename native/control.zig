@@ -12,6 +12,8 @@ const ingress_policy = @import("ingress_policy.zig");
 const messages = @import("messages.zig");
 const cli = @import("cli.zig");
 const recovery_status = @import("recovery_status.zig");
+const admission = @import("admission.zig");
+const wire = @import("wire.zig");
 
 pub const frame_bytes_max: u32 = 4 * 1024 * 1024;
 pub const capacity_rejection =
@@ -24,11 +26,11 @@ pub const Request = struct {
     operation: ?t.OperationId,
     command: union(enum) {
         status: struct { after: ?t.Id, limit: u32 },
-        monitor_add: struct { wording: t.Text, interval_ms: ?u64 },
+        monitor_add: commands.MonitorRequest,
         monitor_show: t.Id,
         monitor_directives: struct { target: t.Id, after: ?u64, limit: u32 },
         messages: struct { target: t.Id, after: ?u64, limit: u32 },
-        directive: struct { target: t.Id, body: t.DirectiveBody },
+        directive: struct { target: t.Id, body: commands.CallerDirective },
         ask: struct { text: t.Text, target: ?t.Id },
         proposal_confirm: commands.ProposalSelector,
         proposal_show: commands.ProposalSelector,
@@ -44,7 +46,7 @@ pub const Request = struct {
 pub fn encode(a: std.mem.Allocator, request: Request) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    return native.json.canonical(a, try native.values.toJson(Request, arena.allocator(), request));
+    return native.json.canonical(a, try wire.toJson(Request, arena.allocator(), request));
 }
 
 pub fn dispatch(
@@ -170,7 +172,6 @@ fn operation(request: Request) ![]const u8 {
     const value = (request.operation orelse return error.MissingOperationId).bytes;
     if (value.len == 0) return error.InvalidOperationId;
     for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidOperationId;
-    if (std.mem.indexOfScalar(u8, value, ':') != null) return error.ReservedOperationId;
     return value;
 }
 
@@ -209,14 +210,50 @@ fn execute(
         );
     }
     const operation_id = try operation(request);
-    if (request.command != .transfer_export and request.command != .transfer_import)
-        try admissionOpen(a, driver, operation_id);
-    var response = if (request.command == .transfer_export or request.command == .transfer_import)
-        try continuityCommand(a, driver, config, origin, request, environment)
-    else
-        try admitted(a, try admitCommand(a, driver, config, origin, request, operation_id));
+    if (!try admission.recorded(driver.service, a, operation_id))
+        try validateFresh(a, driver, request.command, operation_id);
+    var response = switch (request.command) {
+        .transfer_export, .transfer_import => try continuityCommand(
+            a,
+            driver,
+            config,
+            origin,
+            request.command,
+            operation_id,
+            environment,
+        ),
+        else => try admitted(a, try admitCommand(a, driver, config, origin, request, operation_id)),
+    };
     try native.json.put(a, &response, "operation", native.json.string(operation_id));
     return response;
+}
+
+fn validateFresh(
+    a: std.mem.Allocator,
+    driver: anytype,
+    command: @FieldType(Request, "command"),
+    operation_id: []const u8,
+) !void {
+    if (std.mem.indexOfScalar(u8, operation_id, ':') != null) return error.ReservedOperationId;
+    if (command == .transfer_export or command == .transfer_import) return;
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    switch (command) {
+        .directive => |value| {
+            try ingress_policy.validate(&index);
+            try ingress_policy.directive(a, &index, value.target);
+        },
+        .proposal_confirm => |selector| {
+            try ingress_policy.validate(&index);
+            const confirmation = try commands.resolveProposal(&index, selector);
+            const selected = try commands.proposal(&index, confirmation);
+            if (selected.body != .directive) return;
+            _ = try commands.CallerDirective.narrow(selected.body.directive);
+            const target = selected.target orelse return error.InvalidProposalTarget;
+            try ingress_policy.directive(a, &index, target);
+        },
+        else => try ingress_policy.validate(&index),
+    }
 }
 
 pub fn observingFrame(a: std.mem.Allocator, bytes: []const u8) bool {
@@ -233,7 +270,7 @@ pub fn observingFrame(a: std.mem.Allocator, bytes: []const u8) bool {
 }
 
 fn decodeRequest(a: std.mem.Allocator, value: native.json.Value) !Request {
-    const request = try native.values.fromJson(Request, a, value);
+    const request = try wire.fromJson(Request, a, value);
     if (request.version != 1) return error.UnsupportedProtocol;
     return request;
 }
@@ -253,21 +290,6 @@ fn readOnly(request: Request) bool {
     };
 }
 
-fn admissionOpen(
-    a: std.mem.Allocator,
-    driver: anytype,
-    operation_id: []const u8,
-) !void {
-    if (try driver.service.operationLookup(a, operation_id)) |found| {
-        var receipt = found;
-        defer receipt.deinit();
-        return;
-    }
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    try ingress_policy.validate(&index);
-}
-
 fn admitCommand(
     a: std.mem.Allocator,
     driver: anytype,
@@ -282,12 +304,16 @@ fn admitCommand(
             a,
             operation_id,
             origin,
-            try specification(config, value.wording, value.interval_ms),
+            value,
+            template(config),
         ),
-        .directive => |value| {
-            try validateDirective(a, driver, operation_id, value.target, value.body);
-            return driver.directive(a, operation_id, origin, value.target, value.body);
-        },
+        .directive => |value| return driver.directive(
+            a,
+            operation_id,
+            origin,
+            value.target,
+            value.body.widen(),
+        ),
         .ask => |value| return driver.turn(
             a,
             operation_id,
@@ -295,8 +321,7 @@ fn admitCommand(
             .{
                 .text = value.text,
                 .target = value.target,
-                .anchor_template = true,
-                .genesis_template = try specification(config, .{ .bytes = "" }, null),
+                .genesis_template = template(config),
             },
         ),
         .experiment_run => |value| return experiments.admit(
@@ -317,36 +342,17 @@ fn admitCommand(
     }
 }
 
-fn validateDirective(
-    a: std.mem.Allocator,
-    driver: anytype,
-    operation_id: []const u8,
-    target: t.Id,
-    body: t.DirectiveBody,
-) !void {
-    if (try driver.service.operationLookup(a, operation_id)) |found| {
-        var receipt = found;
-        defer receipt.deinit();
-        return;
-    }
-    if (body == .transfer) return error.SystemDirective;
-    if (body == .amend) if (body.amend.interval_ms) |interval_ms| try checkInterval(interval_ms);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    try ingress_policy.directive(a, &index, target);
-}
-
 fn continuityCommand(
     a: std.mem.Allocator,
     driver: anytype,
     config: configuration.Config,
     origin: t.Origin,
-    request: Request,
+    command: @FieldType(Request, "command"),
+    operation_id: []const u8,
     environment: ?continuity_control.Environment,
 ) !native.json.Value {
     const context = environment orelse return error.ContinuityEnvironmentUnavailable;
-    const operation_id = try operation(request);
-    switch (request.command) {
+    switch (command) {
         .transfer_export => |value| {
             const result = try continuity_control.exportBundle(
                 driver,
@@ -360,7 +366,7 @@ fn continuityCommand(
             return reply(
                 a,
                 if (result.phase == .written) "observed" else "admitted",
-                try native.values.toJson(continuity_control.ExportProgress, a, result),
+                try wire.toJson(continuity_control.ExportProgress, a, result),
             );
         },
         .transfer_import => |value| {
@@ -380,7 +386,7 @@ fn continuityCommand(
                 members: u64,
                 obligations: c.Vector(t.Id, null),
             };
-            const data = try native.values.toJson(value_type, a, .{
+            const data = try wire.toJson(value_type, a, .{
                 .phase = result.phase,
                 .manifest = result.manifest,
                 .members = result.members,
@@ -405,15 +411,6 @@ fn confirmProposal(
     const confirmation = try commands.resolveProposal(&index, selector);
     const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
     if (prior) |task_id| return task_id;
-    const selected = try commands.proposal(&index, confirmation);
-    if (selected.body == .genesis) try checkInterval(selected.body.genesis.interval_ms);
-    if (selected.body == .directive) try validateDirective(
-        a,
-        driver,
-        operation_id,
-        selected.target orelse return error.InvalidProposalTarget,
-        selected.body.directive,
-    );
     return commands.admitConfirmation(driver, a, &index, operation_id, origin, confirmation);
 }
 
@@ -423,36 +420,23 @@ fn proposal(
     selector: commands.ProposalSelector,
 ) !native.json.Value {
     const confirmation = try commands.resolveProposal(index, selector);
-    return native.values.toJson(t.Proposal, a, try commands.proposal(index, confirmation));
+    return wire.toJson(t.Proposal, a, try commands.proposal(index, confirmation));
 }
 
-fn specification(
-    config: configuration.Config,
-    wording: t.Text,
-    interval: ?u64,
-) !t.Specification {
-    const interval_ms = interval orelse config.interval_ms;
-    try checkInterval(interval_ms);
+fn template(config: configuration.Config) t.Specification {
     return .{
         .revision = 0,
         .repository = config.repository.value(),
-        .interval_ms = interval_ms,
+        .interval_ms = config.interval_ms,
         .anchor_ms = 0,
-        .wording = wording,
+        .wording = .{ .bytes = "" },
         .policies = config.policies,
     };
 }
 
-fn checkInterval(interval_ms: u64) !void {
-    if (interval_ms == 0) return error.InvalidInterval;
-    if (interval_ms > configuration.interval_ms_max) return error.IntervalTooLong;
-}
-
 fn admitted(a: std.mem.Allocator, task_id: t.Id) !native.json.Value {
     var data = native.json.object();
-    try native.json.put(a, &data, "task", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(task_id, .lower)),
-    ));
+    try native.json.put(a, &data, "task", try wire.toJson(t.Id, a, task_id));
     return reply(a, "admitted", data);
 }
 
@@ -476,7 +460,7 @@ fn inspect(
         ),
         .messages => |page| try messagePage(a, index, page, config_path),
         .task_show => |id| try task(a, service, index, id, config_path),
-        .method_show => |id| try native.values.toJson(
+        .method_show => |id| try wire.toJson(
             t.Method,
             a,
             index.head(index.obligation(id) orelse return error.UnknownObligation).method,
@@ -491,7 +475,7 @@ fn inspect(
 fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !native.json.Value {
     var observed = try experiments.campaign(a, index, id);
     defer observed.deinit();
-    return native.values.toJson(experiments.Campaign, a, observed.value);
+    return wire.toJson(experiments.Campaign, a, observed.value);
 }
 
 fn namespaceBytes(io: std.Io, directory: std.Io.Dir) !u64 {
@@ -534,7 +518,7 @@ fn status(
     var items: std.array_list.Managed(native.json.Value) = .init(a);
     try native.json.put(a, &result, "obligations", .{ .array = items });
     const widest: ?t.Id = @splat(std.math.maxInt(u8));
-    try native.json.put(a, &result, "next", try native.values.toJson(?t.Id, a, widest));
+    try native.json.put(a, &result, "next", try wire.toJson(?t.Id, a, widest));
     const room = try dataRoom(a);
     var used = try extent(a, result);
     var next: ?t.Id = null;
@@ -558,7 +542,7 @@ fn status(
     }
     try native.json.put(a, &result, "obligations", .{ .array = items });
     try native.json.put(a, &result, "next", if (items.items.len == limit or stopped)
-        try native.values.toJson(?t.Id, a, next)
+        try wire.toJson(?t.Id, a, next)
     else
         .null);
     return result;
@@ -572,7 +556,7 @@ fn statusSummary(
 ) !native.json.Value {
     var result = native.json.object();
     const bytes = try namespaceBytes(service.io, .{ .handle = service.namespace.directory });
-    try native.json.put(a, &result, "namespace_bytes", try native.values.toJson(u64, a, bytes));
+    try native.json.put(a, &result, "namespace_bytes", try wire.toJson(u64, a, bytes));
     var daemon = native.json.object();
     try native.json.put(
         a,
@@ -580,17 +564,20 @@ fn statusSummary(
         "application_version",
         service.application.metadata.object.get("application_version").?,
     );
-    try native.json.put(a, &daemon, "artifact_sha256", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(service.profile.runtime_identity, .lower)),
-    ));
+    try native.json.put(
+        a,
+        &daemon,
+        "artifact_sha256",
+        try wire.toJson(t.Digest, a, service.profile.runtime_identity),
+    );
     try native.json.put(a, &result, "daemon", daemon);
     try native.json.put(
         a,
         &result,
         "task_count",
-        try native.values.toJson(u64, a, index.records.len),
+        try wire.toJson(u64, a, index.records.len),
     );
-    try native.json.put(a, &result, "clock_ms", try native.values.toJson(i64, a, clock_ms));
+    try native.json.put(a, &result, "clock_ms", try wire.toJson(i64, a, clock_ms));
     return result;
 }
 
@@ -627,10 +614,8 @@ fn monitorHead(
 ) !native.json.Value {
     const head = index.head(obligation);
     var result = native.json.object();
-    try native.json.put(a, &result, "id", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(obligation.task, .lower)),
-    ));
-    try native.json.put(a, &result, "head", try native.values.toJson(t.Head, a, head));
+    try native.json.put(a, &result, "id", try wire.toJson(t.Id, a, obligation.task));
+    try native.json.put(a, &result, "head", try wire.toJson(t.Head, a, head));
     try native.json.put(
         a,
         &result,
@@ -647,9 +632,9 @@ fn monitorHead(
         @intCast(@as(i128, clock_ms) - check.acquired_ms)
     else
         null else null;
-    try native.json.put(a, &result, "source_age_ms", try native.values.toJson(?u64, a, age));
+    try native.json.put(a, &result, "source_age_ms", try wire.toJson(?u64, a, age));
     const materialize = @import("materialize.zig");
-    try native.json.put(a, &result, "backlog", try native.values.toJson(
+    try native.json.put(a, &result, "backlog", try wire.toJson(
         materialize.Backlog,
         a,
         try materialize.backlog(a, index, obligation),
@@ -689,7 +674,7 @@ fn messagePage(
             bounded,
             config_path,
         );
-        const value = try native.values.toJson(messages.Page, a, page);
+        const value = try wire.toJson(messages.Page, a, page);
         if ((try extent(a, value)).within(room)) return value;
         if (bounded == 1) break;
         bounded /= 2;
@@ -716,18 +701,18 @@ fn appendPending(
         a,
         result,
         "pending_directives_total",
-        try native.values.toJson(u64, a, total),
+        try wire.toJson(u64, a, total),
     );
     try native.json.put(
         a,
         result,
         "folded_directive_ordinal",
-        try native.values.toJson(u64, a, folded),
+        try wire.toJson(u64, a, folded),
     );
     var pending: std.array_list.Managed(native.json.Value) = .init(a);
     try native.json.put(a, result, "pending_directives", .{ .array = pending });
     const widest: ?u64 = std.math.maxInt(u64);
-    try native.json.put(a, result, "pending_directives_next", try native.values.toJson(
+    try native.json.put(a, result, "pending_directives_next", try wire.toJson(
         ?u64,
         a,
         widest,
@@ -744,7 +729,7 @@ fn appendPending(
             more = true;
             break;
         }
-        const item = try native.values.toJson(t.Directive, a, directive);
+        const item = try wire.toJson(t.Directive, a, directive);
         var size = try extent(a, item);
         if (pending.items.len != 0) size = size.plus(separator);
         if (!used.plus(size).within(room)) {
@@ -761,7 +746,7 @@ fn appendPending(
         a,
         result,
         "pending_directives_next",
-        try native.values.toJson(?u64, a, if (more) cursor else null),
+        try wire.toJson(?u64, a, if (more) cursor else null),
     );
     return .{ .value = result.*, .extent = used, .clipped = clipped, .shown = pending.items.len };
 }
@@ -775,24 +760,20 @@ fn task(
 ) !native.json.Value {
     const record = try currentTask(index, id);
     var result = native.json.object();
-    try native.json.put(a, &result, "requested_id", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(id, .lower)),
-    ));
-    try native.json.put(a, &result, "id", native.json.string(
-        try a.dupe(u8, &std.fmt.bytesToHex(record.task, .lower)),
-    ));
-    try native.json.put(a, &result, "input", try native.values.toJson(t.Input, a, record.input));
+    try native.json.put(a, &result, "requested_id", try wire.toJson(t.Id, a, id));
+    try native.json.put(a, &result, "id", try wire.toJson(t.Id, a, record.task));
+    try native.json.put(a, &result, "input", try wire.toJson(t.Input, a, record.input));
     try native.json.put(
         a,
         &result,
         "result",
-        try native.values.toJson(?t.Output, a, record.result),
+        try wire.toJson(?t.Output, a, record.result),
     );
     try native.json.put(
         a,
         &result,
         "result_digest",
-        try native.values.toJson(?t.Digest, a, record.result_digest),
+        try wire.toJson(?t.Digest, a, record.result_digest),
     );
     try native.json.put(a, &result, "superseded", .{ .bool = record.superseded });
     const confirming = try confirmations(a, index, record, config_path);
@@ -807,7 +788,7 @@ fn task(
             a,
             &result,
             "accounting",
-            try native.values.toJson(t.Accounting, a, snapshot.accounting),
+            try wire.toJson(t.Accounting, a, snapshot.accounting),
         );
     }
     return result;
@@ -845,11 +826,7 @@ fn confirmations(
         };
         const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch null;
         if (resolved) |value| if (!std.meta.eql(value.turn.task, record.task)) continue;
-        const token = try std.fmt.allocPrint(a, "{s}:{d}:{d}", .{
-            &std.fmt.bytesToHex(identity.request, .lower),
-            identity.attempt,
-            identity.ordinal,
-        });
+        const token = try wire.format(commands.ProposalIdentity, a, identity);
         var item = native.json.object();
         try native.json.put(a, &item, "identity", native.json.string(token));
         try native.json.put(a, &item, "confirmable", .{ .bool = resolved != null });

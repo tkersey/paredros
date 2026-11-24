@@ -2,6 +2,8 @@ const std = @import("std");
 const native = @import("protean_native");
 const t = @import("application_types");
 const control = @import("control.zig");
+const commands = @import("commands.zig");
+const wire = @import("wire.zig");
 const Command = @FieldType(control.Request, "command");
 
 pub const help =
@@ -19,12 +21,13 @@ pub const help =
     \\  task show ID                     Inspect admitted input and result
     \\  method show ID | revert ID REVISION | adopt ID REVISION METHOD_JSON
     \\  experiment run CAMPAIGN ATTEMPT PLAN_JSON [--live] | show CAMPAIGN
-    \\  namespace check | describe-build | licenses
+    \\  namespace check                   Audit without modifying
     \\  transfer export NAME [--snapshot]
-    \\  transfer import PATH [--bytes-max N]
+    \\  transfer import PATH [--bytes-max N] [--sha256 DIGEST]
     \\  request JSON | stdio              Machine-readable daemon access
-    \\Mutations accept --operation ID; IDs may not contain `:`.
+    \\Mutations accept --operation ID; new IDs may not contain `:`.
     \\Success means admission, not remote completion. Intervals are 1 to 31622400000 ms.
+    \\paredros describe-build | licenses  Build identities and notices (no --config)
 ;
 
 pub const Invocation = struct { operation: ?[]const u8, command: []const []const u8 };
@@ -70,9 +73,15 @@ pub fn defaultOperation(
 
 pub fn callerPath(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (path.len == 0) return error.InvalidArguments;
-    if (std.fs.path.isAbsolute(path)) return std.fs.path.resolveAlloc(a, &.{path});
-    const current = try std.process.currentPathAlloc(io, a);
-    return std.fs.path.resolveAlloc(a, &.{ current, path });
+    if (std.fs.path.isAbsolute(path)) return a.dupe(u8, path);
+    return joinPath(a, try std.process.currentPathAlloc(io, a), path);
+}
+
+pub fn joinPath(a: std.mem.Allocator, directory: []const u8, path: []const u8) ![]const u8 {
+    if (!std.fs.path.isAbsolute(directory) or path.len == 0) return error.InvalidArguments;
+    if (std.fs.path.isAbsolute(path)) return a.dupe(u8, path);
+    const separator = if (std.mem.endsWith(u8, directory, "/")) "" else "/";
+    return std.mem.concat(a, u8, &.{ directory, separator, path });
 }
 
 pub fn callerArguments(
@@ -86,6 +95,39 @@ pub fn callerArguments(
         command[2] = try callerPath(a, io, command[2]);
     const operation = parsed.operation orelse return command;
     return std.mem.concat(a, []const u8, &.{ command, &.{ "--operation", operation } });
+}
+
+pub fn bundleArguments(
+    a: std.mem.Allocator,
+    io: std.Io,
+    args: []const []const u8,
+) ![]const []const u8 {
+    const command = (try invocation(a, args)).command;
+    if (command.len < 3 or !same(command[0], "transfer") or !same(command[1], "import"))
+        return args;
+    for (command[3..]) |arg| if (same(arg, "--sha256")) return args;
+    const digest = wire.hex(try fileDigest(io, command[2]));
+    return std.mem.concat(a, []const u8, &.{ args, &.{ "--sha256", try a.dupe(u8, &digest) } });
+}
+
+pub fn fileDigest(io: std.Io, path: []const u8) !t.Digest {
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buffer: [64 * 1024]u8 = undefined;
+    const size = (try file.stat(io)).size;
+    var length: u64 = 0;
+    while (length < size) {
+        const count = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => return error.BundleChanged,
+            else => return err,
+        };
+        if (count == 0) return error.BundleChanged;
+        length = try std.math.add(u64, length, count);
+        if (length > size) return error.BundleChanged;
+        hasher.update(buffer[0..count]);
+    }
+    return hasher.finalResult();
 }
 
 fn snapshotExport(command: []const []const u8) bool {
@@ -108,7 +150,7 @@ pub fn request(
     if (values.len == 2 and std.mem.eql(u8, values[0], "request")) {
         var json = try native.json.parse(scratch, values[1], .{});
         defer json.deinit();
-        const decoded = try native.values.fromJson(control.Request, scratch, json.value);
+        const decoded = try wire.fromJson(control.Request, scratch, json.value);
         return control.encode(a, decoded);
     }
     const command = try parse(scratch, values);
@@ -139,12 +181,12 @@ fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (same(name, "ask")) return ask(args[1..]);
     if (same(name, "messages")) return messagePage(args[1..]);
     if (same(name, "task") and args.len == 3 and same(args[1], "show"))
-        return .{ .task_show = try hex(t.Id, args[2]) };
+        return .{ .task_show = try wire.parse(t.Id, args[2]) };
     if (same(name, "proposal")) return proposal(args[1..]);
     if (same(name, "experiment")) return experiment(a, args[1..]);
     if (same(name, "question") and args.len == 5 and same(args[1], "answer"))
-        return directive(try hex(t.Id, args[2]), .{ .answer = .{
-            .question = try hex(t.Digest, args[3]),
+        return directive(try wire.parse(t.Id, args[2]), .{ .answer = .{
+            .question = try wire.parse(t.Digest, args[3]),
             .choice = .{ .bytes = args[4] },
         } });
     if (same(name, "method")) return method(a, args[1..]);
@@ -164,30 +206,29 @@ fn transfer(args: []const []const u8) !Command {
     }
     if (!same(args[0], "import")) return error.InvalidArguments;
     if (!std.fs.path.isAbsolute(args[1])) return error.RelativeTransferPath;
-    var importing: @import("continuity_control.zig").Import = .{ .path = .{ .bytes = args[1] } };
+    var bytes_max: ?u64 = null;
+    var digest: ?t.Digest = null;
     var i: usize = 2;
-    while (i < args.len) : (i += 1) {
-        if (same(args[i], "--bytes-max") and importing.bytes_max == null) {
-            i += 1;
-            if (i == args.len) return error.InvalidArguments;
-            importing.bytes_max = try number(u64, args[i]);
+    while (i + 1 < args.len) : (i += 2) {
+        if (same(args[i], "--bytes-max") and bytes_max == null) {
+            bytes_max = try number(u64, args[i + 1]);
+        } else if (same(args[i], "--sha256") and digest == null) {
+            digest = try wire.parse(t.Digest, args[i + 1]);
         } else return error.InvalidArguments;
     }
-    return .{ .transfer_import = importing };
+    if (i != args.len) return error.InvalidArguments;
+    return .{ .transfer_import = .{
+        .path = .{ .bytes = args[1] },
+        .digest = digest orelse return error.MissingBundleDigest,
+        .bytes_max = bytes_max,
+    } };
 }
 
 fn proposal(args: []const []const u8) !Command {
     if (args.len != 2) return error.InvalidArguments;
-    var parts = std.mem.splitScalar(u8, args[1], ':');
-    const request_id = parts.next() orelse return error.InvalidIdentity;
-    const attempt = parts.next() orelse return error.InvalidIdentity;
-    const ordinal = parts.next() orelse return error.InvalidIdentity;
-    if (parts.next() != null) return error.InvalidIdentity;
-    const value: @import("commands.zig").ProposalSelector = .{ .identity = .{
-        .request = try hex(t.Digest, request_id),
-        .attempt = try number(u32, attempt),
-        .ordinal = try number(u32, ordinal),
-    } };
+    const value: commands.ProposalSelector = .{
+        .identity = try wire.parse(commands.ProposalIdentity, args[1]),
+    };
     if (same(args[0], "show")) return .{ .proposal_show = value };
     if (same(args[0], "confirm")) return .{ .proposal_confirm = value };
     return error.InvalidArguments;
@@ -195,12 +236,12 @@ fn proposal(args: []const []const u8) !Command {
 
 fn experiment(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (args.len == 2 and same(args[0], "show"))
-        return .{ .experiment_show = try hex(t.Digest, args[1]) };
+        return .{ .experiment_show = try wire.parse(t.Digest, args[1]) };
     if (args.len < 4 or args.len > 5 or !same(args[0], "run")) return error.InvalidArguments;
     const live = args.len == 5;
     if (live and !same(args[4], "--live")) return error.InvalidArguments;
     return .{ .experiment_run = .{
-        .campaign = try hex(t.Digest, args[1]),
+        .campaign = try wire.parse(t.Digest, args[1]),
         .attempt = try number(u32, args[2]),
         .plan = try decode(@import("../app/experiment_contract.zig").Plan, a, args[3]),
         .live_model = live,
@@ -239,23 +280,15 @@ fn same(left: []const u8, right: []const u8) bool {
     return std.mem.eql(u8, left, right);
 }
 
-pub fn hex(comptime T: type, bytes: []const u8) !T {
-    if (bytes.len != @sizeOf(T) * 2) return error.InvalidIdentity;
-    var value: T = undefined;
-    _ = std.fmt.hexToBytes(&value, bytes) catch return error.InvalidIdentity;
-    return value;
-}
-
 fn number(comptime T: type, value: []const u8) !T {
-    return std.fmt.parseInt(T, value, 10) catch error.InvalidNumber;
+    return wire.number(T, value);
 }
 
 fn decode(comptime T: type, a: std.mem.Allocator, bytes: []const u8) !T {
-    const parsed = try native.json.parse(a, bytes, .{});
-    return native.values.fromJson(T, a, parsed.value);
+    return wire.argument(T, a, bytes);
 }
 
-fn directive(target: t.Id, body: t.DirectiveBody) Command {
+fn directive(target: t.Id, body: commands.CallerDirective) Command {
     return .{ .directive = .{ .target = target, .body = body } };
 }
 
@@ -268,7 +301,7 @@ fn status(args: []const []const u8) !Command {
         if (i + 1 == args.len) return error.InvalidArguments;
         if (same(args[i], "--after") and !seen_after) {
             seen_after = true;
-            value.after = try hex(t.Id, args[i + 1]);
+            value.after = try wire.parse(t.Id, args[i + 1]);
         } else if (same(args[i], "--limit") and !seen_limit) {
             seen_limit = true;
             value.limit = try number(u32, args[i + 1]);
@@ -284,10 +317,11 @@ fn monitor(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (same(args[0], "amend")) return amend(a, args[1..]);
     if (same(args[0], "directives")) return directivePage(args[1..]);
     if (args.len != 2) return error.InvalidArguments;
-    const target = try hex(t.Id, args[1]);
+    const target = try wire.parse(t.Id, args[1]);
     if (same(args[0], "show")) return .{ .monitor_show = target };
     inline for (.{ "pause", "resume", "cancel", "check" }) |name| {
-        if (same(args[0], name)) return directive(target, @unionInit(t.DirectiveBody, name, {}));
+        if (same(args[0], name))
+            return directive(target, @unionInit(commands.CallerDirective, name, {}));
     }
     return error.InvalidArguments;
 }
@@ -303,7 +337,8 @@ fn messagePage(args: []const []const u8) !Command {
 fn page(comptime Page: type, args: []const []const u8) !Page {
     if (args.len == 0) return error.InvalidArguments;
     const cursor = try paging(args[1..]);
-    return .{ .target = try hex(t.Id, args[0]), .after = cursor.after, .limit = cursor.limit };
+    const target = try wire.parse(t.Id, args[0]);
+    return .{ .target = target, .after = cursor.after, .limit = cursor.limit };
 }
 
 const Cursor = struct { after: ?u64 = null, limit: u32 = 16 };
@@ -350,7 +385,7 @@ fn ask(args: []const []const u8) !Command {
     var target: ?t.Id = null;
     if (args.len == 3) {
         if (!same(args[1], "--target")) return error.InvalidArguments;
-        target = try hex(t.Id, args[2]);
+        target = try wire.parse(t.Id, args[2]);
     }
     return .{ .ask = .{ .text = .{ .bytes = args[0] }, .target = target } };
 }
@@ -383,18 +418,18 @@ fn amend(a: std.mem.Allocator, args: []const []const u8) !Command {
         else
             return error.InvalidArguments;
     }
-    return directive(try hex(t.Id, args[0]), .{ .amend = value });
+    return directive(try wire.parse(t.Id, args[0]), .{ .amend = value });
 }
 
 fn method(a: std.mem.Allocator, args: []const []const u8) !Command {
     if (args.len == 2 and same(args[0], "show"))
-        return .{ .method_show = try hex(t.Id, args[1]) };
+        return .{ .method_show = try wire.parse(t.Id, args[1]) };
     if (args.len == 3 and same(args[0], "revert"))
-        return directive(try hex(t.Id, args[1]), .{ .revert = .{
+        return directive(try wire.parse(t.Id, args[1]), .{ .revert = .{
             .expected_revision = try number(u64, args[2]),
         } });
     if (args.len == 4 and same(args[0], "adopt"))
-        return directive(try hex(t.Id, args[1]), .{ .adopt = .{
+        return directive(try wire.parse(t.Id, args[1]), .{ .adopt = .{
             .expected_revision = try number(u64, args[2]),
             .method = try decode(t.Method, a, args[3]),
         } });

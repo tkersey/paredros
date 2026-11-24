@@ -6,16 +6,83 @@ const admission = @import("admission.zig");
 const dialogue = @import("dialogue.zig");
 const ingress_policy = @import("ingress_policy.zig");
 const continuity = @import("continuity.zig");
+const wire = @import("wire.zig");
 
 pub const TurnRequest = struct {
     text: t.Text,
     target: ?t.Id = null,
-    genesis_template: ?t.Specification = null,
-    anchor_template: bool = false,
     refusal: ?t.Name = null,
+    genesis_template: ?t.Specification = null,
+
+    pub const Caller = struct { text: t.Text, target: ?t.Id, refusal: ?t.Name };
+
+    pub fn caller(self: TurnRequest) Caller {
+        return .{ .text = self.text, .target = self.target, .refusal = self.refusal };
+    }
+};
+pub const MonitorRequest = struct {
+    wording: t.Text,
+    interval_ms: ?u64,
+
+    pub fn specification(self: MonitorRequest, template: t.Specification) t.Specification {
+        var value = template;
+        value.wording = self.wording;
+        value.interval_ms = self.interval_ms orelse template.interval_ms;
+        return value;
+    }
 };
 pub const Confirmation = struct { turn: t.Reference, ordinal: u32 };
-pub const ProposalIdentity = struct { request: t.Digest, attempt: u32, ordinal: u32 };
+pub const ProposalIdentity = struct {
+    request: t.Digest,
+    attempt: u32,
+    ordinal: u32,
+
+    pub fn formatText(self: ProposalIdentity, a: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(a, "{s}:{d}:{d}", .{
+            &wire.hex(self.request),
+            self.attempt,
+            self.ordinal,
+        });
+    }
+
+    pub fn parseText(bytes: []const u8) error{InvalidIdentity}!ProposalIdentity {
+        var parts = std.mem.splitScalar(u8, bytes, ':');
+        const request = parts.next() orelse return error.InvalidIdentity;
+        const attempt = parts.next() orelse return error.InvalidIdentity;
+        const ordinal = parts.next() orelse return error.InvalidIdentity;
+        if (parts.next() != null) return error.InvalidIdentity;
+        return .{
+            .request = try wire.parse(t.Digest, request),
+            .attempt = std.fmt.parseInt(u32, attempt, 10) catch return error.InvalidIdentity,
+            .ordinal = std.fmt.parseInt(u32, ordinal, 10) catch return error.InvalidIdentity,
+        };
+    }
+};
+pub const CallerDirective = union(enum) {
+    pause: void,
+    @"resume": void,
+    cancel: void,
+    check: void,
+    amend: t.Amendment,
+    answer: @FieldType(t.DirectiveBody, "answer"),
+    adopt: @FieldType(t.DirectiveBody, "adopt"),
+    revert: @FieldType(t.DirectiveBody, "revert"),
+
+    pub const Wire = t.DirectiveBody;
+
+    pub fn narrow(body: t.DirectiveBody) error{SystemDirective}!CallerDirective {
+        return switch (body) {
+            .transfer => error.SystemDirective,
+            inline else => |value, tag| @unionInit(CallerDirective, @tagName(tag), value),
+        };
+    }
+
+    pub fn widen(self: CallerDirective) t.DirectiveBody {
+        return switch (self) {
+            inline else => |value, tag| @unionInit(t.DirectiveBody, @tagName(tag), value),
+        };
+    }
+};
 pub const ProposalSelector = union(enum) { identity: ProposalIdentity, retained: Confirmation };
 
 pub fn resolveProposal(index: *const idx.Index, selector: ProposalSelector) !Confirmation {
@@ -70,7 +137,8 @@ pub fn monitor(
     a: std.mem.Allocator,
     operation: []const u8,
     origin: t.Origin,
-    specification: t.Specification,
+    request: MonitorRequest,
+    template: t.Specification,
 ) !t.Id {
     try authenticate(driver, origin);
     return admitGenesis(
@@ -78,8 +146,8 @@ pub fn monitor(
         a,
         operation,
         origin,
-        specification,
-        try admission.stableDigest(a, specification),
+        request.specification(template),
+        try admission.stableDigest(a, request),
         true,
     );
 }
@@ -114,6 +182,7 @@ fn admitGenesis(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
+            try admission.interval(self.specification.interval_ms);
             try ingress_policy.validate(self.index);
             const envelope = genesisEnvelope(requested);
             const clock_ms = try self.driver.clock.now(self.driver.clock.context);
@@ -189,9 +258,9 @@ pub fn turn(
         .origin = origin,
         .digest = try admission.stableDigest(
             scratch,
-            @as(struct { operation: c.Utf8, request: TurnRequest }, .{
+            @as(struct { operation: c.Utf8, request: TurnRequest.Caller }, .{
                 .operation = .{ .bytes = operation },
-                .request = requested_turn,
+                .request = requested_turn.caller(),
             }),
         ),
     };
@@ -207,9 +276,9 @@ pub fn turn(
             var index = try self.driver.rebuild(allocator);
             defer index.deinit();
             var frozen = self.request;
-            if (frozen.anchor_template) if (frozen.genesis_template) |*template| {
+            if (frozen.genesis_template) |*template| {
                 template.anchor_ms = try self.driver.clock.now(self.driver.clock.context);
-            };
+            }
             return turnInput(allocator, &index, self.driver.model, requested, frozen);
         }
     };

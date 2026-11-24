@@ -14,7 +14,7 @@ pub const mappedOperation = import_view.mappedOperation;
 pub const Source = struct {
     namespace: t.Digest,
     build: t.Digest,
-    image: t.Digest,
+    image: @import("compatibility.zig").ImageDigest,
     runtime: t.Digest,
     contracts: t.Digest,
     clock_ms: i64,

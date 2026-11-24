@@ -3,6 +3,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const idx = @import("index.zig");
 const cli = @import("cli.zig");
+const wire = @import("wire.zig");
 
 pub const Purpose = std.meta.Tag(@FieldType(t.Notification, "purpose"));
 pub const Choice = struct {
@@ -13,7 +14,7 @@ pub const Choice = struct {
 pub const Message = struct {
     ordinal: u64,
     sequence: u64,
-    task: c.Text(32),
+    task: t.Id,
     purpose: Purpose,
     specification_revision: u64,
     prior: ?t.Frontier,
@@ -100,8 +101,8 @@ fn command(
     value: t.Name,
 ) !?c.Text(4096) {
     const path = config_path orelse return null;
-    const target = std.fmt.bytesToHex(obligation, .lower);
-    const identity = std.fmt.bytesToHex(question, .lower);
+    const target = wire.hex(obligation);
+    const identity = wire.hex(question);
     const line = try cli.commandLine(a, path, &.{
         "question", "answer", &target, &identity, value.bytes,
     });
@@ -124,7 +125,7 @@ fn message(
     var result: Message = .{
         .ordinal = ordinal,
         .sequence = selected.sequence,
-        .task = .{ .bytes = try a.dupe(u8, &std.fmt.bytesToHex(record.task, .lower)) },
+        .task = record.task,
         .purpose = value.purpose,
         .specification_revision = value.specification_revision,
         .prior = null,

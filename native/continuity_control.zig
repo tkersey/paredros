@@ -8,11 +8,31 @@ const configuration = @import("configuration.zig");
 const continuity = @import("continuity.zig");
 const transfer = @import("transfer.zig");
 const transfer_marker = @import("transfer_marker.zig");
+const compatibility = @import("compatibility.zig");
+const wire = @import("wire.zig");
 
 pub const Environment = struct { io: std.Io, source: transfer.Source };
+
+pub fn sourceEnvironment(
+    io: std.Io,
+    namespace: t.Digest,
+    admitted: anytype,
+    image: []const u8,
+    runtime: t.Digest,
+) !Environment {
+    return .{ .io = io, .source = .{
+        .namespace = namespace,
+        .build = try wire.parse(t.Digest, admitted.manifest_id),
+        .image = compatibility.ImageDigest.of(image),
+        .runtime = runtime,
+        .contracts = try wire.parse(t.Digest, admitted.protocol_schema_sha256),
+        .clock_ms = 0,
+    } };
+}
 pub const Export = struct { name: t.Name, snapshot: bool = false };
 pub const Import = struct {
     path: c.Text(4096),
+    digest: t.Digest,
     bytes_max: ?u64 = null,
 };
 pub const ExportProgress = struct {
@@ -39,12 +59,13 @@ pub fn exportBundle(
     });
     var index = try driver.rebuild(a);
     defer index.deinit();
-    if (transfer.importPending(&index)) return error.ContinuityImportPending;
     const selected = try a.dupe(u8, exportOperation(&index, operation, request.snapshot, stable));
-    if (index.operations.contains(selected))
-        try transfer.validateExportDestination(environment.io, directory, request.name.bytes)
-    else
+    if (index.operations.contains(selected)) {
+        try transfer.validateExportDestination(environment.io, directory, request.name.bytes);
+    } else {
+        if (transfer.importPending(&index)) return error.ContinuityImportPending;
         try transfer.validateExportName(environment.io, directory, request.name.bytes);
+    }
     var progress: ExportProgress = .{
         .phase = .finalizing,
         .operation = .{ .bytes = selected },
@@ -203,62 +224,49 @@ pub fn importBundle(
         .origin = origin,
         .digest = try admission.stableDigest(a, request),
     };
-    const maximum: ?usize = if (request.bytes_max) |value|
-        std.math.cast(usize, value) orelse return error.Capacity
-    else
-        null;
-    const bytes = try native.configuration.readFile(
-        a,
-        environment.io,
-        request.path.bytes,
-        maximum,
-        true,
-    );
-    defer a.free(bytes);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    if (index.transferred()) return error.TransferredNamespace;
-    const identity = continuity.hash(bytes);
-    if (index.operations.get(operation)) |position| {
-        const record = index.records[position];
-        if (record.input != .continuity_cut or
-            !std.meta.eql(record.input.continuity_cut.bundle_digest, identity))
-            return error.OperationConflict;
+    const view = index.continuity_import;
+    if (index.operations.contains(operation)) {
+        _ = try admission.admit(driver.service, a, admitted_request, Frozen{});
+        try storedBindings(a, config, &index);
+    } else if (view != null and std.meta.eql(view.?.digest, request.digest)) {
+        try storedBindings(a, config, &index);
+    } else {
+        if (index.transferred()) return error.TransferredNamespace;
+        try beginImport(driver, a, config, environment.io, &index, admitted_request, request);
     }
-    const admitted = if (index.continuity_import) |view|
-        std.meta.eql(view.digest, identity)
-    else
-        false;
-    if (admitted)
-        try resumeImport(driver, a, config, &index, admitted_request, bytes)
-    else
-        try beginImport(driver, a, config, &index, admitted_request, bytes);
     return transfer.importProgress(driver, a);
 }
 
-fn resumeImport(
-    driver: anytype,
+fn storedBindings(
     a: std.mem.Allocator,
     config: configuration.Config,
     index: *const idx.Index,
-    request: admission.Request,
-    bytes: []const u8,
 ) !void {
-    var bundle = try c.decodeBorrowed(transfer.Bundle, a, bytes);
+    const view = index.continuity_import orelse return error.MissingContinuityManifest;
+    const stored = index.records[view.position].input.continuity_cut.bytes.bytes;
+    var bundle = try c.decodeBorrowed(transfer.Bundle, a, stored);
     defer bundle.deinit();
     try transfer.validateBindings(a, bundle.value, configuration.bindings(config));
-    if (index.operations.contains(request.operation))
-        _ = try admission.admit(driver.service, a, request, Frozen{});
 }
 
 fn beginImport(
     driver: anytype,
     a: std.mem.Allocator,
     config: configuration.Config,
+    io: std.Io,
     index: *const idx.Index,
     request: admission.Request,
-    bytes: []const u8,
+    selected: Import,
 ) !void {
+    const maximum: ?usize = if (selected.bytes_max) |value|
+        std.math.cast(usize, value) orelse return error.Capacity
+    else
+        null;
+    const bytes = try native.configuration.readFile(a, io, selected.path.bytes, maximum, true);
+    defer a.free(bytes);
+    if (!std.meta.eql(continuity.hash(bytes), selected.digest)) return error.BundleDigestMismatch;
     var bundle = try c.decodeOwned(transfer.Bundle, a, bytes);
     defer bundle.deinit();
     const namespace = driver.service.namespace.identity;

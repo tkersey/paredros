@@ -131,7 +131,7 @@ fn productLaunch(f: *Fixture) !?*configuration.OwnedLaunch {
         return error.InvalidMeasurementNamespace;
     return configuration.prepare(std.testing.allocator, std.testing.io, config.value, .{
         .runtime_identity = runtime,
-        .image_identity = f.application.?.image_identity,
+        .program_identity = f.application.?.image_identity,
     });
 }
 

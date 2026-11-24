@@ -6,8 +6,8 @@ const configuration = @import("configuration.zig");
 const compatibility = @import("compatibility.zig");
 const control = @import("control.zig");
 const cli = @import("cli.zig");
+const wire = @import("wire.zig");
 const socket = @import("control_socket.zig");
-const continuity = @import("continuity.zig");
 const continuity_control = @import("continuity_control.zig");
 const Driver = @import("driver.zig").Driver(t);
 const Daemon = @import("daemon.zig").Daemon(t);
@@ -54,7 +54,16 @@ pub fn run(init: std.process.Init, assets: native.discovery.Assets) !u8 {
         return describeBuild(init, assets);
     }
     const path = args.config orelse return error.MissingConfigPath;
-    var config = try configuration.load(init.gpa, init.io, path, socket.currentUid());
+    var config = configuration.load(init.gpa, init.io, path, socket.currentUid()) catch |err| {
+        if (err == error.IntervalMsExceedsMaximum) try std.Io.File.stderr().writeStreamingAll(
+            init.io,
+            std.fmt.comptimePrint(
+                "paredros: configuration field interval_ms exceeds its maximum of {d} ms\n",
+                .{configuration.interval_ms_max},
+            ),
+        );
+        return err;
+    };
     defer config.deinit();
     if (same(command, "serve")) {
         if (args.command.len != 1) return error.InvalidArguments;
@@ -93,7 +102,11 @@ fn describeBuild(init: std.process.Init, assets: native.discovery.Assets) !u8 {
 fn client(init: std.process.Init, config: configuration.Config, supplied: []const []const u8) !u8 {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
-    const args = try cli.callerArguments(arena.allocator(), init.io, supplied);
+    const args = try cli.bundleArguments(
+        arena.allocator(),
+        init.io,
+        try cli.callerArguments(arena.allocator(), init.io, supplied),
+    );
     const command = (try cli.invocation(arena.allocator(), args)).command;
     const request = try clientRequest(init, config, supplied, args, command);
     defer if (request) |bytes| init.gpa.free(bytes);
@@ -219,7 +232,7 @@ fn awaitTurn(init: std.process.Init, connection: *socket.Client, admission: []co
     const request = try control.encode(init.gpa, .{
         .version = 1,
         .operation = null,
-        .command = .{ .task_show = try cli.hex(t.Id, task) },
+        .command = .{ .task_show = try wire.parse(t.Id, task) },
     });
     defer init.gpa.free(request);
     const started = std.Io.Clock.awake.now(init.io).toMilliseconds();
@@ -227,6 +240,7 @@ fn awaitTurn(init: std.process.Init, connection: *socket.Client, admission: []co
         const response = try connection.request(request);
         defer init.gpa.free(response);
         if (try turnCode(init.gpa, response)) |code| {
+            if (try responseCode(init.gpa, response) != 0) try output(init.io, admission);
             try output(init.io, response);
             return code;
         }
@@ -282,7 +296,7 @@ fn audit(
     config: configuration.Config,
     registry: native.Registry,
     admitted: *const native.discovery.Application,
-    image: t.Digest,
+    image: compatibility.ImageDigest,
     runtime: t.Digest,
     selected_profile: ?native.tasks.Profile,
 ) !compatibility.OwnedReport {
@@ -317,7 +331,7 @@ fn preflight(
     config: configuration.Config,
     handlers: native.Registry,
     admitted: *const native.discovery.Application,
-    image: t.Digest,
+    image: compatibility.ImageDigest,
     runtime: t.Digest,
     profile: ?native.tasks.Profile,
 ) !void {
@@ -341,7 +355,7 @@ fn checkNamespace(
         config,
         handlers,
         &admitted,
-        continuity.hash(assets.image),
+        compatibility.ImageDigest.of(assets.image),
         (try executableIdentity(init.io)).sha256,
         null,
     );
@@ -465,12 +479,12 @@ fn serve(
     defer admitted.deinit();
     const existing = try nonempty(io, config.namespace_path);
     const runtime = (try executableIdentity(io)).sha256;
-    const image = continuity.hash(assets.image);
+    const image = compatibility.ImageDigest.of(assets.image);
     if (existing and config.mode == .live)
         try preflight(init, config, handlers, &admitted, image, runtime, null);
     const launch = try configuration.prepare(a, io, config, .{
         .runtime_identity = runtime,
-        .image_identity = admitted.image_identity,
+        .program_identity = admitted.image_identity,
     });
     defer launch.deinit();
     if (existing) try preflight(init, config, handlers, &admitted, image, runtime, launch.profile);
@@ -497,7 +511,13 @@ fn serve(
     var runtime_context: Runtime = .{
         .config = &launch.config,
         .config_path = config_path,
-        .continuity = try continuityEnvironment(io, &namespace, &admitted, runtime),
+        .continuity = try continuity_control.sourceEnvironment(
+            io,
+            namespace.identity,
+            &admitted,
+            assets.image,
+            runtime,
+        ),
     };
     var daemon = try Daemon.init(a, &driver, &server, .{
         .context = &runtime_context,
@@ -520,22 +540,6 @@ fn daemonDriver(service: *native.tasks.Service(t), io: *std.Io, launch: anytype)
         .model = if (launch.model_binding) |binding| binding.value else null,
         .bindings = configuration.bindings(launch.config),
     };
-}
-
-fn continuityEnvironment(
-    io: std.Io,
-    namespace: *const native.Namespace,
-    admitted: *const native.discovery.Application,
-    runtime: t.Digest,
-) !continuity_control.Environment {
-    return .{ .io = io, .source = .{
-        .namespace = namespace.identity,
-        .build = try cli.hex(t.Digest, admitted.manifest_id),
-        .image = admitted.image_identity,
-        .runtime = runtime,
-        .contracts = try cli.hex(t.Digest, admitted.protocol_schema_sha256),
-        .clock_ms = 0,
-    } };
 }
 
 fn acceptingControls() bool {

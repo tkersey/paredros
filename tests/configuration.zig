@@ -6,7 +6,7 @@ const external = @import("../native/model_external.zig");
 const a = std.testing.allocator;
 const build: configuration.Build = .{
     .runtime_identity = @splat(12),
-    .image_identity = @splat(34),
+    .program_identity = @splat(34),
 };
 
 fn fixture() configuration.Config {
@@ -90,7 +90,10 @@ test "configuration closed schema validates uid version and bindings" {
     changed.interval_ms = configuration.interval_ms_max + 1;
     const unbounded = try encoded(changed);
     defer a.free(unbounded);
-    try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, unbounded, 42));
+    try std.testing.expectError(
+        error.IntervalMsExceedsMaximum,
+        configuration.parse(a, unbounded, 42),
+    );
 }
 
 fn withModel() configuration.Config {
@@ -117,7 +120,7 @@ test "configuration offline skips all credentials and helper execution" {
     try std.testing.expect(launch.github_token == null);
     try std.testing.expect(!launch.profile.authority.inference);
     try expectLocalGrants(launch);
-    const identity = try launch.profile.resourceIdentity(a, build.image_identity);
+    const identity = try launch.profile.resourceIdentity(a, build.program_identity);
     for (launch.profile.authority.grants) |grant| {
         try std.testing.expectEqualSlices(u8, &identity, &grant.resource_identity);
         var matching = false;
@@ -220,8 +223,8 @@ test "configuration private files feed only selected live roles and stay out of 
         "fake-private-token-two",
         second.environment.github.?.http.token,
     );
-    const first_identity = try first.profile.resourceIdentity(a, build.image_identity);
-    const second_identity = try second.profile.resourceIdentity(a, build.image_identity);
+    const first_identity = try first.profile.resourceIdentity(a, build.program_identity);
+    const second_identity = try second.profile.resourceIdentity(a, build.program_identity);
     try std.testing.expectEqualSlices(u8, &first_identity, &second_identity);
     try privateFile(temporary.dir, "credential", "invalid\ntoken");
     try std.testing.expectError(
@@ -265,7 +268,7 @@ test "configuration offline profile permits authenticated local owner reads" {
     try owner.init();
     const launch = try configuration.prepare(a, std.testing.io, fixture(), .{
         .runtime_identity = owner.profile.runtime_identity,
-        .image_identity = owner.application.?.image_identity,
+        .program_identity = owner.application.?.image_identity,
     });
     defer launch.deinit();
     try owner.close();

@@ -10,6 +10,19 @@ pub const Request = struct {
     digest: t.Digest,
 };
 
+pub const interval_ms_max: u64 = 366 * 24 * 60 * 60 * 1000;
+
+pub fn interval(interval_ms: u64) !void {
+    if (interval_ms == 0) return error.InvalidInterval;
+    if (interval_ms > interval_ms_max) return error.IntervalTooLong;
+}
+
+pub fn recorded(service: anytype, a: std.mem.Allocator, operation: []const u8) !bool {
+    var receipt = (try service.operationLookup(a, operation)) orelse return false;
+    receipt.deinit();
+    return true;
+}
+
 pub fn stableDigest(a: std.mem.Allocator, value: anytype) !t.Digest {
     const bytes = try c.encodeOwned(@TypeOf(value), a, value);
     defer a.free(bytes);

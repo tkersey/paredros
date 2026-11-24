@@ -4,6 +4,8 @@ const t = @import("application_types");
 const contracts = @import("contracts.zig");
 const transfer = @import("../native/transfer.zig");
 const continuity = @import("../native/continuity.zig");
+const compatibility = @import("../native/compatibility.zig");
+const cli = @import("../native/cli.zig");
 const configuration = @import("../native/configuration.zig");
 const app = @import("../native/application.zig");
 const Driver = @import("../native/driver.zig").Driver(app.Types);
@@ -45,7 +47,7 @@ fn source(f: anytype) transfer.Source {
     return .{
         .namespace = f.service.?.namespace.identity,
         .build = @splat(2),
-        .image = f.application.?.image_identity,
+        .image = compatibility.ImageDigest.of(f.assets.image),
         .runtime = f.profile.runtime_identity,
         .contracts = @splat(3),
         .clock_ms = 500,
@@ -705,7 +707,7 @@ fn controlImport(f: *Fixture, driver: *Driver, file: []const u8) !t.Id {
             environment,
             "file-import",
             origin,
-            .{ .path = .{ .bytes = file } },
+            .{ .path = .{ .bytes = file }, .digest = try cli.fileDigest(std.testing.io, file) },
         );
         defer progress.deinit(a);
         if (manifest) |known| try std.testing.expectEqualDeep(known, progress.manifest);
@@ -771,7 +773,7 @@ test "native continuity import repeats after a configured route rename" {
         .{ .io = std.testing.io, .source = source(&to) },
         "file-import",
         origin,
-        .{ .path = .{ .bytes = file } },
+        .{ .path = .{ .bytes = file }, .digest = try cli.fileDigest(std.testing.io, file) },
     );
     defer progress.deinit(a);
     try std.testing.expectEqual(.materialized, progress.phase);
@@ -793,7 +795,7 @@ test "native continuity import refuses a relative path sent to the daemon" {
         .{ .io = std.testing.io, .source = source(&f) },
         "relative-import",
         origin,
-        .{ .path = .{ .bytes = "handoff.paredros" } },
+        .{ .path = .{ .bytes = "handoff.paredros" }, .digest = @splat(0) },
     ));
 }
 
@@ -868,6 +870,29 @@ test "native continuity export finishes without a genesis this build can never r
     defer bundle.deinit();
     try std.testing.expectEqual(0, bundle.value.lineages.items.len);
     try std.testing.expectEqual(null, index.record(stranded).?.result);
+}
+
+test "native continuity export source names the stored image digest, not the program identity" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    const task = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    const environment = try continuity_control.sourceEnvironment(
+        std.testing.io,
+        f.service.?.namespace.identity,
+        &f.application.?,
+        f.assets.image,
+        f.profile.runtime_identity,
+    );
+    var saved = try f.service.?.task(a, task);
+    defer saved.deinit();
+    try std.testing.expect(environment.source.image.names(saved.value.image));
+    try std.testing.expect(!std.meta.eql(
+        environment.source.image.sha256,
+        f.application.?.image_identity,
+    ));
 }
 
 test "native continuity export waits for an admitted genesis that has not run" {
@@ -1271,7 +1296,7 @@ fn fileImport(
         .{ .io = std.testing.io, .source = source(f) },
         operation,
         origin,
-        .{ .path = .{ .bytes = file } },
+        .{ .path = .{ .bytes = file }, .digest = try cli.fileDigest(std.testing.io, file) },
     );
 }
 
@@ -1331,6 +1356,46 @@ test "native continuity import operation conflicts when its file changes" {
         if (record.input == .continuity_cut) cuts += 1;
     }
     try std.testing.expectEqual(1, cuts);
+}
+
+test "native continuity import replays from stored state without reading its file" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const directory = try backup.path();
+    var bundle = try importFixture(&from, &to, backup.temporary.dir);
+    defer bundle.deinit();
+    const a = to.arena.allocator();
+    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
+    var clock: u8 = 0;
+    var destination: Driver = .{
+        .service = &to.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try destination.attach(a);
+    defer destination.detach();
+    const digest = try cli.fileDigest(std.testing.io, file);
+    var progress = try fileImport(&to, &destination, config(), "stored-import", file);
+    const manifest = progress.manifest;
+    progress.deinit(a);
+    try completeAdmissions(&to, &destination);
+    try backup.temporary.dir.deleteFile(std.testing.io, "handoff.paredros");
+    for ([_][]const u8{ "stored-import", "stored-retry" }) |operation| {
+        var replayed = try continuity_control.importBundle(
+            &destination,
+            a,
+            config(),
+            .{ .io = std.testing.io, .source = source(&to) },
+            operation,
+            origin,
+            .{ .path = .{ .bytes = file }, .digest = digest },
+        );
+        defer replayed.deinit(a);
+        try std.testing.expectEqualDeep(manifest, replayed.manifest);
+    }
 }
 
 test "native continuity import validates bindings after manifest admission" {
@@ -1445,11 +1510,18 @@ fn monitoredSource(f: *Fixture, clock: *u8) !Monitored {
     try original.attach(a);
     defer original.detach();
     const spec = contracts.specification();
-    const target = try commands.monitor(&original, a, "monitor-retry", origin, spec);
+    const target = try commands.monitor(
+        &original,
+        a,
+        "monitor-retry",
+        origin,
+        monitorRequest(spec),
+        spec,
+    );
     try finish(f, target);
     try std.testing.expectEqualDeep(
         target,
-        try commands.monitor(&original, a, "monitor-retry", origin, spec),
+        try commands.monitor(&original, a, "monitor-retry", origin, monitorRequest(spec), spec),
     );
     var index = try original.rebuild(a);
     defer index.deinit();
@@ -1460,10 +1532,15 @@ fn monitoredSource(f: *Fixture, clock: *u8) !Monitored {
     };
 }
 
+fn monitorRequest(spec: t.Specification) commands.MonitorRequest {
+    return .{ .wording = spec.wording, .interval_ms = spec.interval_ms };
+}
+
 fn expectOneLineage(driver: *Driver, a: std.mem.Allocator, imported: t.Id) !void {
+    const spec = contracts.specification();
     try std.testing.expectEqualDeep(
         imported,
-        try commands.monitor(driver, a, "monitor-retry", origin, contracts.specification()),
+        try commands.monitor(driver, a, "monitor-retry", origin, monitorRequest(spec), spec),
     );
     var index = try driver.rebuild(a);
     defer index.deinit();
@@ -1495,9 +1572,10 @@ test "native continuity monitor add retried after import returns the imported ob
     try expectOneLineage(&destination, a, imported);
     try std.testing.expect(try to.service.?.operationLookup(a, "monitor-retry") == null);
     _ = try destination.directive(a, "monitor-retry", origin, imported, .{ .pause = {} });
+    const spec = contracts.specification();
     try std.testing.expectError(
         error.OperationConflict,
-        commands.monitor(&destination, a, "monitor-retry", origin, contracts.specification()),
+        commands.monitor(&destination, a, "monitor-retry", origin, monitorRequest(spec), spec),
     );
 }
 
@@ -1549,7 +1627,7 @@ fn controlTask(a: std.mem.Allocator, driver: *Driver, operation: []const u8) !t.
     const reply = (try controlMonitor(a, driver, operation, "watch")).object;
     try std.testing.expectEqualStrings("admitted", reply.get("status").?.string);
     const task = reply.get("data").?.object.get("task").?.string;
-    return @import("../native/cli.zig").hex(t.Id, task);
+    return @import("../native/wire.zig").parse(t.Id, task);
 }
 
 fn controlRefused(
