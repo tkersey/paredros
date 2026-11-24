@@ -2,15 +2,15 @@ const group = (count, ...filters) => ({count, filters});
 
 const suites = {
   authority: {
-    driver: group(17, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
+    driver: group(18, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
     proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
       'control proposal consumer confirms each proposal once'),
-    controls: group(82, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control reads messages', 'control protocol freezes',
+    controls: group(89, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control reads messages', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'tests.control_socket.', 'tests.index.',
       'tests.outbound.', 'tests.messages.', 'tests.delivery_fact.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
   providers: 30,
-  'transitions-first': 14,
+  'transitions-first': 15,
   'transitions-second': {
     receipts: group(1, 'native settlements retain deliveries with mismatched admissions or receipts'),
     coverage: group(1, 'native settlements retain deliveries with unproven coverage or inactive intent'),
@@ -54,7 +54,7 @@ const suites = {
   },
   'continuity-first': 8,
   'continuity-second': 10,
-  'continuity-third': 32,
+  'continuity-third': 35,
   product: 5,
   crash: 10,
 };
