@@ -113,13 +113,13 @@ test "messages list an obligation's local records in stable order" {
     defer arena.deinit();
     const a = arena.allocator();
     const observed = try witness(a);
-    const page = try messages.page(a, &observed.index, observed.target, null, 64);
+    const page = try messages.page(a, &observed.index, observed.target, null, 64, null);
     try std.testing.expectEqual(3, page.total);
     try std.testing.expectEqual(null, page.next);
     const items = page.messages.items;
     const Purpose = @FieldType(t.DeliveryKey, "purpose");
     const purposes = [_]Purpose{ .activation, .digest, .question };
-    const states = [_]messages.State{ .delivered, .pending, .delivered };
+    const states = [_]messages.State{ .delivered, .undelivered, .delivered };
     for (items, purposes, states, 1..) |item, purpose, state, ordinal| {
         try std.testing.expectEqual(ordinal, item.ordinal);
         try std.testing.expectEqual(purpose, item.purpose);
@@ -130,6 +130,11 @@ test "messages list an obligation's local records in stable order" {
         items[2].task.bytes,
     );
     try std.testing.expectEqualStrings("question", items[2].text.bytes);
+    const folding = observed.index.record(@splat(9)).?.input.step.facts.items;
+    const cancelled = for (folding) |fact| {
+        if (std.meta.eql(fact.reference.task, @as(t.Id, @splat(5)))) break fact.delivery.?;
+    } else return error.MissingFoldedDelivery;
+    try std.testing.expect(cancelled.outcome != .confirmed);
     try std.testing.expectEqual(1, items[1].links.items.len);
     try std.testing.expect(std.mem.startsWith(
         u8,
@@ -144,23 +149,23 @@ test "messages page from a stable ordinal cursor" {
     defer arena.deinit();
     const a = arena.allocator();
     const observed = try witness(a);
-    const first = try messages.page(a, &observed.index, observed.target, null, 2);
+    const first = try messages.page(a, &observed.index, observed.target, null, 2, null);
     try std.testing.expectEqual(2, first.messages.items.len);
     try std.testing.expectEqual(@as(?u64, 2), first.next);
-    const rest = try messages.page(a, &observed.index, observed.target, first.next, 2);
+    const rest = try messages.page(a, &observed.index, observed.target, first.next, 2, null);
     try std.testing.expectEqual(1, rest.messages.items.len);
     try std.testing.expectEqual(3, rest.messages.items[0].ordinal);
     try std.testing.expectEqual(null, rest.next);
-    const beyond = try messages.page(a, &observed.index, observed.target, 9, 3);
+    const beyond = try messages.page(a, &observed.index, observed.target, 9, 3, null);
     try std.testing.expectEqual(0, beyond.messages.items.len);
     try std.testing.expectEqual(3, beyond.total);
     try std.testing.expectError(
         error.InvalidPageLimit,
-        messages.page(a, &observed.index, observed.target, null, 65),
+        messages.page(a, &observed.index, observed.target, null, 65, null),
     );
     try std.testing.expectError(
         error.UnknownObligation,
-        messages.page(a, &observed.index, @splat(9), null, 3),
+        messages.page(a, &observed.index, @splat(9), null, 3, null),
     );
 }
 
@@ -169,15 +174,29 @@ test "messages render each choice as the local command that answers it" {
     defer arena.deinit();
     const a = arena.allocator();
     const observed = try witness(a);
-    const page = try messages.page(a, &observed.index, observed.target, 2, 2);
+    const config = "/srv/owner's configs/paredros.json";
+    const page = try messages.page(a, &observed.index, observed.target, 2, 2, config);
     try std.testing.expectEqual(1, page.messages.items.len);
     const answer = page.messages.items[0].choices.items[0];
     try std.testing.expectEqualStrings("Accept explicit gap", answer.label.bytes);
-    const expected = try std.fmt.allocPrint(a, "paredros question answer {s} {s} accept_gap", .{
-        std.fmt.bytesToHex(@as(t.Id, @splat(1)), .lower),
-        std.fmt.bytesToHex(@as(t.Digest, @splat(6)), .lower),
-    });
+    const expected = try std.fmt.allocPrint(
+        a,
+        "paredros --config '/srv/owner'\\''s configs/paredros.json' " ++
+            "question answer {s} {s} accept_gap",
+        .{
+            std.fmt.bytesToHex(@as(t.Id, @splat(1)), .lower),
+            std.fmt.bytesToHex(@as(t.Digest, @splat(6)), .lower),
+        },
+    );
     try std.testing.expectEqualStrings(expected, answer.command.?.bytes);
+    const plain = try messages.page(a, &observed.index, observed.target, 2, 2, "/etc/p.json");
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        plain.messages.items[0].choices.items[0].command.?.bytes,
+        "paredros --config /etc/p.json question answer ",
+    ));
+    const unknown = try messages.page(a, &observed.index, observed.target, 2, 2, null);
+    try std.testing.expectEqual(null, unknown.messages.items[0].choices.items[0].command);
 }
 
 test "messages keep earlier ordinals when a late local message is folded" {
@@ -185,7 +204,7 @@ test "messages keep earlier ordinals when a late local message is folded" {
     defer arena.deinit();
     const a = arena.allocator();
     const observed = try witness(a);
-    const seen = try messages.page(a, &observed.index, observed.target, null, 64);
+    const seen = try messages.page(a, &observed.index, observed.target, null, 64, null);
     try std.testing.expectEqual(3, seen.total);
     const late = try local(a, rows.ref(observed.rows[4]), .question, 25, observed.target, &.{});
     const reply = try rows.row(a, 11, .{ .delivery = late }, confirmed);
@@ -193,16 +212,16 @@ test "messages keep earlier ordinals when a late local message is folded" {
     try all.appendSlice(a, observed.rows);
     try all.append(a, reply);
     const unfolded = try idx.Index.init(Native, a, all.items, &.{});
-    const waiting = try messages.page(a, &unfolded, observed.target, seen.total, 64);
+    const waiting = try messages.page(a, &unfolded, observed.target, seen.total, 64, null);
     try std.testing.expectEqual(0, waiting.messages.items.len);
     try std.testing.expectEqual(seen.total, waiting.total);
     try all.append(a, try fold(a, all.items, 12));
     const folded = try idx.Index.init(Native, a, all.items, &.{});
-    const next = try messages.page(a, &folded, observed.target, seen.total, 64);
+    const next = try messages.page(a, &folded, observed.target, seen.total, 64, null);
     try std.testing.expectEqual(1, next.messages.items.len);
     try std.testing.expectEqual(.question, next.messages.items[0].purpose);
     try std.testing.expectEqual(4, next.messages.items[0].ordinal);
-    const again = try messages.page(a, &folded, observed.target, null, 64);
+    const again = try messages.page(a, &folded, observed.target, null, 64, null);
     for (seen.messages.items, again.messages.items[0..3]) |before, after| {
         try std.testing.expectEqualStrings(before.task.bytes, after.task.bytes);
         try std.testing.expectEqual(before.ordinal, after.ordinal);

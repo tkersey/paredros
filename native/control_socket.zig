@@ -266,12 +266,21 @@ pub const Server = struct {
     fn checkPending(self: *Server, connection: *Connection) void {
         var byte: u8 = undefined;
         const received = c.recv(connection.fd, &byte, 1, c.MSG.PEEK);
-        if (received >= 0) self.drop(connection) else switch (std.posix.errno(received)) {
-            .AGAIN, .INTR => {},
-            else => self.drop(connection),
-        }
+        if (received > 0) return self.drop(connection);
+        if (received < 0) switch (std.posix.errno(received)) {
+            .AGAIN, .INTR => return,
+            else => return self.drop(connection),
+        };
+        if (hungUp(connection.fd)) self.drop(connection);
     }
 };
+
+fn hungUp(fd: c_int) bool {
+    var selected: c.pollfd = .{ .fd = fd, .events = c.POLL.OUT, .revents = 0 };
+    const ready = c.poll(@ptrCast(&selected), 1, 0);
+    if (ready < 0) return std.posix.errno(ready) != .INTR;
+    return selected.revents & (c.POLL.HUP | c.POLL.ERR | c.POLL.NVAL) != 0;
+}
 
 pub const ClientConfig = struct {
     timeout_ms: u32 = 30_000,

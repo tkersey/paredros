@@ -560,3 +560,35 @@ test "control socket enqueues a response within its write budget before the next
     try std.testing.expectEqualStrings(&body, frame[0..body.len]);
     try std.testing.expectEqual('\n', frame[body.len]);
 }
+
+test "control socket answers a client that shut its write side after the request" {
+    var directory = try Directory.init();
+    defer directory.deinit();
+    var server = try transport.Server.init(
+        a,
+        directory.socket,
+        .{ .operator_uid = transport.currentUid() },
+    );
+    defer server.deinit();
+    var client = try transport.Client.init(a, directory.socket, .{});
+    defer client.deinit();
+    try send(client.fd, "{}\n");
+    if (c.shutdown(client.fd, c.SHUT.WR) != 0) return error.TestShutdownFailed;
+    var request = try next(&server);
+    defer request.deinit();
+    for (0..8) |_| {
+        try std.testing.expectEqual(null, try server.pollNext());
+        try pause();
+    }
+    try server.respond(request.token, "{\"ok\":1}");
+    var frame: [9]u8 = undefined;
+    var length: usize = 0;
+    for (0..2000) |_| {
+        if (length == frame.len) break;
+        _ = try server.pollNext();
+        const received = c.recv(client.fd, frame[length..].ptr, frame.len - length, 0);
+        if (received == 0) return error.ResponseLost;
+        if (received > 0) length += @intCast(received) else try pause();
+    }
+    try std.testing.expectEqualStrings("{\"ok\":1}\n", &frame);
+}

@@ -12,6 +12,7 @@ const transfer = @import("transfer.zig");
 const restore = @import("restore.zig");
 const ingress_policy = @import("ingress_policy.zig");
 const messages = @import("messages.zig");
+const cli = @import("cli.zig");
 
 pub const frame_bytes_max: u32 = 4 * 1024 * 1024;
 pub const capacity_rejection =
@@ -69,7 +70,7 @@ pub fn dispatchWithEnvironment(
     bytes: []const u8,
     environment: ?continuity_control.Environment,
 ) ![]const u8 {
-    return dispatchWithIndex(a, driver, config, uid, bytes, environment, null);
+    return dispatchWithIndex(a, driver, config, uid, bytes, environment, null, null);
 }
 
 pub fn dispatchWithIndex(
@@ -80,14 +81,18 @@ pub fn dispatchWithIndex(
     bytes: []const u8,
     environment: ?continuity_control.Environment,
     index: ?*const idx.Index,
+    config_path: ?[]const u8,
 ) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const response = execute(scratch, driver, config, uid, bytes, environment, index) catch |err|
+    const read: Read = .{ .index = index, .config_path = config_path };
+    const response = execute(scratch, driver, config, uid, bytes, environment, read) catch |err|
         try rejected(scratch, err);
     return frame(a, response) catch |err| frame(a, try rejected(scratch, err));
 }
+
+const Read = struct { index: ?*const idx.Index, config_path: ?[]const u8 };
 
 fn frame(a: std.mem.Allocator, value: native.json.Value) ![]u8 {
     if (!try native.json.fits(a, value, frame_limits)) return error.Capacity;
@@ -180,7 +185,7 @@ fn execute(
     uid: u32,
     bytes: []const u8,
     environment: ?continuity_control.Environment,
-    validated: ?*const idx.Index,
+    read: Read,
 ) !native.json.Value {
     if (uid != config.current_uid) return error.PermissionDenied;
     var parsed = try native.json.parse(a, bytes, .{ .bytes = frame_bytes_max });
@@ -188,12 +193,13 @@ fn execute(
     const request = try decodeRequest(a, parsed.value);
     const origin: t.Origin = .{ .local = .{ .uid = uid } };
     if (readOnly(request)) {
-        if (validated) |index| return inspect(
+        if (read.index) |index| return inspect(
             a,
             driver.service,
             index,
             request,
             try driver.clock.now(driver.clock.context),
+            read.config_path,
         );
         var index = try driver.rebuild(a);
         defer index.deinit();
@@ -203,6 +209,7 @@ fn execute(
             &index,
             request,
             try driver.clock.now(driver.clock.context),
+            read.config_path,
         );
     }
     const operation_id = try operation(request);
@@ -470,6 +477,7 @@ fn inspect(
     index: *const idx.Index,
     request: Request,
     clock_ms: i64,
+    config_path: ?[]const u8,
 ) !native.json.Value {
     const data = switch (request.command) {
         .status => |value| try status(a, service, index, clock_ms, value.after, value.limit),
@@ -481,14 +489,14 @@ fn inspect(
             page.after,
             page.limit,
         ),
-        .messages => |page| try messagePage(a, index, page.target, page.after, page.limit),
-        .task_show => |id| try task(a, index, id),
+        .messages => |page| try messagePage(a, index, page, config_path),
+        .task_show => |id| try task(a, index, id, config_path),
         .method_show => |id| try native.values.toJson(
             t.Method,
             a,
             index.head(index.obligation(id) orelse return error.UnknownObligation).method,
         ),
-        .delivery_show => |key| try deliveries(a, index, key),
+        .delivery_show => |key| try deliveries(a, index, key, config_path),
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
         .recovery_status => try recoveryStatus(a, index),
@@ -720,15 +728,21 @@ fn pendingDirectives(
 fn messagePage(
     a: std.mem.Allocator,
     index: *const idx.Index,
-    target: t.Id,
-    after: ?u64,
-    limit: u32,
+    selected: @FieldType(@FieldType(Request, "command"), "messages"),
+    config_path: ?[]const u8,
 ) !native.json.Value {
-    if (limit == 0 or limit > 64) return error.InvalidPageLimit;
+    if (selected.limit == 0 or selected.limit > 64) return error.InvalidPageLimit;
     const room = try dataRoom(a);
-    var bounded = limit;
+    var bounded = selected.limit;
     for (0..7) |_| {
-        const page = try messages.page(a, index, target, after, bounded);
+        const page = try messages.page(
+            a,
+            index,
+            selected.target,
+            selected.after,
+            bounded,
+            config_path,
+        );
         const value = try native.values.toJson(messages.Page, a, page);
         if ((try extent(a, value)).within(room)) return value;
         if (bounded == 1) break;
@@ -806,7 +820,12 @@ fn appendPending(
     return .{ .value = result.*, .extent = used, .clipped = clipped, .shown = pending.items.len };
 }
 
-fn task(a: std.mem.Allocator, index: *const idx.Index, id: t.Id) !native.json.Value {
+fn task(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    id: t.Id,
+    config_path: ?[]const u8,
+) !native.json.Value {
     const record = try currentTask(index, id);
     var result = native.json.object();
     try native.json.put(a, &result, "requested_id", native.json.string(
@@ -829,6 +848,8 @@ fn task(a: std.mem.Allocator, index: *const idx.Index, id: t.Id) !native.json.Va
         try native.values.toJson(?t.Digest, a, record.result_digest),
     );
     try native.json.put(a, &result, "superseded", .{ .bool = record.superseded });
+    const confirming = try confirmations(a, index, record, config_path);
+    try native.json.put(a, &result, "confirmations", confirming);
     const owner_status = if (record.owner_evidence) |evidence| evidence.status else null;
     const retry_pending = record.input == .turn and record.input.turn.attempt < 2 and
         record.result == null and (owner_status == .failed or owner_status == .cancelled or
@@ -848,6 +869,39 @@ fn task(a: std.mem.Allocator, index: *const idx.Index, id: t.Id) !native.json.Va
         );
     }
     return result;
+}
+
+fn confirmations(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    record: *const idx.Record,
+    config_path: ?[]const u8,
+) !native.json.Value {
+    var items: std.array_list.Managed(native.json.Value) = .init(a);
+    if (record.input != .turn or record.result == null or record.result.? != .turn)
+        return .{ .array = items };
+    const turn = record.input.turn;
+    for (0..record.result.?.turn.proposals.items.len) |ordinal| {
+        const identity: commands.ProposalIdentity = .{
+            .request = turn.envelope.stable_request,
+            .attempt = turn.attempt,
+            .ordinal = @intCast(ordinal),
+        };
+        const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch continue;
+        if (!std.meta.eql(resolved.turn.task, record.task)) continue;
+        const token = try std.fmt.allocPrint(a, "{s}:{d}:{d}", .{
+            &std.fmt.bytesToHex(identity.request, .lower),
+            identity.attempt,
+            identity.ordinal,
+        });
+        var item = native.json.object();
+        try native.json.put(a, &item, "identity", native.json.string(token));
+        try native.json.put(a, &item, "command", if (config_path) |path| native.json.string(
+            try cli.commandLine(a, path, &.{ "proposal", "confirm", token }),
+        ) else .null);
+        try items.append(item);
+    }
+    return .{ .array = items };
 }
 
 fn currentTask(index: *const idx.Index, id: t.Id) !*const idx.Record {
@@ -871,11 +925,12 @@ fn deliveries(
     a: std.mem.Allocator,
     index: *const idx.Index,
     key: t.DeliveryKey,
+    config_path: ?[]const u8,
 ) !native.json.Value {
     var items: std.array_list.Managed(native.json.Value) = .init(a);
     for (index.records) |record| {
         if (record.input != .delivery or !std.meta.eql(record.input.delivery.key, key)) continue;
-        try items.append(try task(a, index, record.task));
+        try items.append(try task(a, index, record.task, config_path));
     }
     if (items.items.len == 0) return error.UnknownDelivery;
     return .{ .array = items };

@@ -113,6 +113,40 @@ test "control CLI preserves exact revisions and rejects ambiguous arguments" {
     );
 }
 
+test "control CLI preserves the caller's directory for a relative import path" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const io = std.testing.io;
+    const current = try std.process.currentPathAlloc(io, frame);
+    const expected = try std.fs.path.join(frame, &.{ current, "backups/h.paredros" });
+    const supplied: []const []const u8 = &.{
+        "transfer", "--operation", "import", "import", "backups/h.paredros", "--bytes-max", "9",
+    };
+    const resolved = try cli.callerArguments(frame, io, supplied);
+    try std.testing.expectEqualStrings(expected, resolved[4]);
+    try std.testing.expectEqualStrings("backups/h.paredros", supplied[4]);
+    const absolute: []const []const u8 = &.{ "transfer", "import", "/b/h.paredros" };
+    try std.testing.expectEqualStrings(
+        "/b/h.paredros",
+        (try cli.callerArguments(frame, io, absolute))[2],
+    );
+    const exported: []const []const u8 = &.{ "transfer", "export", "relative" };
+    try std.testing.expectEqualStrings(
+        "relative",
+        (try cli.callerArguments(frame, io, exported))[2],
+    );
+    const encoded = try cli.request(frame, resolved, "id");
+    const parsed = try native.json.parse(frame, encoded, .{});
+    const request = try native.values.fromJson(control.Request, frame, parsed.value);
+    try std.testing.expectEqualStrings(expected, request.command.transfer_import.path.bytes);
+    try std.testing.expectEqual(@as(?u64, 9), request.command.transfer_import.bytes_max);
+    try std.testing.expectError(
+        error.RelativeTransferPath,
+        cli.request(frame, &.{ "transfer", "import", "h.paredros" }, "id"),
+    );
+}
+
 test "control CLI repeats transfer identity but takes a new snapshot identity per run" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -662,6 +696,40 @@ fn consumerConfirmed(
     try std.testing.expectEqualDeep(id, retried);
 }
 
+fn consumerPrinted(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    turn_id: t.Id,
+    token: []const u8,
+) !void {
+    const id = std.fmt.bytesToHex(turn_id, .lower);
+    const request = try cli.request(frame, &.{ "task", "show", &id }, "unused");
+    const path = "/etc/paredros/config.json";
+    const bytes = try control.dispatchWithIndex(
+        frame,
+        driver,
+        configuration(),
+        501,
+        request,
+        null,
+        null,
+        path,
+    );
+    const data = (try decode(frame, bytes)).object.get("data").?;
+    const items = data.object.get("confirmations").?.array.items;
+    try std.testing.expectEqual(1, items.len);
+    const identity = try native.json.text(items[0].object.get("identity").?);
+    try std.testing.expectEqualStrings(token, identity);
+    const expected = try std.fmt.allocPrint(frame, "paredros --config {s} proposal confirm {s}", .{
+        path,
+        token,
+    });
+    try std.testing.expectEqualStrings(
+        expected,
+        try native.json.text(items[0].object.get("command").?),
+    );
+}
+
 test "control proposal consumer shows and confirms maximal retained body by authored zero ordinal" {
     var fixture: ConsumerFixture = .{};
     defer fixture.deinit();
@@ -693,6 +761,7 @@ test "control proposal consumer shows and confirms maximal retained body by auth
     try driver.attach(frame);
     defer driver.detach();
     const token = try consumerToken(&fixture, input);
+    try consumerPrinted(frame, &driver, turn_id, token);
     const response = try consumerCall(frame, &driver, "show", token);
     try std.testing.expectEqualStrings(
         "observed",

@@ -59,7 +59,8 @@ pub fn run(init: std.process.Init, assets: native.discovery.Assets) !u8 {
     if (same(command, "serve")) {
         const recover = args.command.len == 2 and same(args.command[1], "--recover");
         if (args.command.len != 1 and !recover) return error.InvalidArguments;
-        return serve(init, assets, config.value, recover);
+        const config_path = try cli.callerPath(arena.allocator(), init.io, path);
+        return serve(init, assets, config.value, config_path, recover);
     }
     if (same(command, "namespace")) {
         if (args.command.len != 2 or !same(args.command[1], "check")) return error.InvalidArguments;
@@ -173,12 +174,15 @@ fn transferFinished(a: std.mem.Allocator, bytes: []const u8) !bool {
 fn clientRequest(
     init: std.process.Init,
     config: configuration.Config,
-    args: []const []const u8,
+    supplied: []const []const u8,
 ) !?[]const u8 {
-    if (same(args[0], "stdio")) {
-        if (args.len != 1) return error.InvalidArguments;
+    if (same(supplied[0], "stdio")) {
+        if (supplied.len != 1) return error.InvalidArguments;
         return null;
     }
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const args = try cli.callerArguments(arena.allocator(), init.io, supplied);
     const operation = try cli.defaultOperation(
         init.gpa,
         init.io,
@@ -431,11 +435,13 @@ fn dispatchObserved(
         bytes,
         runtime.continuity,
         index,
+        runtime.config_path,
     );
 }
 
 const Runtime = struct {
     config: *configuration.Config,
+    config_path: []const u8,
     continuity: continuity_control.Environment,
 };
 
@@ -443,6 +449,7 @@ fn serve(
     init: std.process.Init,
     assets: native.discovery.Assets,
     config: configuration.Config,
+    config_path: []const u8,
     recover: bool,
 ) !u8 {
     const a = init.gpa;
@@ -483,6 +490,7 @@ fn serve(
     var driver = daemonDriver(&service, &io, launch);
     var runtime_context: Runtime = .{
         .config = &launch.config,
+        .config_path = config_path,
         .continuity = try continuityEnvironment(io, &namespace, &admitted, runtime),
     };
     var daemon = try Daemon.init(a, &driver, &server, .{

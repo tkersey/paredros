@@ -74,7 +74,7 @@ fn build(a: std.mem.Allocator, index: *const idx.Index, options: Options) !Conte
     for (index.records, 0..) |record, position| {
         if (record.input != .turn) continue;
         ordinal = @max(ordinal, record.input.turn.ordinal);
-        try positions.append(a, position);
+        if (!record.superseded) try positions.append(a, position);
     }
     for (index.obligations) |obligation| {
         const position = obligation.chain[obligation.chain.len - 1];
@@ -149,6 +149,8 @@ fn appendTurn(builder: *Builder, record: idx.Record) !void {
 fn appendEvidence(builder: *Builder, index: *const idx.Index, options: Options) !void {
     var remaining = options.recent_commits;
     for (index.obligations) |obligation| {
+        const mode = index.head(&obligation).mode;
+        if (mode == .cancelled or mode == .transferred) continue;
         var position = obligation.chain.len;
         while (position > 0 and remaining > 0) {
             position -= 1;

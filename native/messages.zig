@@ -5,10 +5,11 @@ const idx = @import("index.zig");
 const preparation = @import("delivery_prepare.zig");
 const delivery_fact = @import("delivery_fact.zig");
 const delivery_target = @import("delivery_target.zig");
+const cli = @import("cli.zig");
 
 const answer_action = "answer";
 
-pub const State = enum { delivered, pending };
+pub const State = enum { delivered, pending, undelivered };
 pub const Choice = struct {
     label: @FieldType(t.Button, "label"),
     value: @FieldType(t.Button, "value"),
@@ -53,14 +54,16 @@ pub fn page(
     target: t.Id,
     after: ?u64,
     limit: u32,
+    config_path: ?[]const u8,
 ) !Page {
     if (limit == 0 or limit > 64) return error.InvalidPageLimit;
     const obligation = index.obligation(target) orelse return error.UnknownObligation;
     var entries: std.ArrayList(Entry) = .empty;
     defer entries.deinit(a);
     try obligationEntries(a, index, obligation, &entries);
-    const confirmed = try confirmedKeys(a, index, obligation);
-    defer a.free(confirmed);
+    const settled = try settledDeliveries(a, index, obligation);
+    defer a.free(settled.confirmed);
+    defer a.free(settled.unconfirmed);
     std.mem.sort(Entry, entries.items, {}, Entry.less);
     const total: u64 = entries.items.len;
     const start: usize = @intCast(@min(after orelse 0, total));
@@ -68,7 +71,7 @@ pub fn page(
     const items = try a.alloc(Message, end - start);
     for (items, entries.items[start..end], start + 1..) |*item, entry, ordinal| {
         const record = index.records[entry.position];
-        item.* = try message(a, record, target, ordinal, confirmed);
+        item.* = try message(a, record, target, ordinal, settled, config_path);
     }
     return .{
         .messages = .{ .items = items },
@@ -120,52 +123,61 @@ fn foldSegments(
     return folds;
 }
 
-fn confirmedKeys(
+const Settled = struct { confirmed: []const t.DeliveryKey, unconfirmed: []const t.Id };
+
+fn settledDeliveries(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
-) ![]t.DeliveryKey {
-    var keys: std.ArrayList(t.DeliveryKey) = .empty;
-    errdefer keys.deinit(a);
+) !Settled {
+    var confirmed: std.ArrayList(t.DeliveryKey) = .empty;
+    errdefer confirmed.deinit(a);
+    var unconfirmed: std.ArrayList(t.Id) = .empty;
+    errdefer unconfirmed.deinit(a);
     for (obligation.chain) |position| {
         const input = index.records[position].input;
         if (input != .step) continue;
         for (input.step.facts.items) |fact| {
             const settled = fact.delivery orelse continue;
-            if (settled.outcome == .confirmed) try keys.append(a, settled.admitted.key);
+            if (settled.outcome == .confirmed) {
+                try confirmed.append(a, settled.admitted.key);
+            } else try unconfirmed.append(a, fact.reference.task);
         }
     }
-    return keys.toOwnedSlice(a);
+    const keys = try confirmed.toOwnedSlice(a);
+    errdefer a.free(keys);
+    return .{ .confirmed = keys, .unconfirmed = try unconfirmed.toOwnedSlice(a) };
 }
 
-fn state(
-    a: std.mem.Allocator,
-    record: idx.Record,
-    confirmed: []const t.DeliveryKey,
-) !State {
+fn state(a: std.mem.Allocator, record: idx.Record, settled: Settled) !State {
     const delivery = record.input.delivery;
-    for (confirmed) |key| if (std.meta.eql(key, delivery.key)) return .delivered;
+    for (settled.confirmed) |key| if (std.meta.eql(key, delivery.key)) return .delivered;
+    for (settled.unconfirmed) |task| if (std.meta.eql(task, record.task)) return .undelivered;
     const snapshot = record.owner_snapshot orelse return .pending;
     const evidence = record.owner_evidence orelse return .pending;
     var proof = try delivery_fact.inspect(a, snapshot, evidence);
     defer proof.deinit();
-    const outcome = proof.value.outcome orelse return .pending;
-    return if (outcome == .confirmed) .delivered else .pending;
+    const outcome = proof.value.outcome orelse
+        return if (proof.value.terminal) .undelivered else .pending;
+    return if (outcome == .confirmed) .delivered else .undelivered;
 }
 
 fn command(
     a: std.mem.Allocator,
+    config_path: ?[]const u8,
     obligation: t.Id,
     payload: t.LogicalPayload,
     button: t.Button,
 ) !?c.Text(4096) {
     if (!std.mem.eql(u8, button.action_id.bytes, answer_action)) return null;
+    const path = config_path orelse return null;
     const prompt = payload.prompt orelse return null;
-    return .{ .bytes = try std.fmt.allocPrint(a, "paredros question answer {s} {s} {s}", .{
-        std.fmt.bytesToHex(obligation, .lower),
-        std.fmt.bytesToHex(prompt, .lower),
-        button.value.bytes,
-    }) };
+    const target = std.fmt.bytesToHex(obligation, .lower);
+    const question = std.fmt.bytesToHex(prompt, .lower);
+    const line = try cli.commandLine(a, path, &.{
+        "question", "answer", &target, &question, button.value.bytes,
+    });
+    return if (line.len <= 4096) .{ .bytes = line } else null;
 }
 
 fn message(
@@ -173,7 +185,8 @@ fn message(
     record: idx.Record,
     owner: t.Id,
     ordinal: u64,
-    confirmed: []const t.DeliveryKey,
+    settled: Settled,
+    config_path: ?[]const u8,
 ) !Message {
     const delivery = record.input.delivery;
     const payload = delivery.payload.logical;
@@ -184,7 +197,7 @@ fn message(
     for (choices, payload.buttons.items) |*choice, button| choice.* = .{
         .label = button.label,
         .value = button.value,
-        .command = try command(a, owner, payload, button),
+        .command = try command(a, config_path, owner, payload, button),
     };
     return .{
         .ordinal = ordinal,
@@ -198,6 +211,6 @@ fn message(
         .text = payload.frozen_text,
         .links = .{ .items = links },
         .choices = .{ .items = choices },
-        .state = try state(a, record, confirmed),
+        .state = try state(a, record, settled),
     };
 }

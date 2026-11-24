@@ -169,6 +169,16 @@ retained task/result reference, acquisition time, and coverage. A positive count
 with a null oldest record exposes missing evidence at that sequence.
 
 Proposal confirmations use the exact `REQUEST_DIGEST:ATTEMPT:ORDINAL` identity.
+The reply that `ask` prints, like `task show` of a turn, lists each of its
+proposals under `data.confirmations` with that `identity` and the `command` that
+confirms it:
+
+```sh
+paredros --config /absolute/config.json ask 'Pause the monitor.' --target OBLIGATION_ID
+paredros --config /absolute/config.json proposal show REQUEST_DIGEST:ATTEMPT:ORDINAL
+paredros --config /absolute/config.json proposal confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
+```
+
 `proposal show` returns the complete retained proposal.
 
 For provider access, explicitly select `mode: "live"`, grant the required
@@ -204,10 +214,14 @@ again, so the remaining messages are appended together. A new message therefore
 always lands after every message already listed, and an ordinal cursor stays valid
 as messages are added; continue from the last ordinal until the next cursor is
 null. Each item carries its task, purpose, key, issue, superseded key, covered
-sequence range, text, links, and choices, with a state of `delivered` or `pending`.
+sequence range, text, links, and choices, with a state: `delivered` once its
+confirmation is recorded, `undelivered` when its delivery task ended without one
+(a retryable message is then reissued under a new key), and `pending` otherwise.
 
-A question's choices include the command that answers it, `question answer ID
-QUESTION_DIGEST CHOICE`; `monitor show` also reports the open question. `proposal
+A question's choices include the command that answers it, `paredros --config
+PATH question answer ID QUESTION_DIGEST CHOICE`. PATH is the absolute path of the
+configuration the daemon was started with, so the command works from any
+directory; `monitor show` also reports the open question. `proposal
 show` and `proposal confirm` handle proposals, and `ask` waits for and prints the
 conversation reply. A held digest is inspected with `delivery show KEY_JSON` and
 released with `delivery release ID KEY_JSON`.
@@ -254,8 +268,9 @@ the file is written, it prints that operation; rerun the same export command wit
 Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's
 manifest; the daemon then materializes its members and lineages in bounded steps,
-including across a restart, while other control ingress waits. Repeat
-`transfer import PATH` to observe progress; exit 75 means the daemon is still
+including across a restart, while other control ingress waits. The client
+resolves a relative PATH against its own working directory before sending it.
+Repeat `transfer import PATH` to observe progress; exit 75 means the daemon is still
 materializing. Reusing an import operation for a different file is refused as an
 operation conflict. Import preserves portable observations, pending controls,
 method source, and unresolved delivery evidence. Imported output, including

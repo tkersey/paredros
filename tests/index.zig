@@ -1192,6 +1192,60 @@ test "index dialogue context orders admitted turns and owns its bounded provenan
     );
 }
 
+test "index dialogue context leaves superseded turn attempts out of recent turns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try genesis(a);
+    const first = try conversation(a, 2, 1, "first operator text");
+    const second = try conversation(a, 3, 2, "second operator text");
+    const replaced = try conversation(a, 4, 3, "replaced attempt text");
+    var index = try idx.Index.init(Native, a, &.{ initial, first, second, replaced }, &.{});
+    defer index.deinit();
+    index.records[index.tasks.get(replaced.input.task).?].superseded = true;
+    const dialogue = @import("../native/dialogue.zig");
+    var context = try dialogue.materialize(std.testing.allocator, &index, .{
+        .target = @splat(1),
+        .recent_turns = 2,
+    });
+    defer context.deinit();
+    const text = context.value.text.bytes;
+    try std.testing.expect(std.mem.indexOf(u8, text, "replaced attempt text") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "second operator text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "first operator text") != null);
+    try std.testing.expectEqual(4, context.value.next_ordinal);
+}
+
+fn evidenceContext(a: std.mem.Allocator, mode: t.Mode) ![]const u8 {
+    const initial = try genesis(a);
+    const input = step(head(), ref(initial), "evidence-step");
+    var output = successor(input);
+    const batch = try capturedBatch(a, 1);
+    output.step.head.observed = .{ .sequence = 1, .epoch = 0, .tip = batch.tip };
+    output.step.batch = batch;
+    const stepped = try row(a, 2, .{ .step = input }, output);
+    var index = try idx.Index.init(Native, a, &.{ initial, stepped }, &.{});
+    defer index.deinit();
+    index.records[index.tasks.get(stepped.input.task).?].result.?.step.head.mode = mode;
+    try std.testing.expectEqual(mode, index.head(index.obligation(@splat(1)).?).mode);
+    const context = try @import("../native/dialogue.zig").materialize(a, &index, .{
+        .target = null,
+    });
+    return context.value.text.bytes;
+}
+
+test "index dialogue context omits source evidence of finished obligations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const active = try evidenceContext(a, .active);
+    try std.testing.expect(std.mem.indexOf(u8, active, "source_evidence") != null);
+    for ([_]t.Mode{ .cancelled, .transferred }) |mode| {
+        const finished = try evidenceContext(a, mode);
+        try std.testing.expect(std.mem.indexOf(u8, finished, "source_evidence") == null);
+    }
+}
+
 test "index dialogue context reports omitted whole records" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

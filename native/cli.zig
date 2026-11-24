@@ -51,6 +51,37 @@ pub fn defaultOperation(
     return a.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
 }
 
+pub fn callerPath(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    if (path.len == 0) return error.InvalidArguments;
+    if (std.fs.path.isAbsolute(path)) return path;
+    const current = try std.process.currentPathAlloc(io, a);
+    return std.fs.path.join(a, &.{ current, path });
+}
+
+pub fn callerArguments(
+    a: std.mem.Allocator,
+    io: std.Io,
+    args: []const []const u8,
+) ![]const []const u8 {
+    if (!same(args[0], "transfer")) return args;
+    const resolved = try a.dupe([]const u8, args);
+    var positional: usize = 0;
+    var i: usize = 0;
+    while (i < resolved.len) : (i += 1) {
+        if (same(resolved[i], "--operation")) {
+            i += 1;
+            continue;
+        }
+        positional += 1;
+        if (positional == 2 and !same(resolved[i], "import")) return args;
+        if (positional == 3) {
+            resolved[i] = try callerPath(a, io, resolved[i]);
+            return resolved;
+        }
+    }
+    return args;
+}
+
 fn snapshotExport(args: []const []const u8) bool {
     if (args.len < 3 or !same(args[1], "export")) return false;
     for (args[3..]) |arg| if (same(arg, "--snapshot")) return true;
@@ -151,6 +182,7 @@ fn transfer(args: []const []const u8) !Command {
         } };
     }
     if (!same(args[0], "import")) return error.InvalidArguments;
+    if (!std.fs.path.isAbsolute(args[1])) return error.RelativeTransferPath;
     var importing: @import("continuity_control.zig").Import = .{ .path = .{ .bytes = args[1] } };
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -192,6 +224,34 @@ fn experiment(a: std.mem.Allocator, args: []const []const u8) !Command {
         .plan = try decode(@import("../app/experiment_contract.zig").Plan, a, args[3]),
         .live_model = live,
     } };
+}
+
+pub fn commandLine(
+    a: std.mem.Allocator,
+    config_path: []const u8,
+    args: []const []const u8,
+) ![]u8 {
+    var line: std.ArrayList(u8) = .empty;
+    errdefer line.deinit(a);
+    try line.appendSlice(a, "paredros --config ");
+    try quote(a, &line, config_path);
+    for (args) |arg| {
+        try line.append(a, ' ');
+        try quote(a, &line, arg);
+    }
+    return line.toOwnedSlice(a);
+}
+
+fn quote(a: std.mem.Allocator, line: *std.ArrayList(u8), arg: []const u8) !void {
+    for (arg) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and
+            std.mem.indexOfScalar(u8, "%+,-./:=@_", byte) == null) break;
+    } else if (arg.len != 0) return line.appendSlice(a, arg);
+    try line.append(a, '\'');
+    for (arg) |byte| {
+        if (byte == '\'') try line.appendSlice(a, "'\\''") else try line.append(a, byte);
+    }
+    try line.append(a, '\'');
 }
 
 fn same(left: []const u8, right: []const u8) bool {
