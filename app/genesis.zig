@@ -1,4 +1,3 @@
-const std = @import("std");
 const protean = @import("protean");
 const t = @import("application_types");
 const a = @import("author.zig");
@@ -14,16 +13,10 @@ pub fn emit(c: protean.Context) !Function {
     }, try c.schema(t.Head), &.{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
-    const specification = try b.field(input, "specification");
     try a.require(c, b, try b.equal(
         try b.field(try b.field(input, "envelope"), "version"),
         try b.constant(u32, 1),
     ), "unsupported_input_version");
-    try a.require(c, b, try specification_bounds.valid(
-        c,
-        b,
-        try b.call(validate, .{ .specification = specification }),
-    ), "invalid_specification");
     const imported = try b.field(input, "imported");
     const fresh = try b.caseOf(imported, "none");
     const restored = try b.caseOf(imported, "some");
@@ -31,6 +24,11 @@ pub fn emit(c: protean.Context) !Function {
         .none = try fresh.ret(try freshHead(c, fresh.body(), input)),
         .some = try restored.ret(try importedHead(c, restored.body(), input, restored.payload())),
     });
+    try a.require(c, b, try specification_bounds.valid(
+        c,
+        b,
+        try b.call(validate, .{ .specification = try b.field(result, "specification") }),
+    ), "invalid_specification");
     try c.author.define(function, try b.ret(result));
     return function;
 }
@@ -70,8 +68,9 @@ fn freshHead(c: protean.Context, b: anytype, input: a.Value(t.Genesis)) !a.Value
             .next_due_ms = try b.field(input, "clock_ms"),
             .source_not_before_ms = try b.field(input, "clock_ms"),
             .render_not_before_ms = try b.field(input, "clock_ms"),
+            .provider_not_before_ms = try b.field(input, "clock_ms"),
         }),
-        .provider_not_before_ms = try b.constant(i64, std.math.minInt(i64)),
+        .check_requested = try b.constant(bool, false),
         .clock_ms = try b.field(input, "clock_ms"),
         .skipped_slots = try b.constant(u64, 0),
         .clock_regressions = try b.constant(u64, 0),
@@ -118,9 +117,6 @@ fn importedHead(
         .mode = prior,
         .message = try notification.pending(c, b, previous),
         .clock_ms = try b.field(input, "clock_ms"),
-        .schedule = try b.update(try b.field(previous, "schedule"), .{
-            .next_due_ms = try b.field(input, "clock_ms"),
-        }),
     });
 }
 

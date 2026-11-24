@@ -95,14 +95,24 @@ fn clipped(
     value: anytype,
     budget: u64,
 ) !a.Value(ClipResult) {
-    return b.call(clip, .{ .state = try b.product(try c.schema(ClipInput), .{
+    const state = try b.product(try c.schema(ClipInput), .{
         .text = try widen(c, b, value),
         .index = try b.constant(u64, 0),
-        .budget = try b.constant(u64, budget - 3),
+        .budget = try b.constant(u64, budget),
         .start = try b.constant(u64, 0),
         .used = try b.constant(u64, 0),
         .output = try literal(c, ""),
-    }) });
+    });
+    const whole = try b.call(clip, .{ .state = state });
+    const cut = try b.branch();
+    const kept = try b.branch();
+    return b.conditional(
+        try b.field(whole, "abbreviated"),
+        try cut.ret(try cut.call(clip, .{ .state = try cut.update(state, .{
+            .budget = try cut.constant(u64, budget - 3),
+        }) })),
+        try kept.ret(whole),
+    );
 }
 
 pub fn neutral(c: protean.Context) !Neutral {

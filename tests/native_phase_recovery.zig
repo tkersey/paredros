@@ -93,7 +93,8 @@ test "native phase recovery bounds check attempts then opens a fresh cycle at th
     var value = head();
     value.accounting.possible_charged_calls = 7;
     const expected = [_]i64{ 60_100, 180_100, 900_100, 960_100 };
-    for (expected, 0..) |deadline, ordinal| {
+    const due = [_]i64{ 100, 100, 900_100, 900_100 };
+    for (expected, due, 0..) |deadline, next_due, ordinal| {
         const operation = try std.fmt.allocPrint(
             fixture.arena.allocator(),
             "check-{d}",
@@ -102,7 +103,7 @@ test "native phase recovery bounds check attempts then opens a fresh cycle at th
         const previous = value;
         value = try fixture.output(try fixture.execute(operation, failed(value, .check)));
         try std.testing.expectEqual(deadline, value.schedule.source_not_before_ms);
-        try std.testing.expectEqual(deadline, value.schedule.next_due_ms);
+        try std.testing.expectEqual(next_due, value.schedule.next_due_ms);
         try std.testing.expectEqual(
             @as(u32, if (ordinal == 3) 1 else @intCast(ordinal + 1)),
             value.check_failure_streak,
@@ -139,7 +140,7 @@ test "native phase recovery render backoff preserves due checks and stronger pro
     try std.testing.expectEqualDeep(value.told, result.told);
 }
 
-test "native phase recovery excludes control cancellations and defers unattributed fold faults" {
+test "native phase recovery paces an unattributed fault as both phases, never a control" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -162,10 +163,10 @@ test "native phase recovery excludes control cancellations and defers unattribut
         .supersession = supersession(.fold, .failed),
     } }));
     try std.testing.expectEqual(900_100, fault.schedule.next_due_ms);
-    try std.testing.expectEqual(900_100, fault.schedule.render_not_before_ms);
+    try std.testing.expectEqual(120_100, fault.schedule.render_not_before_ms);
     try std.testing.expectEqual(1_500_000, fault.schedule.source_not_before_ms);
-    try std.testing.expectEqual(value.check_failure_streak, fault.check_failure_streak);
-    try std.testing.expectEqual(value.render_failure_streak, fault.render_failure_streak);
+    try std.testing.expectEqual(3, fault.check_failure_streak);
+    try std.testing.expectEqual(2, fault.render_failure_streak);
 }
 
 test "native phase recovery honors Retry After rate reset and retained provider deadline" {
@@ -179,12 +180,12 @@ test "native phase recovery honors Retry After rate reset and retained provider 
         .evidence = .{ .items = &.{evidence} },
     };
     const limited = try fixture.output(try fixture.execute("limited", .{ .rejection = request }));
-    try std.testing.expectEqual(2_000_000, limited.provider_not_before_ms);
+    try std.testing.expectEqual(2_000_000, limited.schedule.provider_not_before_ms);
     try std.testing.expectEqual(60_100, limited.schedule.source_not_before_ms);
     request.head.schedule.source_not_before_ms = 3_000_000;
     const previous = try fixture.output(try fixture.execute("retained", .{ .rejection = request }));
     try std.testing.expectEqual(3_000_000, previous.schedule.source_not_before_ms);
-    try std.testing.expectEqual(2_000_000, previous.provider_not_before_ms);
+    try std.testing.expectEqual(2_000_000, previous.schedule.provider_not_before_ms);
     request.head = head();
     request.reason = .unavailable;
     evidence.rate_remaining = .{ .bytes = "5" };
@@ -193,7 +194,7 @@ test "native phase recovery honors Retry After rate reset and retained provider 
         "retry-after",
         .{ .rejection = request },
     ));
-    try std.testing.expectEqual(300_200, available.provider_not_before_ms);
+    try std.testing.expectEqual(300_200, available.schedule.provider_not_before_ms);
 }
 
 test "native phase recovery delays conservatively for an HTTP-date or unparseable Retry After" {
@@ -213,18 +214,18 @@ test "native phase recovery delays conservatively for an HTTP-date or unparseabl
         const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "date-{d}", .{i});
         const task = try fixture.execute(operation, .{ .rejection = request });
         const delayed = try fixture.output(task);
-        try std.testing.expectEqual(3_600_200, delayed.provider_not_before_ms);
+        try std.testing.expectEqual(3_600_200, delayed.schedule.provider_not_before_ms);
     }
     evidence.retry_after = .{ .bytes = "99999999999999999999999999" };
     request.evidence.items = &.{evidence};
     const huge = try fixture.output(try fixture.execute("huge", .{ .rejection = request }));
-    try std.testing.expectEqual(1_000_000_000_000_200, huge.provider_not_before_ms);
+    try std.testing.expectEqual(1_000_000_000_000_200, huge.schedule.provider_not_before_ms);
     evidence.retry_after = null;
     evidence.rate_reset = .{ .bytes = "Sun, 15 Nov 2026 00:00:00 GMT" };
     request.evidence.items = &.{evidence};
     request.reason = .rate_limit;
     const reset = try fixture.output(try fixture.execute("reset-date", .{ .rejection = request }));
-    try std.testing.expectEqual(3_600_200, reset.provider_not_before_ms);
+    try std.testing.expectEqual(3_600_200, reset.schedule.provider_not_before_ms);
 }
 
 fn rejectedComparison() check.Result {

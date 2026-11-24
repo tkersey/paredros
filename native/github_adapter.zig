@@ -48,7 +48,7 @@ pub fn classify(
             defer prepared.deinit();
             if (!std.meta.eql(prepared.request_digest, refused.request_digest))
                 return error.InvalidCapture;
-            break :refused refusal(request, refused.refused.refusal);
+            break :refused refusal(request, refused.refused);
         },
     };
     return .{
@@ -57,8 +57,9 @@ pub fn classify(
     };
 }
 
-pub fn refusal(request: contract.Request, refused: transport.Refusal) contract.Failure {
-    return switch (refused) {
+pub fn refusal(request: contract.Request, refused: transport.Refused) contract.Failure {
+    if (refused.status) |status| if (status != 200) return statusFailure(status, false);
+    return switch (refused.refusal) {
         .body_capacity => if (request.phase == .page) .incomplete else .malformed,
         .body_interrupted, .local_resources => .unavailable,
         .head_capacity,
@@ -298,17 +299,21 @@ fn safeHeader(name: []const u8) bool {
     return false;
 }
 
+fn statusFailure(status: u16, limited: bool) contract.Failure {
+    return switch (status) {
+        429 => .rate_limit,
+        403 => if (limited) .rate_limit else .permission,
+        401 => .permission,
+        else => .unavailable,
+    };
+}
+
 fn rejection(err: anyerror, evidence: t.ReadEvidence) contract.Failure {
     return switch (err) {
-        error.UnsuccessfulResponse => switch (evidence.status) {
-            429 => .rate_limit,
-            403 => if (evidence.retry_after != null or remainingZero(evidence))
-                .rate_limit
-            else
-                .permission,
-            401 => .permission,
-            else => .unavailable,
-        },
+        error.UnsuccessfulResponse => statusFailure(
+            evidence.status,
+            evidence.retry_after != null or remainingZero(evidence),
+        ),
         error.RepositoryIdentityMismatch,
         error.ReferenceMismatch,
         error.InvalidRepositoryRoute,

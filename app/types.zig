@@ -144,6 +144,7 @@ pub const Schedule = struct {
     next_due_ms: i64,
     source_not_before_ms: i64,
     render_not_before_ms: i64,
+    provider_not_before_ms: i64,
 };
 pub const ClockRegression = struct { previous_clock_ms: i64, clock_ms: i64 };
 pub const Head = struct {
@@ -168,7 +169,7 @@ pub const Head = struct {
     method: Method,
     method_disposition: ?MethodDisposition = null,
     schedule: Schedule,
-    provider_not_before_ms: i64,
+    check_requested: bool,
     clock_ms: i64,
     skipped_slots: u64,
     clock_regressions: u64,
@@ -208,7 +209,7 @@ pub const DirectiveFact = struct { reference: InputReference, value: Directive }
 pub const DirectiveDisposition = struct {
     directive: InputReference,
     ordinal: u64,
-    outcome: union(enum) { applied: void, rejected: Name },
+    outcome: union(enum) { applied: void, requested: void, rejected: Name },
 };
 pub const Commit = struct { oid: Oid, message: c.Utf8 };
 pub const ReadEvidence = struct {

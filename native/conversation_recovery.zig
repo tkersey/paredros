@@ -16,7 +16,13 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
     for (index.records) |record| {
         if (!recovery_status.recoverableTurn(record)) continue;
         if (admitted.items.len == limit) break;
-        if (try advanceOne(driver, a, record)) |task| try admitted.append(a, task);
+        const outcome = try driver.guarded(
+            .{ .item = record.task, .work = .turn },
+            ?t.Id,
+            advanceOne,
+            .{ driver, a, record },
+        );
+        if (outcome) |replaced| if (replaced) |task| try admitted.append(a, task);
     }
     return admitted.toOwnedSlice(a);
 }

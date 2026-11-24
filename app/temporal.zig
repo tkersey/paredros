@@ -102,31 +102,26 @@ fn restoreFunction(c: protean.Context) !Restore {
     return function;
 }
 
-pub const ScheduleInput = struct {
-    previous_clock_ms: i64,
-    clock_ms: i64,
-    next_due_ms: i64,
-    interval_ms: u64,
-    tolerance_ms: u64,
-};
-pub const ScheduleResult = struct { skipped_slots: u64, regressed: bool };
+pub const ScheduleInput = struct { previous_clock_ms: i64, clock_ms: i64, tolerance_ms: u64 };
+pub const ScheduleResult = struct { regressed: bool };
 pub const Schedule = a.Function(struct { input: ScheduleInput }, ScheduleResult);
 pub const RebaseInput = struct { schedule: t.Schedule, previous_clock_ms: i64, clock_ms: i64 };
 pub const Rebase = a.Function(struct { input: RebaseInput }, t.Schedule);
 pub const Instants = std.enums.EnumFieldStruct(std.meta.FieldEnum(t.Schedule), a.Value(i64), null);
+pub const DueInput = struct { anchor_ms: i64, interval_ms: u64, next_due_ms: i64, clock_ms: i64 };
+pub const Due = struct { next_due_ms: i64, coalesced: u64 };
+pub const AdvanceDue = a.Function(struct { input: DueInput }, Due);
+pub const Advance = a.Function(struct { head: t.Head }, t.Head);
 
 pub fn schedule(c: protean.Context) !Schedule {
     const shift = try shiftFunction(c);
-    const function = try c.author.function("observe anchored schedule without an ambient clock", .{
+    const function = try c.author.function("observe clock regression without an ambient clock", .{
         .input = try c.schema(ScheduleInput),
     }, try c.schema(ScheduleResult), &.{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
-    const interval = try b.field(input, "interval_ms");
-    try a.require(c, b, try b.less(try b.constant(u64, 0), interval), "invalid_interval");
     const now = try b.call(shift, .{ .value = try b.field(input, "clock_ms") });
     const previous = try b.call(shift, .{ .value = try b.field(input, "previous_clock_ms") });
-    const due = try b.call(shift, .{ .value = try b.field(input, "next_due_ms") });
     const earlier = try b.branch();
     const later = try b.branch();
     const delta = try earlier.checked(.subtract, previous, now, .{
@@ -137,28 +132,95 @@ pub fn schedule(c: protean.Context) !Schedule {
         try earlier.ret(try earlier.less(try earlier.field(input, "tolerance_ms"), delta)),
         try later.ret(try later.constant(bool, false)),
     );
-    const missed = try b.branch();
-    const waiting = try b.branch();
-    const passed = try missed.checked(.subtract, now, due, .{
-        .overflow = try a.failure(c, "schedule_difference_overflow"),
-    });
-    const skipped = try missed.checked(.divide, passed, interval, .{
-        .overflow = try a.failure(c, "schedule_difference_overflow"),
-        .division_by_zero = try a.failure(c, "invalid_interval"),
-    });
-    const due_now = try b.select(
-        regressed,
-        try b.constant(bool, false),
-        try b.booleanNot(try b.less(now, due)),
-    );
-    const count = try b.conditional(
-        due_now,
-        try missed.ret(skipped),
-        try waiting.ret(try waiting.constant(u64, 0)),
-    );
     try c.author.define(function, try b.ret(try b.product(try c.schema(ScheduleResult), .{
-        .skipped_slots = count,
         .regressed = regressed,
+    })));
+    return function;
+}
+
+pub fn advanceDue(c: protean.Context) !AdvanceDue {
+    const shift = try shiftFunction(c);
+    const next = try emit(c);
+    const function = try c.author.function("advance a passed due slot and count coalesced slots", .{
+        .input = try c.schema(DueInput),
+    }, try c.schema(Due), &.{});
+    const b = try c.author.body(function);
+    const input = try b.parameter("input");
+    const interval = try b.field(input, "interval_ms");
+    try a.require(c, b, try b.less(try b.constant(u64, 0), interval), "invalid_interval");
+    const now = try b.field(input, "clock_ms");
+    const due = try b.field(input, "next_due_ms");
+    const passed = try b.branch();
+    const waiting = try b.branch();
+    const overflow = try a.failure(c, "schedule_difference_overflow");
+    const invalid = try a.failure(c, "invalid_interval");
+    const phase = try passed.checked(
+        .remainder,
+        try passed.call(shift, .{ .value = try passed.field(input, "anchor_ms") }),
+        interval,
+        .{ .overflow = overflow, .division_by_zero = invalid },
+    );
+    var slots: [2]a.Value(u64) = undefined;
+    for (&slots, [_]a.Value(i64){ now, due }) |*slot, instant| {
+        const offset = try passed.checked(
+            .subtract,
+            try passed.call(shift, .{ .value = instant }),
+            phase,
+            .{ .overflow = overflow },
+        );
+        slot.* = try passed.checked(.divide, offset, interval, .{
+            .overflow = overflow,
+            .division_by_zero = invalid,
+        });
+    }
+    const advanced = try passed.product(try c.schema(Due), .{
+        .next_due_ms = try passed.call(next, .{ .input = try passed.product(
+            try c.schema(Input),
+            .{
+                .anchor_ms = try passed.field(input, "anchor_ms"),
+                .interval_ms = interval,
+                .clock_ms = now,
+            },
+        ) }),
+        .coalesced = try passed.checked(.subtract, slots[0], slots[1], .{ .overflow = overflow }),
+    });
+    const kept = try waiting.product(try c.schema(Due), .{
+        .next_due_ms = due,
+        .coalesced = try waiting.constant(u64, 0),
+    });
+    try c.author.define(function, try b.ret(try b.conditional(
+        try b.less(now, due),
+        try waiting.ret(kept),
+        try passed.ret(advanced),
+    )));
+    return function;
+}
+
+pub fn advance(c: protean.Context) !Advance {
+    const due = try advanceDue(c);
+    const function = try c.author.function("advance head schedule past its due slot", .{
+        .head = try c.schema(t.Head),
+    }, try c.schema(t.Head), &.{});
+    const b = try c.author.body(function);
+    const head = try b.parameter("head");
+    const specification = try b.field(head, "specification");
+    const schedule_value = try b.field(head, "schedule");
+    const advanced = try b.call(due, .{ .input = try b.product(try c.schema(DueInput), .{
+        .anchor_ms = try b.field(specification, "anchor_ms"),
+        .interval_ms = try b.field(specification, "interval_ms"),
+        .next_due_ms = try b.field(schedule_value, "next_due_ms"),
+        .clock_ms = try b.field(head, "clock_ms"),
+    }) });
+    try c.author.define(function, try b.ret(try b.update(head, .{
+        .schedule = try b.update(schedule_value, .{
+            .next_due_ms = try b.field(advanced, "next_due_ms"),
+        }),
+        .skipped_slots = try b.checked(
+            .add,
+            try b.field(head, "skipped_slots"),
+            try b.field(advanced, "coalesced"),
+            .{ .overflow = try a.failure(c, "skipped_slot_overflow") },
+        ),
     })));
     return function;
 }

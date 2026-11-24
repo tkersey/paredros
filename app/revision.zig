@@ -2,7 +2,6 @@ const std = @import("std");
 const protean = @import("protean");
 const t = @import("application_types");
 const a = @import("author.zig");
-const mode = @import("mode.zig");
 const temporal = @import("temporal.zig");
 const specification_bounds = @import("specification.zig");
 
@@ -12,15 +11,20 @@ pub const Change = union(enum) {
     revert: @FieldType(t.DirectiveBody, "revert"),
 };
 pub const Input = struct { head: t.Head, change: Change };
-pub const Disposition = union(enum) { applied: void, rejected: t.Name };
+pub const Disposition = @FieldType(t.DirectiveDisposition, "outcome");
 pub const Result = struct { head: t.Head, disposition: Disposition };
 pub const Function = a.Function(struct { input: Input }, Result);
-const Tools = struct { validate: specification_bounds.Function, next: temporal.Function };
+const Tools = struct {
+    validate: specification_bounds.Function,
+    next: temporal.Function,
+    due: temporal.AdvanceDue,
+};
 
 pub fn emit(c: protean.Context) !Function {
     const tools: Tools = .{
         .validate = try specification_bounds.emit(c),
         .next = try temporal.emit(c),
+        .due = try temporal.advanceDue(c),
     };
     const function = try c.author.function("fold specification revision", .{
         .input = try c.schema(Input),
@@ -53,25 +57,18 @@ fn fold(
 ) !a.Value(Result) {
     const specification = try b.field(head, "specification");
     const revision = try b.field(specification, "revision");
-    const current_mode = try b.field(head, "mode");
-    const final = try b.select(
-        try mode.enumIs(c, b, t.Mode, current_mode, .cancelled),
-        try b.constant(bool, true),
-        try mode.enumIs(c, b, t.Mode, current_mode, .transferred),
-    );
     const current = try b.equal(revision, try b.field(change, "expected_revision"));
     const space = try b.less(revision, try b.constant(u64, std.math.maxInt(u64)));
     const verdict = try permittedChange(c, b, tools, specification, change, tag);
     const no = try b.constant(bool, false);
     const change_valid = try b.select(space, try b.field(verdict, "permitted"), no);
-    const valid = try b.select(final, no, try b.select(current, change_valid, no));
+    const valid = try b.select(current, change_valid, no);
     const admissibility = try b.select(
         space,
         try b.field(verdict, "reason"),
         try name(c, "revision_overflow"),
     );
-    const guarded = try b.select(current, admissibility, try name(c, "stale_revision"));
-    const code = try b.select(final, try name(c, "final_head"), guarded);
+    const code = try b.select(current, admissibility, try name(c, "stale_revision"));
     const accepted = try b.branch();
     const rejected = try b.branch();
     const next = try changedHead(c, accepted, tools, head, change, tag);
@@ -179,9 +176,9 @@ fn changedHead(
             try amended(b, previous, change),
             .{ .revision = revision },
         );
-        return b.update(head, .{
+        return b.update(try rescheduled(c, b, tools, head, previous, specification), .{
             .specification = specification,
-            .schedule = try rescheduled(c, b, tools, head, previous, specification),
+            .question = try answerable(c, b, head, change),
         });
     }
     return b.update(head, .{
@@ -200,26 +197,65 @@ fn rescheduled(
     head: a.Value(t.Head),
     previous: a.Value(t.Specification),
     specification: a.Value(t.Specification),
-) !a.Value(t.Schedule) {
+) !a.Value(t.Head) {
     const interval = try b.field(specification, "interval_ms");
     const schedule = try b.field(head, "schedule");
     const due = try b.field(schedule, "next_due_ms");
     const clock = try b.field(head, "clock_ms");
-    const recomputed = try b.call(tools.next, .{ .input = try b.product(
-        try c.schema(temporal.Input),
+    const anchor = try b.field(specification, "anchor_ms");
+    const passed = try b.call(tools.due, .{ .input = try b.product(
+        try c.schema(temporal.DueInput),
         .{
-            .anchor_ms = try b.field(specification, "anchor_ms"),
-            .interval_ms = interval,
+            .anchor_ms = anchor,
+            .interval_ms = try b.field(previous, "interval_ms"),
+            .next_due_ms = due,
             .clock_ms = clock,
         },
     ) });
-    const changed = try b.booleanNot(try b.equal(try b.field(previous, "interval_ms"), interval));
-    const pending = try b.less(clock, due);
-    return b.update(schedule, .{ .next_due_ms = try b.select(
-        try b.select(changed, pending, try b.constant(bool, false)),
-        recomputed,
-        due,
+    const recomputed = try b.call(tools.next, .{ .input = try b.product(
+        try c.schema(temporal.Input),
+        .{ .anchor_ms = anchor, .interval_ms = interval, .clock_ms = clock },
     ) });
+    const changed = try b.booleanNot(try b.equal(try b.field(previous, "interval_ms"), interval));
+    const owed = try b.select(try b.less(clock, due), recomputed, clock);
+    const coalesced = try b.select(changed, try b.field(passed, "coalesced"), try b.constant(
+        u64,
+        0,
+    ));
+    return b.update(head, .{
+        .schedule = try b.update(schedule, .{
+            .next_due_ms = try b.select(changed, owed, due),
+        }),
+        .skipped_slots = try b.checked(
+            .add,
+            try b.field(head, "skipped_slots"),
+            coalesced,
+            .{ .overflow = try a.failure(c, "skipped_slot_overflow") },
+        ),
+    });
+}
+
+fn answerable(
+    c: protean.Context,
+    b: anytype,
+    head: a.Value(t.Head),
+    change: a.Value(t.Amendment),
+) !a.Value(?t.Question) {
+    const route = try b.field(change, "repository_route");
+    const none = try b.caseOf(route, "none");
+    const some = try b.caseOf(route, "some");
+    const sb = some.body();
+    const current = try sb.field(try sb.field(head, "specification"), "repository");
+    var same = try sb.constant(bool, true);
+    inline for (.{ "owner", "name" }) |field| same = try sb.select(same, try sb.equal(
+        try sb.blobCompare(try sb.field(current, field), try sb.field(some.payload(), field)),
+        try sb.constant(i8, 0),
+    ), try sb.constant(bool, false));
+    const question = try b.field(head, "question");
+    return b.match(route, .{
+        .none = try none.ret(question),
+        .some = try some.ret(try sb.select(same, question, try c.literal(?t.Question, null))),
+    });
 }
 
 fn optional(

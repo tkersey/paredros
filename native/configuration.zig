@@ -104,6 +104,7 @@ fn validate(value: Config, current_uid: u32) !void {
         error.IntervalTooLong => error.IntervalMsExceedsMaximum,
         error.InvalidInterval, error.InvalidAnchor => error.InvalidConfiguration,
         error.PolicyOutOfBounds => error.PolicyOutOfBounds,
+        error.WordingTooLong => error.WordingTooLong,
     };
     const repository_names = [_][]const u8{
         value.repository.account, value.repository.owner, value.repository.name,

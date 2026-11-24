@@ -39,6 +39,7 @@ pub const Record = struct {
     owner_snapshot: ?retained.Snapshot = null,
     owner_evidence: ?retained.Evidence = null,
 };
+pub const Fault = struct { reason: []const u8, at_ms: i64, failures: u32, retry_ms: i64 };
 pub const Obligation = struct {
     task: t.Id,
     chain: []const usize,
@@ -48,10 +49,10 @@ pub const Obligation = struct {
     effective_mode: t.Mode,
     controls_pending: bool,
     settlements: std.AutoHashMapUnmanaged(t.Id, t.Settlement) = .empty,
-    fault: ?[]const u8 = null,
+    fault: ?Fault = null,
 
     pub fn ordinaryDispatch(self: Obligation) bool {
-        return self.effective_mode == .active and !self.controls_pending and self.fault == null;
+        return self.effective_mode == .active and !self.controls_pending;
     }
 };
 pub const Index = struct {

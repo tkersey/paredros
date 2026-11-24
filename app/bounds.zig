@@ -14,9 +14,10 @@ pub const policies = .{
     .clock_regression_tolerance_ms = Bound{ .min = 0, .max = interval_ms_max },
     .phase_attempts = Bound{ .min = 1, .max = phase_attempts_max },
     .method_faults = Bound{ .min = 1, .max = 1000 },
-    .render_input_bytes = Bound{ .min = 256, .max = 1024 * 1024 },
-    .context_bytes = Bound{ .min = 256, .max = 248 * 1024 },
+    .render_input_bytes = Bound{ .min = 1024, .max = 1024 * 1024 },
+    .context_bytes = Bound{ .min = 1024, .max = 248 * 1024 },
 };
+pub const prelude_overhead_bytes: u64 = 256;
 
 comptime {
     const names = @typeInfo(t.Policies).@"struct".field_names;
@@ -27,7 +28,7 @@ comptime {
     std.debug.assert(instant_ms_max + 2 * @as(i64, interval_ms_max) < std.math.maxInt(i64));
 }
 
-pub const Violation = enum { interval, anchor, policy };
+pub const Violation = enum { interval, anchor, policy, wording };
 
 pub fn within(bound: Bound, value: anytype) bool {
     return value >= bound.min and value <= bound.max;
@@ -41,7 +42,18 @@ pub fn violation(specification: t.Specification) ?Violation {
     if (!within(interval, specification.interval_ms)) return .interval;
     if (!instant(specification.anchor_ms)) return .anchor;
     if (!policiesWithin(specification.policies)) return .policy;
+    if (!preludeWithin(specification)) return .wording;
     return null;
+}
+
+pub fn renderLimit(value: t.Policies) u64 {
+    return @min(value.render_input_bytes, value.context_bytes, policies.context_bytes.max);
+}
+
+pub fn preludeWithin(specification: t.Specification) bool {
+    const prelude = prelude_overhead_bytes + specification.wording.bytes.len +
+        specification.repository.ref.bytes.len;
+    return prelude <= renderLimit(specification.policies) / 2;
 }
 
 pub fn policiesWithin(value: t.Policies) bool {

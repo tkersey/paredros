@@ -23,6 +23,7 @@ pub fn specification(value: t.Specification) !void {
         .interval => try interval(value.interval_ms),
         .anchor => return error.InvalidAnchor,
         .policy => return error.PolicyOutOfBounds,
+        .wording => return error.WordingTooLong,
     }
     unreachable;
 }

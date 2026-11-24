@@ -541,13 +541,30 @@ fn expectRefused(
     refusal: http.Refusal,
     reason: contract.Failure,
 ) !void {
+    try expectStatusRefused(request, 200, refusal, reason);
+}
+
+fn expectStatusRefused(
+    request: contract.Request,
+    status: u16,
+    refusal: http.Refusal,
+    reason: contract.Failure,
+) !void {
     var result = try adapter.classify(a, request, .{ .refused = .{
         .request_digest = try requestDigest(a, request),
-        .refused = .{ .status = 200, .refusal = refusal },
+        .refused = .{ .status = status, .refusal = refusal },
     } });
     defer result.deinit();
     try std.testing.expectEqual(reason, result.value.rejected.reason);
     try std.testing.expectEqual(null, result.value.rejected.evidence);
+}
+
+test "github adapter keeps the status class of an oversized error page" {
+    const page = try initial(1);
+    try expectStatusRefused(page, 429, .body_capacity, .rate_limit);
+    try expectStatusRefused(page, 403, .body_capacity, .permission);
+    try expectStatusRefused(page, 503, .body_capacity, .unavailable);
+    try expectStatusRefused(page, 200, .body_capacity, .incomplete);
 }
 
 test "github adapter classifies every received refusal and an unretained 304 by route" {

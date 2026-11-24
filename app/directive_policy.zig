@@ -48,7 +48,7 @@ pub fn emit(c: protean.Context) !chain.Apply {
     const applied = try b.conditional(
         allowed,
         try active.ret(next),
-        try ended.ret(try refuse(c, ended, head, "final_head")),
+        try ended.ret(try refuse(c, ended, head, "obligation_final")),
     );
     try c.author.define(function, try b.ret(applied));
     return function;
@@ -71,10 +71,7 @@ fn applyBody(
     const revert = try b.caseOf(body, "revert");
     const answer = try b.caseOf(body, "answer");
     const cb = check.body();
-    const due = try cb.update(head, .{ .schedule = try cb.update(
-        try cb.field(head, "schedule"),
-        .{ .next_due_ms = try cb.field(head, "clock_ms") },
-    ) });
+    const requested = try cb.update(head, .{ .check_requested = try cb.constant(bool, true) });
     const amended = try revise(c, amend.body(), h.revision, head, "amend", amend.payload());
     const adopted = try revise(c, adopt.body(), h.revision, head, "adopt", adopt.payload());
     const reverted = try revise(c, revert.body(), h.revision, head, "revert", revert.payload());
@@ -83,7 +80,12 @@ fn applyBody(
         .@"resume" = try run.ret(try control(c, run.body(), h.mode, head, .@"resume")),
         .cancel = try cancel.ret(try control(c, cancel.body(), h.mode, head, .cancel)),
         .transfer = try transfer.ret(try control(c, transfer.body(), h.mode, head, .transfer)),
-        .check = try check.ret(try accept(c, check.body(), due)),
+        .check = try check.ret(try outcomeResult(
+            c,
+            cb,
+            requested,
+            try c.literal(chain.Outcome, .{ .requested = {} }),
+        )),
         .amend = try amend.ret(amended),
         .adopt = try adopt.ret(adopted),
         .revert = try revert.ret(reverted),
@@ -173,11 +175,7 @@ fn answerQuestion(
         .choice = try sb.field(answer, "choice"),
         .index = try sb.constant(u64, 0),
     });
-    const current = try sb.equal(
-        try sb.field(some.payload(), "specification_revision"),
-        try sb.field(try sb.field(head, "specification"), "revision"),
-    );
-    const valid = try all(sb, &.{ same_id, chosen, current });
+    const valid = try all(sb, &.{ same_id, chosen });
     const accepted = try sb.branch();
     const rejected = try sb.branch();
     const next = try answerCondition(
@@ -313,7 +311,7 @@ fn publishGap(
         .observed = frontier,
         .question = try c.literal(?t.Question, null),
         .last_observation = try b.variant(try c.schema(?t.Observation), "some", observation),
-        .schedule = try b.update(try b.field(head, "schedule"), .{ .next_due_ms = clock }),
+        .check_requested = try b.constant(bool, true),
     });
     return b.update(try accept(c, b, next), .{
         .gap = try b.variant(try c.schema(?t.Batch), "some", gap),

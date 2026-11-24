@@ -12,7 +12,13 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) !u32 {
         if (record.superseded or record.result != null or
             record.input == .step or record.input == .turn) continue;
         if (resumed == limit) break;
-        if (try resumeOne(driver.service, a, record) == .resumed) resumed += 1;
+        const outcome = try driver.guarded(
+            .{ .item = record.task, .work = .retained },
+            recovery.Resume,
+            resumeOne,
+            .{ driver.service, a, record },
+        );
+        if (outcome == recovery.Resume.resumed) resumed += 1;
     }
     return resumed;
 }

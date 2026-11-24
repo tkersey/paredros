@@ -12,7 +12,7 @@ const recovery = @import("phase_recovery.zig");
 pub const RenderInput = struct { step: t.Step, head: t.Head };
 pub const Render = a.Function(struct { input: RenderInput }, t.Head);
 pub const Function = a.Function(struct { input: t.Step }, t.StepResult);
-const Folded = struct { controls: chain.Result, head: t.Head, skipped: u64 };
+const Folded = struct { controls: chain.Result, head: t.Head };
 const Timing = struct { schedule: clock.Schedule, rebase: clock.Rebase };
 
 pub fn emit(
@@ -146,47 +146,25 @@ fn fold(
     recover: recovery.Function,
     input: a.Value(t.Step),
 ) !a.Value(Folded) {
-    const previous = try b.field(input, "previous");
     const scheduled = try observeClock(c, b, timing.schedule, input);
     const prepared = try clocked(c, b, timing.rebase, input, scheduled);
+    const recovered = try b.call(recover, .{ .input = try b.product(try c.schema(recovery.Input), .{
+        .head = prepared,
+        .supersession = try b.field(input, "supersession"),
+    }) });
     const controls = try b.call(directives, .{ .input = try b.product(try c.schema(chain.Input), .{
         .obligation = try b.field(input, "obligation"),
-        .head = prepared,
+        .head = recovered,
         .directives = try b.field(input, "directives"),
     }) });
-    const settlement_input = try b.product(try c.schema(settlements.Input), .{
-        .head = try b.field(controls, "head"),
-        .facts = try b.field(input, "facts"),
-    });
-    const settled = try b.call(settlement, .{ .input = settlement_input });
-    const supersession = try b.field(input, "supersession");
-    const recovered = try b.call(recover, .{ .input = try b.product(try c.schema(recovery.Input), .{
-        .head = settled,
-        .supersession = supersession,
-    }) });
-    const skipped = try b.field(scheduled, "skipped_slots");
-    const counted = try b.select(
-        try failedCheck(c, b, supersession),
-        skipped,
-        try b.constant(u64, 0),
-    );
-    const head = try lineage(c, b, input, try b.update(recovered, .{
-        .skipped_slots = try addSkipped(c, b, try b.field(previous, "skipped_slots"), counted),
-    }));
+    const settled = try b.call(settlement, .{ .input = try b.product(
+        try c.schema(settlements.Input),
+        .{ .head = try b.field(controls, "head"), .facts = try b.field(input, "facts") },
+    ) });
     return b.product(try c.schema(Folded), .{
         .controls = controls,
-        .head = head,
-        .skipped = skipped,
+        .head = try lineage(c, b, input, settled),
     });
-}
-
-fn addSkipped(
-    c: protean.Context,
-    b: anytype,
-    total: a.Value(u64),
-    more: a.Value(u64),
-) !a.Value(u64) {
-    return b.checked(.add, total, more, .{ .overflow = try a.failure(c, "skipped_slot_overflow") });
 }
 
 fn clocked(
@@ -239,30 +217,6 @@ fn clocked(
     });
 }
 
-fn failedCheck(
-    c: protean.Context,
-    b: anytype,
-    supersession: a.Value(?t.Supersession),
-) !a.Value(bool) {
-    const none = try b.caseOf(supersession, "none");
-    const some = try b.caseOf(supersession, "some");
-    const sb = some.body();
-    const replaced = some.payload();
-    const Cause = @FieldType(t.Supersession, "cause");
-    const checking = try sb.equal(
-        try sb.enumTag(try sb.field(replaced, "phase")),
-        try sb.enumTag(try c.literal(t.Phase, .check)),
-    );
-    const control = try sb.equal(
-        try sb.enumTag(try sb.field(replaced, "cause")),
-        try sb.enumTag(try c.literal(Cause, .control)),
-    );
-    return b.match(supersession, .{
-        .none = try none.ret(try none.body().constant(bool, false)),
-        .some = try some.ret(try sb.select(control, try sb.constant(bool, false), checking)),
-    });
-}
-
 fn lineage(
     c: protean.Context,
     b: anytype,
@@ -309,11 +263,6 @@ fn observeClock(
     return b.call(timing, .{ .input = try b.product(try c.schema(clock.ScheduleInput), .{
         .previous_clock_ms = try b.field(previous, "clock_ms"),
         .clock_ms = instant,
-        .next_due_ms = try b.field(try b.field(previous, "schedule"), "next_due_ms"),
-        .interval_ms = try b.field(
-            specification,
-            "interval_ms",
-        ),
         .tolerance_ms = try b.field(
             try b.field(specification, "policies"),
             "clock_regression_tolerance_ms",
@@ -357,9 +306,11 @@ fn selectPhase(
     ));
     const provider_ready = try b.booleanNot(try b.less(
         now,
-        try b.field(head, "provider_not_before_ms"),
+        try b.field(schedule, "provider_not_before_ms"),
     ));
-    const checking = try b.select(check_due, try b.select(source_ready, provider_ready, no), no);
+    const scheduled = try b.select(check_due, source_ready, no);
+    const wanted = try b.select(try b.field(head, "check_requested"), try b.constant(bool, true), scheduled);
+    const checking = try b.select(wanted, provider_ready, no);
     const rendering = try b.select(
         try b.less(try b.constant(u64, 0), try b.sequenceLength(try b.field(input, "batches"))),
         try b.booleanNot(try b.less(now, try b.field(schedule, "render_not_before_ms"))),
@@ -392,14 +343,8 @@ fn checkPhase(
     input: a.Value(t.Step),
     folded: a.Value(Folded),
 ) !a.Value(t.StepResult) {
-    const previous = try b.field(folded, "head");
-    const head = try b.update(previous, .{
-        .skipped_slots = try addSkipped(
-            c,
-            b,
-            try b.field(previous, "skipped_slots"),
-            try b.field(folded, "skipped"),
-        ),
+    const head = try b.update(try b.field(folded, "head"), .{
+        .check_requested = try b.constant(bool, false),
     });
     const acquired = try b.call(read, .{ .input = try b.product(try c.schema(check.Input), .{
         .repository = try b.field(try b.field(head, "specification"), "repository"),

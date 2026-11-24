@@ -617,10 +617,7 @@ fn monitorHead(
     var result = native.json.object();
     try native.json.put(a, &result, "id", try wire.toJson(t.Id, a, obligation.task));
     try native.json.put(a, &result, "head", try wire.toJson(t.Head, a, head));
-    try native.json.put(a, &result, "fault", if (obligation.fault) |reason|
-        native.json.string(reason)
-    else
-        .null);
+    try native.json.put(a, &result, "fault", try faultJson(a, obligation.fault));
     try native.json.put(
         a,
         &result,
@@ -644,6 +641,16 @@ fn monitorHead(
         a,
         try materialize.backlog(a, index, obligation),
     ));
+    return result;
+}
+
+fn faultJson(a: std.mem.Allocator, fault: ?idx.Fault) !native.json.Value {
+    const value = fault orelse return .null;
+    var result = native.json.object();
+    try native.json.put(a, &result, "reason", native.json.string(value.reason));
+    try native.json.put(a, &result, "at_ms", try wire.toJson(i64, a, value.at_ms));
+    try native.json.put(a, &result, "failures", try wire.toJson(u32, a, value.failures));
+    try native.json.put(a, &result, "retry_ms", try wire.toJson(i64, a, value.retry_ms));
     return result;
 }
 

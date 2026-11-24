@@ -21,7 +21,7 @@ const ObservationTime = struct { acquired_ms: i64, provider_date: ?t.Timestamp }
 const Time = a.Function(struct { evidence: Evidence, clock_ms: i64 }, ObservationTime);
 
 pub fn emit(c: protean.Context) !Function {
-    const next = try clock.emit(c);
+    const advance = try clock.advance(c);
     const time = try observationTime(c);
     const equal = try equal_bytes.emit(c, 40);
     const function = try c.author.function("publish complete source observation", .{
@@ -31,21 +31,20 @@ pub fn emit(c: protean.Context) !Function {
     const input = try b.parameter("input");
     const previous = try b.field(input, "head");
     const acquired = try b.field(input, "acquired");
-    const specification = try b.field(previous, "specification");
-    const due = try b.call(next, .{ .input = try b.product(try c.schema(clock.Input), .{
-        .anchor_ms = try b.field(specification, "anchor_ms"),
-        .interval_ms = try b.field(specification, "interval_ms"),
-        .clock_ms = try b.field(previous, "clock_ms"),
-    }) });
+    const advanced = try b.call(advance, .{ .head = previous });
     const observed_time = try b.call(time, .{
         .evidence = try b.field(acquired, "evidence"),
         .clock_ms = try b.field(previous, "clock_ms"),
     });
-    const head = try b.update(previous, .{
-        .schedule = try b.update(try b.field(previous, "schedule"), .{ .next_due_ms = due }),
+    const checked = .{
         .phase = try c.literal(t.Phase, .check),
-        .previous_check_overran = try b.less(due, try b.field(observed_time, "acquired_ms")),
-    });
+        .previous_check_overran = try b.less(
+            try b.field(try b.field(advanced, "schedule"), "next_due_ms"),
+            try b.field(observed_time, "acquired_ms"),
+        ),
+    };
+    const head = try b.update(advanced, checked);
+    const attempted = try b.update(previous, checked);
     const accepted = try b.branch();
     const rejected = try b.branch();
     const failed = try b.equal(
@@ -54,7 +53,7 @@ pub fn emit(c: protean.Context) !Function {
     );
     const result = try b.conditional(
         failed,
-        try rejected.ret(try rejectedCheck(c, rejected, input, head, observed_time)),
+        try rejected.ret(try rejectedCheck(c, rejected, input, attempted, observed_time)),
         try accepted.ret(try acceptedCheck(c, accepted, input, head, observed_time, equal)),
     );
     try c.author.define(function, try b.ret(result));
@@ -463,16 +462,8 @@ fn preserveQuestion(
     );
     const equal = try equal_bytes.emit(c, 40);
     var matched = try pb.equal(
-        try pb.field(some.payload(), "specification_revision"),
-        try pb.field(replacement, "specification_revision"),
-    );
-    matched = try pb.select(
-        matched,
-        try pb.equal(
-            try pb.field(present.payload(), "epoch"),
-            try pb.field(next_condition, "epoch"),
-        ),
-        try pb.constant(bool, false),
+        try pb.field(present.payload(), "epoch"),
+        try pb.field(next_condition, "epoch"),
     );
     matched = try pb.select(
         matched,

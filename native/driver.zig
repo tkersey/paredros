@@ -23,15 +23,47 @@ pub const Fatal = error{
     DriverDetached,
     ClockOutOfRange,
 };
+pub const Work = enum { controls, step, turn, retained, import };
 pub const Part = enum { controls, step };
-pub const Advance = union(enum) { idle: void, progressed: void, faulted: []const u8 };
+pub const Key = struct { item: t.Id, work: Work };
+pub const Fault = idx.Fault;
+pub const fault_retry_ms: i64 = 1_000;
+pub const fault_retry_max_ms: i64 = 60_000;
 pub const Faults = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
-    reasons: std.AutoHashMapUnmanaged(t.Id, []const u8) = .empty,
+    items: std.AutoHashMapUnmanaged(Key, Fault) = .empty,
 
     pub fn deinit(self: *Faults) void {
-        self.reasons.deinit(self.allocator);
+        self.items.deinit(self.allocator);
         self.* = .{ .allocator = self.allocator };
+    }
+
+    pub fn latest(self: *const Faults, item: t.Id) ?Fault {
+        var found: ?Fault = null;
+        inline for (.{ Work.controls, Work.step }) |work| {
+            if (self.items.get(.{ .item = item, .work = work })) |fault| {
+                if (found == null or fault.at_ms > found.?.at_ms) found = fault;
+            }
+        }
+        return found;
+    }
+
+    fn ready(self: *const Faults, key: Key, now_ms: i64) bool {
+        const fault = self.items.get(key) orelse return true;
+        return now_ms >= fault.retry_ms or now_ms < fault.at_ms;
+    }
+
+    fn record(self: *Faults, key: Key, reason: []const u8, now_ms: i64) !void {
+        const entry = try self.items.getOrPut(self.allocator, key);
+        const failures = if (entry.found_existing) entry.value_ptr.failures +| 1 else 1;
+        const shift: u6 = @intCast(@min(failures - 1, 6));
+        const delay = @min(fault_retry_ms << shift, fault_retry_max_ms);
+        entry.value_ptr.* = .{
+            .reason = reason,
+            .at_ms = now_ms,
+            .failures = failures,
+            .retry_ms = now_ms +| delay,
+        };
     }
 };
 
@@ -80,12 +112,12 @@ pub fn Driver(comptime Types: type) type {
         }
 
         pub fn rebuild(self: *Self, a: std.mem.Allocator) !idx.Index {
-            var index = try catalog.rebuild(self.service, a, self.page_limit);
+            var index = catalog.rebuild(self.service, a, self.page_limit) catch |err| {
+                _ = try split(err);
+                return error.CorruptState;
+            };
             errdefer index.deinit();
-            for (index.obligations) |*obligation| {
-                if (obligation.fault == null)
-                    obligation.fault = self.faults.reasons.get(obligation.task);
-            }
+            for (index.obligations) |*obligation| obligation.fault = self.faults.latest(obligation.task);
             if (self.after_rebuild) |observer| {
                 self.after_rebuild = null;
                 try observer.observe(observer.context, a, &index);
@@ -124,12 +156,34 @@ pub fn Driver(comptime Types: type) type {
             return commands.turn(self, a, operation, origin, request);
         }
 
+        pub fn guarded(
+            self: *Self,
+            key: Key,
+            comptime T: type,
+            comptime work: anytype,
+            args: anytype,
+        ) Fatal!?T {
+            const now_ms = self.clock.now(self.clock.context) catch return error.ClockOutOfRange;
+            if (!self.faults.ready(key, now_ms)) return null;
+            const result: T = @call(.auto, work, args) catch |err| {
+                try self.faults.record(key, try split(err), now_ms);
+                return null;
+            };
+            _ = self.faults.items.remove(key);
+            return result;
+        }
+
         pub fn recoverTurns(self: *Self, a: std.mem.Allocator, limit: u32) ![]t.Id {
             return @import("conversation_recovery.zig").advance(self, a, limit);
         }
 
         pub fn resumeRetained(self: *Self, a: std.mem.Allocator, limit: u32) !u32 {
             return @import("continuation_recovery.zig").advance(self, a, limit);
+        }
+
+        pub fn importTurns(self: *Self, a: std.mem.Allocator) Fatal!bool {
+            const key: Key = .{ .item = @splat(0), .work = .import };
+            return (try self.guarded(key, bool, importedTurns, .{ self, a })) orelse false;
         }
 
         pub fn importStep(self: *Self, a: std.mem.Allocator) !bool {
@@ -236,8 +290,8 @@ pub fn Driver(comptime Types: type) type {
                 const obligation = index.obligation(request.target.?) orelse
                     return error.UnknownObligation;
                 const head = index.head(obligation);
-                if (head.mode == .cancelled or head.mode == .transferred)
-                    return error.FinalObligation;
+                if (obligation.effective_mode == .cancelled or
+                    obligation.effective_mode == .transferred) return error.FinalObligation;
                 if (self.body == .amend) try admission.amendment(self.body.amend);
                 if (self.body == .adopt)
                     try @import("method_catalog.zig").adoption(a, &index, self.body.adopt.method);
@@ -263,18 +317,22 @@ pub fn Driver(comptime Types: type) type {
             }
         };
 
-        pub fn advance(self: *Self, a: std.mem.Allocator, target: t.Id, part: Part) Fatal!Advance {
+        pub fn advance(self: *Self, a: std.mem.Allocator, target: t.Id, part: Part) Fatal!bool {
             if (!self.attached) return error.DriverDetached;
-            if (self.faults.reasons.contains(target)) return .{ .idle = {} };
-            const changed = switch (part) {
-                .controls => self.importedControls(a, target),
-                .step => if (self.nextStep(a, target)) |task| task != null else |err| err,
-            } catch |err| {
-                const reason = try split(err);
-                try self.faults.reasons.put(self.faults.allocator, target, reason);
-                return .{ .faulted = reason };
+            return switch (part) {
+                .controls => (try self.guarded(
+                    .{ .item = target, .work = .controls },
+                    bool,
+                    importedControls,
+                    .{ self, a, target },
+                )) orelse false,
+                .step => ((try self.guarded(
+                    .{ .item = target, .work = .step },
+                    ?t.Id,
+                    nextStep,
+                    .{ self, a, target },
+                )) orelse null) != null,
             };
-            return if (changed) .{ .progressed = {} } else .{ .idle = {} };
         }
 
         pub fn nextStep(self: *Self, a: std.mem.Allocator, target: t.Id) !?t.Id {
@@ -329,8 +387,9 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
     }
     if (!obligation.ordinaryDispatch()) return false;
     const schedule = head.schedule;
-    if (clock_ms >= schedule.next_due_ms and clock_ms >= schedule.source_not_before_ms and
-        clock_ms >= head.provider_not_before_ms) return true;
+    const scheduled = clock_ms >= schedule.next_due_ms and clock_ms >= schedule.source_not_before_ms;
+    if ((head.check_requested or scheduled) and clock_ms >= schedule.provider_not_before_ms)
+        return true;
     return head.observed.sequence > head.told.sequence and
         clock_ms >= schedule.render_not_before_ms;
 }

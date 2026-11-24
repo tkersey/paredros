@@ -12,6 +12,13 @@ const frame = @import("render_frame.zig");
 const method = @import("method.zig");
 const mc = @import("method_contract.zig");
 const words = @import("render_text.zig");
+const bounds = @import("bounds.zig");
+
+comptime {
+    const fixed = words.instruction.len + words.instruction_end.len + words.repository.len +
+        words.ref.len + words.lead_end.len + 2 * 20;
+    std.debug.assert(fixed <= bounds.prelude_overhead_bytes);
+}
 
 const Batches = @FieldType(t.Step, "batches");
 const BatchFact = Batches.Child;

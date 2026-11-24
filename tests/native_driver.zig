@@ -128,17 +128,24 @@ test "native driver replaces a fenced live step with a receipt bound fold" {
     try std.testing.expectEqual(0, after.head(after.obligation(target).?).accounting.known_calls);
 }
 
-test "native driver fences one unusable obligation and keeps advancing the others" {
+const Flaky = struct {
+    failures: u32,
+    calls: u32 = 0,
+
+    fn run(self: *Flaky) !bool {
+        self.calls += 1;
+        if (self.calls <= self.failures) return error.TransientRead;
+        return true;
+    }
+};
+
+test "native driver replaces a cancelled fold step and observes faults without fencing" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
     const a = fixture.arena.allocator();
     const initial = fixture_values.genesis();
     const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
-    var other = fixture_values.genesis();
-    other.envelope.operation = .{ .bytes = "local-genesis-other" };
-    other.lineage = @splat(9);
-    const healthy = try fixture.execute(other.envelope.operation.bytes, .{ .genesis = other });
     var clock: Clock = .{};
     var driver: Driver = .{
         .service = &fixture.service.?,
@@ -148,20 +155,33 @@ test "native driver fences one unusable obligation and keeps advancing the other
     defer driver.detach();
     defer driver.faults.deinit();
     _ = (try driver.nextStep(a, target)).?;
-    _ = try driver.directive(a, "pause-unusable", .{ .local = .{ .uid = 501 } }, target, .{
+    _ = try driver.directive(a, "pause-cancelled", .{ .local = .{ .uid = 501 } }, target, .{
         .pause = {},
     });
     const replacement = (try driver.nextStep(a, target)).?;
     try cancelTurn(&fixture, replacement, "cancel-fold");
-    const faulted = try driver.advance(a, target, .step);
-    try std.testing.expectEqualStrings("UnusableFoldAttempt", faulted.faulted);
+    try std.testing.expect(try driver.advance(a, target, .step));
     var index = try driver.rebuild(a);
-    try std.testing.expectEqualStrings("UnusableFoldAttempt", index.obligation(target).?.fault.?);
-    try std.testing.expect(!index.obligation(target).?.ordinaryDispatch());
-    try std.testing.expectEqual(null, index.obligation(healthy).?.fault);
+    const obligation = index.obligation(target).?;
+    try std.testing.expectEqual(null, obligation.fault);
+    const successor = index.records[obligation.eligible.?].input.step;
+    try std.testing.expect(successor.fold_only);
+    try std.testing.expectEqual(.control, successor.supersession.?.cause);
     index.deinit();
-    try std.testing.expectEqual(.idle, try driver.advance(a, target, .step));
-    try std.testing.expectEqual(.progressed, try driver.advance(a, healthy, .step));
+    var flaky: Flaky = .{ .failures = 2 };
+    const key: @import("../native/driver.zig").Key = .{ .item = target, .work = .step };
+    try std.testing.expectEqual(null, try driver.guarded(key, bool, Flaky.run, .{&flaky}));
+    index = try driver.rebuild(a);
+    try std.testing.expectEqualStrings("TransientRead", index.obligation(target).?.fault.?.reason);
+    index.deinit();
+    try std.testing.expectEqual(null, try driver.guarded(key, bool, Flaky.run, .{&flaky}));
+    try std.testing.expectEqual(1, flaky.calls);
+    clock.now_ms += 1_000;
+    try std.testing.expectEqual(null, try driver.guarded(key, bool, Flaky.run, .{&flaky}));
+    try std.testing.expectEqual(2, driver.faults.items.get(key).?.failures);
+    clock.now_ms += 2_000;
+    try std.testing.expectEqual(true, try driver.guarded(key, bool, Flaky.run, .{&flaky}));
+    try std.testing.expectEqual(null, driver.faults.latest(target));
 }
 
 test "native driver recovers a captured step before a pause fence replaces it" {
@@ -173,8 +193,8 @@ test "native driver recovers a captured step before a pause fence replaces it" {
     try std.testing.expectEqual(.control, decide(.{ .stay = {} }, true, false).replace);
     try std.testing.expectEqual(.control, decide(.{ .resume_parked = {} }, true, false).replace);
     try std.testing.expect(decide(.{ .stay = {} }, true, true) == .none);
-    try std.testing.expect(decide(.{ .replace = .failed }, false, true) == .unusable);
-    try std.testing.expect(decide(.{ .replace = .control }, true, true) == .unusable);
+    try std.testing.expect(decide(.{ .replace = .failed }, false, true) == .failed_fold);
+    try std.testing.expectEqual(.control, decide(.{ .replace = .control }, true, true).replace);
     try std.testing.expectEqual(.unknown, decide(.{ .replace = .unknown }, true, true).replace);
     try std.testing.expectEqual(.rejected, decide(.{ .replace = .rejected }, false, false).replace);
 }

@@ -199,7 +199,7 @@ pub fn Daemon(comptime Types: type) type {
                     return resumed != 0;
                 },
                 .import_turns => {
-                    const imported = try self.driver.importedTurns(a);
+                    const imported = try self.driver.importTurns(a);
                     self.scheduling = .recover_turns;
                     return imported;
                 },
@@ -227,11 +227,11 @@ pub fn Daemon(comptime Types: type) type {
                 },
                 .import_controls => |target| {
                     self.scheduling = .{ .step = target };
-                    return try self.driver.advance(a, target, .controls) != .idle;
+                    return self.driver.advance(a, target, .controls);
                 },
                 .step => |target| {
                     self.scheduling = .retained;
-                    return try self.driver.advance(a, target, .step) != .idle;
+                    return self.driver.advance(a, target, .step);
                 },
             }
         }

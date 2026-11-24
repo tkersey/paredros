@@ -74,15 +74,19 @@ pub fn emit(c: protean.Context) !Function {
     return function;
 }
 
+const Tools = struct { next: temporal.Function, advance: temporal.Advance, delay: Delay };
+
 pub fn failure(c: protean.Context) !Failure {
-    const next_slot = try temporal.emit(c);
-    const delay = try delayFunction(c);
+    const tools: Tools = .{
+        .next = try temporal.emit(c),
+        .advance = try temporal.advance(c),
+        .delay = try delayFunction(c),
+    };
     const function = try c.author.function("bounded attributed phase retry", .{
         .input = try c.schema(FailureInput),
     }, try c.schema(t.Head), &.{});
     const b = try c.author.body(function);
     const input = try b.parameter("input");
-    const head = try b.field(input, "head");
     const phase = try b.enumTag(try b.field(input, "phase"));
     const checking = try b.branch();
     const remaining = try b.branch();
@@ -90,12 +94,20 @@ pub fn failure(c: protean.Context) !Failure {
     const unattributed = try remaining.branch();
     const other = try remaining.conditional(
         try remaining.equal(phase, try remaining.enumTag(try c.literal(t.Phase, .render))),
-        try rendering.ret(try attributed(c, rendering, input, next_slot, delay, .render)),
-        try unattributed.ret(try deferFold(c, unattributed, head, next_slot)),
+        try rendering.ret(try attributed(c, rendering, input, tools, .render)),
+        try unattributed.ret(try attributed(
+            c,
+            unattributed,
+            try unattributed.update(input, .{
+                .head = try attributed(c, unattributed, input, tools, .check),
+            }),
+            tools,
+            .render,
+        )),
     );
     try c.author.define(function, try b.ret(try b.conditional(
         try b.equal(phase, try b.enumTag(try c.literal(t.Phase, .check))),
-        try checking.ret(try attributed(c, checking, input, next_slot, delay, .check)),
+        try checking.ret(try attributed(c, checking, input, tools, .check)),
         try remaining.ret(other),
     )));
     return function;
@@ -119,26 +131,11 @@ fn maximum(b: anytype, left: a.Value(i64), right: a.Value(i64)) !a.Value(i64) {
     return b.select(try b.less(left, right), right, left);
 }
 
-fn deferFold(
-    c: protean.Context,
-    b: anytype,
-    head: a.Value(t.Head),
-    next: temporal.Function,
-) !a.Value(t.Head) {
-    const deadline = try slot(c, b, head, next);
-    const schedule = try b.field(head, "schedule");
-    var instants: temporal.Instants = undefined;
-    inline for (@typeInfo(t.Schedule).@"struct".field_names) |name|
-        @field(instants, name) = try maximum(b, try b.field(schedule, name), deadline);
-    return b.update(head, .{ .schedule = try b.product(try c.schema(t.Schedule), instants) });
-}
-
 fn attributed(
     c: protean.Context,
     b: anytype,
     input: a.Value(FailureInput),
-    next: temporal.Function,
-    delay: Delay,
+    tools: Tools,
     comptime phase: t.Phase,
 ) !a.Value(t.Head) {
     const count_field = if (phase == .check) "check_failure_streak" else "render_failure_streak";
@@ -159,10 +156,10 @@ fn attributed(
         try b.constant(bool, true),
         exceeded,
     );
-    const immediate = try retryInstant(c, retrying, now, count, delay);
+    const immediate = try retryInstant(c, retrying, now, count, tools.delay);
     const instant = try b.conditional(
         defer_slot,
-        try scheduled.ret(try slot(c, scheduled, head, next)),
+        try scheduled.ret(try slot(c, scheduled, head, tools.next)),
         try retrying.ret(immediate),
     );
     const deadline = try maximum(b, instant, previous);
@@ -173,18 +170,25 @@ fn attributed(
             .render_not_before_ms = try maximum(b, deadline, provider),
         }),
     });
-    return b.update(head, .{
+    const paced = try b.update(head, .{
         .check_failure_streak = count,
+        .check_requested = try b.constant(bool, false),
         .schedule = try b.update(schedule, .{
             .source_not_before_ms = deadline,
-            .next_due_ms = deadline,
+            .provider_not_before_ms = try maximum(
+                b,
+                try b.field(schedule, "provider_not_before_ms"),
+                provider,
+            ),
         }),
-        .provider_not_before_ms = try maximum(
-            b,
-            try b.field(head, "provider_not_before_ms"),
-            provider,
-        ),
     });
+    const deferring = try b.branch();
+    const waiting = try b.branch();
+    return b.conditional(
+        defer_slot,
+        try deferring.ret(try deferring.call(tools.advance, .{ .head = paced })),
+        try waiting.ret(paced),
+    );
 }
 
 fn nextCount(
@@ -301,7 +305,7 @@ pub fn rejection(c: protean.Context) !Rejection {
     const deadline = try b.call(provider, .{ .input = try b.product(try c.schema(ProviderInput), .{
         .evidence = try b.field(input, "evidence"),
         .clock_ms = try b.field(head, "clock_ms"),
-        .deadline_ms = try b.field(head, "provider_not_before_ms"),
+        .deadline_ms = try b.field(try b.field(head, "schedule"), "provider_not_before_ms"),
         .index = try b.constant(u64, 0),
         .rate_limited = try b.equal(
             try b.enumTag(reason),

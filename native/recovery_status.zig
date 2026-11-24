@@ -16,7 +16,7 @@ pub const Decision = union(enum) {
     resume_captured: void,
     resume_parked: void,
     replace: @FieldType(t.Supersession, "cause"),
-    unusable: void,
+    failed_fold: void,
 };
 pub const Turn = struct {
     status: native.tasks.Status,
@@ -66,8 +66,7 @@ pub fn classify(
 pub fn decide(action: Action, fenced: bool, fold_only: bool) Decision {
     switch (action) {
         .resume_captured => return .{ .resume_captured = {} },
-        .replace => |cause| if (fold_only and (cause == .failed or cause == .control))
-            return .{ .unusable = {} },
+        .replace => |cause| if (fold_only and cause == .failed) return .{ .failed_fold = {} },
         .stay, .resume_parked => {},
     }
     if (fenced and !fold_only) return .{ .replace = .control };

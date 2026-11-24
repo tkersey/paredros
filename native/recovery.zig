@@ -5,6 +5,7 @@ const idx = @import("index.zig");
 const catalog = @import("catalog.zig");
 const materialize = @import("materialize.zig");
 const recovery_status = @import("recovery_status.zig");
+const bounds = @import("../app/bounds.zig");
 
 pub fn advance(
     service: anytype,
@@ -33,7 +34,20 @@ pub fn advance(
     );
     const selected: recovery_status.Action = switch (decision) {
         .none => return null,
-        .unusable => return error.UnusableFoldAttempt,
+        .failed_fold => {
+            if (!foldRetryReady(index, obligation, record.input.step, clock_ms))
+                return error.FoldStepFailed;
+            return try replace(
+                service,
+                a,
+                record,
+                obligation.task,
+                clock_ms,
+                model,
+                page_limit,
+                .failed,
+            );
+        },
         .replace => |reason| return try replace(
             service,
             a,
@@ -67,6 +81,23 @@ pub fn advance(
             .incompatible,
         );
     return null;
+}
+
+pub const fold_retry_max_ms: i64 = 3_600_000;
+
+fn foldRetryReady(
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+    failed: t.Step,
+    clock_ms: i64,
+) bool {
+    var frozen = failed.previous.folded_directive_ordinal;
+    for (failed.directives.items) |fact| frozen = @max(frozen, fact.value.ordinal);
+    for (obligation.directives) |position|
+        if (index.records[position].input.directive.ordinal > frozen) return true;
+    const shift: u6 = @intCast(@min(failed.attempt, 6));
+    const delay = @min(bounds.phase_retry_ms << shift, fold_retry_max_ms);
+    return clock_ms >= failed.clock_ms +| delay or clock_ms < failed.clock_ms;
 }
 
 fn replace(
