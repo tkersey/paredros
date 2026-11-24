@@ -48,6 +48,7 @@ pub const Obligation = struct {
     folded_mode: t.Mode,
     effective_mode: t.Mode,
     recovery_hold: bool,
+    settlements: std.AutoHashMapUnmanaged(t.Id, t.Settlement) = .empty,
 
     pub fn ordinaryDispatch(self: Obligation) bool {
         return self.effective_mode == .active and !self.recovery_hold;
@@ -159,10 +160,14 @@ pub const Index = struct {
         self.imports = try continuity.prepareImports(scratch, self);
         self.portable = try continuity.preparePortable(scratch, self);
         try validateTurns(self, cancellations);
+        const successors = try stepSuccessors(self);
         for (self.records, 0..) |item, position| {
             if (item.input != .genesis or recordHead(item) == null) continue;
             if (self.lineages.get(item.input.genesis.lineage).? != position) continue;
-            try obligations.append(scratch, try buildObligation(self, position, cancellations));
+            try obligations.append(
+                scratch,
+                try buildObligation(self, position, &successors, cancellations),
+            );
         }
         self.obligations = try obligations.toOwnedSlice(scratch);
         for (self.records) |item| switch (item.input) {
@@ -406,9 +411,40 @@ fn sameValue(a: std.mem.Allocator, comptime T: type, left: T, right: T) !bool {
     return std.mem.eql(u8, x, y);
 }
 
+const Successors = std.AutoHashMapUnmanaged(t.Id, std.ArrayList(usize));
+const Cut = struct { task: t.Id, revision: u64 };
+const Chain = struct {
+    positions: std.ArrayList(usize) = .empty,
+    members: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    settlements: std.AutoHashMapUnmanaged(t.Id, t.Settlement) = .empty,
+    consumed: std.AutoHashMapUnmanaged(Cut, void) = .empty,
+
+    fn append(self: *Chain, a: std.mem.Allocator, item: Record, position: usize) !void {
+        try self.positions.append(a, position);
+        try self.members.put(a, position, {});
+        if (item.input == .step) for (item.input.step.facts.items) |fact|
+            try self.settlements.put(a, fact.reference.task, fact);
+        for (recordHead(item).?.consumed.items) |used|
+            try self.consumed.put(a, .{ .task = used.task, .revision = used.revision }, {});
+    }
+};
+
+fn stepSuccessors(self: *Index) !Successors {
+    const a = self.arena.allocator();
+    var result: Successors = .empty;
+    for (self.records, 0..) |item, position| {
+        if (item.input != .step) continue;
+        const entry = try result.getOrPut(a, item.input.step.predecessor.task);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        try entry.value_ptr.append(a, position);
+    }
+    return result;
+}
+
 fn buildObligation(
     self: *Index,
     genesis_position: usize,
+    successors: *const Successors,
     cancellations: []const Cancellation,
 ) !Obligation {
     const a = self.arena.allocator();
@@ -416,24 +452,30 @@ fn buildObligation(
     const initial = recordHead(genesis) orelse return error.MissingGenesisResult;
     try validateGenesis(genesis, initial);
     const directives = try orderedDirectives(self, genesis.task, initial);
-    var chain: std.ArrayList(usize) = .empty;
-    try chain.append(a, genesis_position);
+    var chain: Chain = .{};
+    try chain.append(a, genesis, genesis_position);
     self.records[genesis_position].selected = true;
     var eligible: ?usize = null;
     var selected = genesis_position;
     var remaining = self.records.len;
     while (remaining > 0) : (remaining -= 1) {
-        const next = try nextAttempt(self, selected, genesis.task, cancellations) orelse break;
+        const next = try nextAttempt(
+            self,
+            successors,
+            selected,
+            genesis.task,
+            cancellations,
+        ) orelse break;
         const current = recordHead(self.records[selected]).?;
         if (current.mode == .cancelled or current.mode == .transferred)
             return error.FinalHeadSuccessor;
-        try validateStep(self, next, selected, directives, chain.items);
+        try validateStep(self, next, selected, directives, &chain);
         if (recordHead(self.records[next]) == null) {
             eligible = next;
             break;
         }
         self.records[next].selected = true;
-        try chain.append(a, next);
+        try chain.append(a, self.records[next], next);
         selected = next;
     }
     for (self.records) |item| if (item.input == .step and
@@ -453,12 +495,13 @@ fn buildObligation(
     }
     return .{
         .task = genesis.task,
-        .chain = try chain.toOwnedSlice(a),
+        .chain = try chain.positions.toOwnedSlice(a),
         .directives = directives,
         .eligible = eligible,
         .folded_mode = latest.mode,
         .effective_mode = effective,
         .recovery_hold = recovery_hold,
+        .settlements = chain.settlements,
     };
 }
 
@@ -522,15 +565,16 @@ fn orderedDirectives(self: *Index, obligation: t.Id, initial: t.Head) ![]const u
 
 fn nextAttempt(
     self: *Index,
+    successors: *const Successors,
     selected: usize,
     obligation: t.Id,
     receipts: []const Cancellation,
 ) !?usize {
     var attempts: std.ArrayList(usize) = .empty;
     const a = self.arena.allocator();
-    for (self.records, 0..) |item, position| {
-        if (item.input != .step or !std.meta.eql(item.input.step.obligation, obligation)) continue;
-        if (std.meta.eql(item.input.step.predecessor.task, self.records[selected].task))
+    const candidates = successors.get(self.records[selected].task) orelse return null;
+    for (candidates.items) |position| {
+        if (std.meta.eql(self.records[position].input.step.obligation, obligation))
             try attempts.append(a, position);
     }
     std.mem.sort(usize, attempts.items, self, struct {
@@ -643,7 +687,7 @@ fn validateStep(
     position: usize,
     predecessor: usize,
     directives: []const usize,
-    chain: []const usize,
+    chain: *const Chain,
 ) !void {
     const a = self.arena.allocator();
     const step = self.records[position].input.step;
@@ -654,7 +698,7 @@ fn validateStep(
     var control_state = ControlState.fromHead(previous);
     for (step.directives.items) |fact| {
         ordinal = try std.math.add(u64, ordinal, 1);
-        const base = recordHead(self.records[chain[0]]).?.folded_directive_ordinal;
+        const base = recordHead(self.records[chain.positions.items[0]]).?.folded_directive_ordinal;
         const relative = try std.math.sub(u64, ordinal, base);
         if (relative == 0 or relative > directives.len) return error.MissingDirective;
         const admitted = self.records[directives[@intCast(relative - 1)]];
@@ -686,7 +730,7 @@ fn validateStep(
         if (!std.meta.eql(used, fact.reference)) return error.ConsumptionMismatch;
 }
 
-fn validateBatches(self: *Index, step: t.Step, chain: []const usize) !void {
+fn validateBatches(self: *Index, step: t.Step, chain: *const Chain) !void {
     const a = self.arena.allocator();
     var sequence = step.previous.told.sequence;
     for (step.batches.items) |copied| {
@@ -702,7 +746,7 @@ fn selectedBatch(
     self: *Index,
     obligation: t.Id,
     reference: t.Reference,
-    chain: []const usize,
+    chain: *const Chain,
 ) !t.Batch {
     const source = self.record(reference.task) orelse return error.MissingBatch;
     const output = source.result orelse return error.MissingBatch;
@@ -716,11 +760,11 @@ fn selectedBatch(
     if (output != .step or source.input != .step or
         !std.meta.eql(source.input.step.obligation, obligation)) return error.ForeignBatch;
     const position = self.tasks.get(source.task).?;
-    if (std.mem.indexOfScalar(usize, chain, position) == null) return error.UnselectedBatch;
+    if (!chain.members.contains(position)) return error.UnselectedBatch;
     return output.step.batch orelse error.MissingBatch;
 }
 
-fn validateFacts(self: *Index, step: t.Step, chain: []const usize) !void {
+fn validateFacts(self: *Index, step: t.Step, chain: *const Chain) !void {
     const a = self.arena.allocator();
     for (step.facts.items, 0..) |fact, position| {
         const item = self.record(fact.reference.task) orelse return error.MissingFact;
@@ -742,8 +786,10 @@ fn validateFacts(self: *Index, step: t.Step, chain: []const usize) !void {
         try validateDeliveryFact(a, fact, frozen, snapshot.value);
         for (step.facts.items[0..position]) |prior|
             if (sameCut(prior.reference, fact.reference)) return error.DuplicateConsumption;
-        for (chain) |prior| for (recordHead(self.records[prior]).?.consumed.items) |used|
-            if (sameCut(used, fact.reference)) return error.DuplicateConsumption;
+        if (chain.consumed.contains(.{
+            .task = fact.reference.task,
+            .revision = fact.reference.revision,
+        })) return error.DuplicateConsumption;
     }
 }
 
@@ -753,18 +799,11 @@ fn sameCut(left: t.RevisionReference, right: t.RevisionReference) bool {
 
 fn previousFact(
     self: *Index,
-    chain: []const usize,
+    chain: *const Chain,
     current: []const t.Settlement,
     fact: t.Settlement,
 ) !?retained.OwnedSnapshot {
-    var selected: ?t.Settlement = null;
-    for (chain) |position| {
-        const input = self.records[position].input;
-        if (input != .step) continue;
-        for (input.step.facts.items) |candidate| {
-            if (std.meta.eql(candidate.reference.task, fact.reference.task)) selected = candidate;
-        }
-    }
+    var selected = chain.settlements.get(fact.reference.task);
     for (current) |candidate| {
         if (std.meta.eql(candidate.reference.task, fact.reference.task)) selected = candidate;
     }

@@ -12,6 +12,7 @@ const Application = struct {
     pub const declarations = app.Application.declarations;
 };
 const Fixture = @import("native_fixture.zig").Fixture(app.Types, Application);
+const continuity_control = @import("../native/continuity_control.zig");
 const origin: t.Origin = .{ .local = .{ .uid = 501 } };
 
 const Clock = struct {
@@ -68,11 +69,36 @@ fn completeAdmissions(f: *Fixture, driver: *Driver) !void {
     }
 }
 
+fn writeBundle(
+    a: std.mem.Allocator,
+    directory: std.Io.Dir,
+    name: []const u8,
+    bundle: transfer.Bundle,
+) !void {
+    try directory.writeFile(std.testing.io, .{
+        .sub_path = name,
+        .data = try c.encodeOwned(transfer.Bundle, a, bundle),
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
+}
+
+fn importBundle(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !transfer.ImportProgress {
+    const a = f.arena.allocator();
+    const identity = continuity.hash(try c.encodeOwned(transfer.Bundle, a, bundle));
+    const name = try std.fmt.allocPrint(a, "{s}.paredros", .{
+        std.fmt.bytesToHex(identity, .lower),
+    });
+    try writeBundle(a, f.temporary.?.dir, name, bundle);
+    const file = try std.fs.path.join(a, &.{ std.fs.path.dirname(f.path).?, name });
+    const operation = try std.fmt.allocPrint(a, "import:{s}", .{name});
+    return fileImport(f, driver, config(), operation, file);
+}
+
 fn importDone(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
     const budget = bundle.members.items.len + bundle.lineages.items.len + 3;
     for (0..budget) |_| {
-        var progress = try transfer.importBundle(driver, a, config(), origin, bundle);
+        var progress = try importBundle(f, driver, bundle);
         defer progress.deinit(a);
         if (progress.phase == .materialized) return;
         var index = try driver.rebuild(a);
@@ -189,54 +215,44 @@ test "native continuity import maps pending controls once and resume retains rec
     try verifyImported(&to, &destination, imported);
     var conflict = bundle.value;
     conflict.source.clock_ms += 1;
-    try std.testing.expectError(error.ContinuityLineageConflict, transfer.importBundle(
-        &destination,
-        a,
-        config(),
-        origin,
-        conflict,
-    ));
-    try verifyFiles(a, bundle.value);
+    try std.testing.expectError(
+        error.ContinuityLineageConflict,
+        importBundle(&to, &destination, conflict),
+    );
+    try verifyFiles(&to, &destination);
 }
 
-fn verifyFiles(a: std.mem.Allocator, bundle: transfer.Bundle) !void {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    var buffer: [4096]u8 = undefined;
-    const length = try temporary.dir.realPath(std.testing.io, &buffer);
-    const directory = buffer[0..length];
-    try temporary.dir.setPermissions(std.testing.io, .fromMode(0o700));
-    try transfer.validateExportDestination(std.testing.io, directory, "bundle.paredros");
-    const digest = try transfer.writeSnapshot(
-        a,
-        std.testing.io,
-        directory,
-        "bundle.paredros",
-        bundle,
-    );
-    try std.testing.expectEqualDeep(
-        digest,
-        try transfer.writeSnapshot(a, std.testing.io, directory, "bundle.paredros", bundle),
-    );
-    const path = try std.fs.path.join(a, &.{ directory, "bundle.paredros" });
-    defer a.free(path);
-    var read = try transfer.readBundle(a, std.testing.io, path, null);
-    defer read.deinit();
-    try std.testing.expect(try continuity.equal(a, transfer.Bundle, bundle, read.value));
-    var changed = bundle;
-    changed.source.clock_ms += 1;
+fn verifyFiles(f: *Fixture, driver: *Driver) !void {
+    const a = f.arena.allocator();
+    const io = std.testing.io;
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const name = "bundle.paredros";
+    const written = try exportWritten(f, driver, settings, "file-export", name);
+    const again = try exportWritten(f, driver, settings, "file-export", name);
+    try std.testing.expectEqualDeep(written.digest.?, again.digest.?);
+    const bytes = try backup.temporary.dir.readFileAlloc(io, name, a, .unlimited);
+    try std.testing.expectEqualDeep(written.digest.?, continuity.hash(bytes));
+    try backup.temporary.dir.deleteFile(io, name);
+    try backup.temporary.dir.writeFile(io, .{
+        .sub_path = name,
+        .data = "a different bundle",
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
     try std.testing.expectError(
         error.TransferFileConflict,
-        transfer.writeSnapshot(a, std.testing.io, directory, "bundle.paredros", changed),
+        exportWritten(f, driver, settings, "file-export", name),
     );
     try std.testing.expectError(
         error.InvalidTransferPath,
-        transfer.writeSnapshot(a, std.testing.io, directory, "../escape", bundle),
+        exportWritten(f, driver, settings, "escape-export", "../escape"),
     );
-    try temporary.dir.setPermissions(std.testing.io, .fromMode(0o755));
+    try backup.temporary.dir.setPermissions(io, .fromMode(0o755));
     try std.testing.expectError(
         error.UnsafeTransferPath,
-        transfer.validateExportDestination(std.testing.io, directory, "new.paredros"),
+        transfer.validateExportDestination(io, settings.backup_directory.?, "new.paredros"),
     );
 }
 
@@ -516,7 +532,7 @@ test "native continuity refuses boundaries until materialized and output ingress
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
-    var progress = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    var progress = try importBundle(&to, &destination, bundle.value);
     progress.deinit(a);
     const before = try recordCount(a, &destination);
     try std.testing.expectError(
@@ -551,7 +567,7 @@ fn importInterleaved(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !voi
     const a = f.arena.allocator();
     const budget = bundle.members.items.len + 2 * bundle.lineages.items.len + 3;
     for (0..budget) |_| {
-        var progress = try transfer.importBundle(driver, a, config(), origin, bundle);
+        var progress = try importBundle(f, driver, bundle);
         defer progress.deinit(a);
         if (progress.phase == .materialized) return;
         try completeAdmissions(f, driver);
@@ -663,8 +679,6 @@ test "native continuity import keeps controls under a cancelled head historical"
     try std.testing.expectEqual(.cancelled, index.head(index.obligation(imported).?).mode);
 }
 
-const continuity_control = @import("../native/continuity_control.zig");
-
 const Backup = struct {
     temporary: std.testing.TmpDir,
     buffer: [4096]u8 = undefined,
@@ -704,7 +718,7 @@ test "native continuity control import commits one manifest for one bundle" {
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
     const directory = try backup.path();
-    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", bundle.value);
+    try writeBundle(a, backup.temporary.dir, "handoff.paredros", bundle.value);
     const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
     original.detach();
     try from.close();
@@ -752,6 +766,73 @@ fn controlImport(f: *Fixture, driver: *Driver, file: []const u8) !t.Id {
         _ = try driver.importStep(a);
     }
     return error.ImportDidNotComplete;
+}
+
+fn transferWritten(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    environment: continuity_control.Environment,
+) !transfer.OwnedBundle {
+    const a = f.arena.allocator();
+    for (0..16) |_| {
+        const progress = try continuity_control.exportBundle(
+            driver,
+            a,
+            settings,
+            environment,
+            "pending-transfer",
+            origin,
+            .{ .name = .{ .bytes = "handoff.paredros" } },
+        );
+        var index = try driver.rebuild(a);
+        defer index.deinit();
+        if (progress.phase == .written) return transfer.committedBundle(a, &index, progress.cut.?);
+        try completeAdmissions(f, driver);
+        for (index.obligations) |obligation| {
+            if (try driver.nextStep(a, obligation.task)) |step| try finish(f, step);
+        }
+    }
+    return error.ExportDidNotComplete;
+}
+
+test "native continuity export waits for an admitted genesis that has not run" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try f.service.?.submit(a, genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var driver = try hopDriver(&f, &clock);
+    defer driver.detach();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(&f),
+    };
+    try std.testing.expectError(error.ContinuityGenesisPending, continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        environment,
+        "pending-snapshot",
+        origin,
+        .{ .name = .{ .bytes = "pending.paredros" }, .snapshot = true },
+    ));
+    var bundle = try transferWritten(&f, &driver, settings, environment);
+    defer bundle.deinit();
+    try std.testing.expectEqual(1, bundle.value.lineages.items.len);
+    var head = try continuity.decode(
+        .head,
+        a,
+        continuity.member(bundle.value, bundle.value.lineages.items[0].head).?.data,
+    );
+    defer head.deinit();
+    try std.testing.expectEqual(.transferred, head.value.mode);
 }
 
 test "native continuity export refuses an occupied name before fencing the source" {
@@ -1029,7 +1110,7 @@ test "native continuity daemon materializes an admitted import across restart" {
         .bindings = configuration.bindings(config()),
     };
     try destination.attach(to.arena.allocator());
-    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    var admitted = try importBundle(&to, &destination, bundle.value);
     admitted.deinit(a);
     destination.detach();
     try std.testing.expectEqual(.members_pending, try daemonImport(&to, &destination, true));
@@ -1070,7 +1151,7 @@ test "native continuity export refuses while an import is incomplete" {
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
-    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    var admitted = try importBundle(&to, &destination, bundle.value);
     admitted.deinit(a);
     try completeAdmissions(&to, &destination);
     var backup = try Backup.init();
@@ -1120,7 +1201,7 @@ fn fileImport(
     );
 }
 
-fn importFixture(from: *Fixture, to: *Fixture, directory: []const u8) !transfer.OwnedBundle {
+fn importFixture(from: *Fixture, to: *Fixture, directory: std.Io.Dir) !transfer.OwnedBundle {
     const a = from.arena.allocator();
     try from.init();
     const genesis = contracts.genesis();
@@ -1132,7 +1213,7 @@ fn importFixture(from: *Fixture, to: *Fixture, directory: []const u8) !transfer.
     };
     try original.attach(a);
     const bundle = try transfer.capture(&original, a, source(from), .snapshot);
-    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", bundle.value);
+    try writeBundle(a, directory, "handoff.paredros", bundle.value);
     original.detach();
     try from.close();
     try to.init();
@@ -1147,7 +1228,7 @@ test "native continuity import operation conflicts when its file changes" {
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
     const directory = try backup.path();
-    var bundle = try importFixture(&from, &to, directory);
+    var bundle = try importFixture(&from, &to, backup.temporary.dir);
     defer bundle.deinit();
     const a = to.arena.allocator();
     const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
@@ -1164,7 +1245,7 @@ test "native continuity import operation conflicts when its file changes" {
     try backup.temporary.dir.deleteFile(std.testing.io, "handoff.paredros");
     var changed = bundle.value;
     changed.source.clock_ms += 1;
-    _ = try transfer.writeSnapshot(a, std.testing.io, directory, "handoff.paredros", changed);
+    try writeBundle(a, backup.temporary.dir, "handoff.paredros", changed);
     try std.testing.expectError(
         error.OperationConflict,
         fileImport(&to, &destination, config(), "same-import", file),
@@ -1186,7 +1267,7 @@ test "native continuity import validates bindings after manifest admission" {
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
     const directory = try backup.path();
-    var bundle = try importFixture(&from, &to, directory);
+    var bundle = try importFixture(&from, &to, backup.temporary.dir);
     defer bundle.deinit();
     const a = to.arena.allocator();
     const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
@@ -1282,7 +1363,7 @@ test "native continuity delivery target ignores lineages whose genesis is pendin
     };
     try destination.attach(to.arena.allocator());
     defer destination.detach();
-    var admitted = try transfer.importBundle(&destination, a, config(), origin, bundle.value);
+    var admitted = try importBundle(&to, &destination, bundle.value);
     admitted.deinit(a);
     try completeAdmissions(&to, &destination);
     const pending = try pendingGenesis(&to, &destination);
@@ -1647,7 +1728,7 @@ fn staleGenesis() t.Genesis {
     return value;
 }
 
-test "native continuity import skips the bindings of a cancelled lineage" {
+test "native continuity import skips cancelled lineages and binds identity rather than route" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -1670,6 +1751,10 @@ test "native continuity import skips the bindings of a cancelled lineage" {
         error.ContinuityResourceMismatch,
         transfer.validateBindings(a, bundle.value, configuration.bindings(moved)),
     );
+    var renamed = config();
+    renamed.repository.owner = "renamed-owner";
+    renamed.repository.name = "renamed-name";
+    try transfer.validateBindings(a, bundle.value, configuration.bindings(renamed));
     original.detach();
     try from.close();
     try to.init();

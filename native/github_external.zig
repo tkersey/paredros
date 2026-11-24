@@ -50,12 +50,10 @@ fn hash(bytes: []const u8) t.Digest {
     return result;
 }
 
-fn bound(left: t.Repository, right: t.Repository) bool {
-    return left.id == right.id and
-        std.mem.eql(u8, left.account.bytes, right.account.bytes) and
-        std.mem.eql(u8, left.owner.bytes, right.owner.bytes) and
-        std.mem.eql(u8, left.name.bytes, right.name.bytes) and
-        std.mem.eql(u8, left.ref.bytes, right.ref.bytes);
+pub fn bound(configured: t.Repository, requested: t.Repository) bool {
+    return configured.id == requested.id and
+        std.mem.eql(u8, configured.account.bytes, requested.account.bytes) and
+        std.mem.eql(u8, configured.ref.bytes, requested.ref.bytes);
 }
 
 fn reject(a: std.mem.Allocator, bytes: []const u8, reason: contract.Failure) registry.Acquisition {

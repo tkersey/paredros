@@ -298,7 +298,7 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
         if (record.input == .step) continue;
         const target = materialize.factTarget(index, record) orelse continue;
         if (!std.meta.eql(target, obligation.task)) continue;
-        if (materialize.unsettled(index, obligation, record)) return true;
+        if (materialize.unsettled(obligation, record)) return true;
     }
     if (!obligation.ordinaryDispatch()) return false;
     if (clock_ms >= head.next_due_ms and clock_ms >= head.source_not_before_ms) return true;

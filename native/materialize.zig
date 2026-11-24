@@ -148,18 +148,6 @@ fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
     return std.meta.eql(selected, target);
 }
 
-fn priorFact(index: *const idx.Index, obligation: *const idx.Obligation, task: t.Id) ?t.Settlement {
-    var previous: ?t.Settlement = null;
-    for (obligation.chain) |position| {
-        const input = index.records[position].input;
-        if (input != .step) continue;
-        for (input.step.facts.items) |fact| {
-            if (std.meta.eql(fact.reference.task, task)) previous = fact;
-        }
-    }
-    return previous;
-}
-
 fn facts(
     a: std.mem.Allocator,
     index: *const idx.Index,
@@ -181,21 +169,17 @@ fn facts(
     }.less);
     for (ordered.items) |position| {
         const record = index.records[position];
-        if (!unsettled(index, obligation, record)) continue;
+        if (!unsettled(obligation, record)) continue;
         if (result.items.len == 128) break;
-        const previous = priorFact(index, obligation, record.task);
+        const previous = obligation.settlements.get(record.task);
         try result.append(a, try settlement(a, record, previous));
     }
     return result.toOwnedSlice(a);
 }
 
-pub fn unsettled(
-    index: *const idx.Index,
-    obligation: *const idx.Obligation,
-    record: idx.Record,
-) bool {
+pub fn unsettled(obligation: *const idx.Obligation, record: idx.Record) bool {
     if (!readyFact(record)) return false;
-    const previous = priorFact(index, obligation, record.task) orelse return true;
+    const previous = obligation.settlements.get(record.task) orelse return true;
     return previous.reference.revision != record.revision;
 }
 

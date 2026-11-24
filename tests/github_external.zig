@@ -106,17 +106,22 @@ test "GitHub external declaration freezes canonical contract request and schemas
     try std.testing.expectEqual(0, dependencies.len);
 }
 
-test "GitHub external binding rejects mismatched identity account route and ref without I/O" {
+test "GitHub external binding admits an amended route but rejects identity account and ref" {
     const a = std.testing.allocator;
     var env = environment();
-    for (0..5) |changed| {
+    var routed = request();
+    routed.repository.owner.bytes = "renamed-owner";
+    routed.repository.name.bytes = "renamed-name";
+    const bytes = try c.encodeOwned(contract.Request, a, routed);
+    defer a.free(bytes);
+    const acquired = try external.declaration().capture.?.acquire(context(a, &env), bytes);
+    try std.testing.expect(acquired == .definitely_not_sent);
+    for (0..3) |changed| {
         var input = request();
         switch (changed) {
             0 => input.repository.id += 1,
             1 => input.repository.account.bytes = "other-account",
-            2 => input.repository.owner.bytes = "other-owner",
-            3 => input.repository.name.bytes = "other-name",
-            4 => input.repository.ref.bytes = "refs/heads/other",
+            2 => input.repository.ref.bytes = "refs/heads/other",
             else => unreachable,
         }
         try expectRejected(a, input, &env);

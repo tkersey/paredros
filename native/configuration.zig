@@ -7,6 +7,7 @@ const m = @import("../app/model_contract.zig");
 const application = @import("application.zig");
 const external = @import("model_external.zig");
 const github = @import("github.zig");
+const github_external = @import("github_external.zig");
 
 pub const Grants = struct {
     github_read: bool = false,
@@ -54,7 +55,13 @@ pub const Config = struct {
     github_credential_file: ?[]const u8 = null,
 };
 pub const OwnedConfig = std.json.Parsed(Config);
-pub const Bindings = struct { repository: t.Repository };
+pub const Bindings = struct {
+    repository: t.Repository,
+
+    pub fn admits(self: Bindings, repository: t.Repository) bool {
+        return github_external.bound(self.repository, repository);
+    }
+};
 pub const tenant = "local";
 
 pub fn bindings(config: Config) Bindings {

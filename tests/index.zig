@@ -49,13 +49,17 @@ fn envelope(operation: []const u8) t.Envelope {
 }
 
 pub fn row(a: std.mem.Allocator, task: u8, input: t.Input, output: ?t.Output) !idx.Row {
+    return rowId(a, @splat(task), input, output);
+}
+
+fn rowId(a: std.mem.Allocator, task: t.Id, input: t.Input, output: ?t.Output) !idx.Row {
     const bytes = try c.encodeOwned(t.Input, a, input);
     var result: ?idx.Value = null;
     if (output) |value| {
         const json = try Native.values.toJson(t.Output, a, value);
         const encoded = try Native.json.canonical(a, json);
         result = .{
-            .task = @splat(task),
+            .task = task,
             .revision = 5,
             .digest = idx.digest(encoded),
             .schema_id = t.output_schema_id,
@@ -64,7 +68,7 @@ pub fn row(a: std.mem.Allocator, task: u8, input: t.Input, output: ?t.Output) !i
         };
     }
     return freezeRow(.{ .input = .{
-        .task = @splat(task),
+        .task = task,
         .revision = 5,
         .digest = idx.digest(bytes),
         .schema_id = t.input_schema_id,
@@ -179,6 +183,78 @@ pub fn successor(value: t.Step) t.Output {
         .batch = null,
         .dispositions = .{ .items = &.{} },
     } };
+}
+
+fn chainTask(sequence: usize) t.Id {
+    var task: t.Id = @splat(0xc0);
+    std.mem.writeInt(u64, task[0..8], sequence, .big);
+    return task;
+}
+
+fn phaseFact(a: std.mem.Allocator, source: idx.Row) !t.Settlement {
+    const bytes = try snapshotBytes(a, source);
+    return .{
+        .reference = .{
+            .task = source.input.task,
+            .revision = source.input.revision,
+            .digest = idx.digest(bytes),
+        },
+        .owner_snapshot = .{ .bytes = bytes },
+        .kind = .phase,
+        .accounting = source.owner_snapshot.?.accounting,
+        .delivery = null,
+    };
+}
+
+fn consumingChain(a: std.mem.Allocator, length: usize, initial: t.Head) ![]idx.Row {
+    const rows = try a.alloc(idx.Row, length + 1);
+    rows[0] = try row(a, 1, .{ .genesis = fixture.genesis() }, .{ .genesis = initial });
+    var previous = initial;
+    for (1..rows.len) |sequence| {
+        const operation = try std.fmt.allocPrint(a, "chain-{d}", .{sequence});
+        var input = step(previous, ref(rows[sequence - 1]), operation);
+        if (sequence > 1)
+            input.facts.items = try a.dupe(t.Settlement, &.{try phaseFact(a, rows[sequence - 1])});
+        var output = successor(input);
+        output.step.head.consumed.items = try a.alloc(t.RevisionReference, input.facts.items.len);
+        for (@constCast(output.step.head.consumed.items), input.facts.items) |*used, fact|
+            used.* = fact.reference;
+        rows[sequence] = try rowId(a, chainTask(sequence), .{ .step = input }, output);
+        previous = output.step.head;
+    }
+    return rows;
+}
+
+test "index rebuild links a consuming chain by predecessor and rejects distant repeated cuts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = try consumingChain(a, 96, head());
+    std.mem.reverse(idx.Row, rows);
+    var index = try idx.Index.init(Native, std.testing.allocator, rows, &.{});
+    defer index.deinit();
+    const obligation = index.obligation(@splat(1)).?;
+    try std.testing.expectEqual(97, obligation.chain.len);
+    try std.testing.expectEqual(96, index.head(obligation).sequence);
+    try std.testing.expectEqual(95, obligation.settlements.count());
+    std.mem.reverse(idx.Row, rows);
+    var repeated = step(index.head(obligation), ref(rows[96]), "chain-repeat");
+    repeated.facts.items = try a.dupe(t.Settlement, &.{try phaseFact(a, rows[2])});
+    var output = successor(repeated);
+    output.step.head.consumed.items = &.{repeated.facts.items[0].reference};
+    const extended = try a.alloc(idx.Row, rows.len + 1);
+    @memcpy(extended[0..rows.len], rows);
+    extended[rows.len] = try rowId(a, chainTask(97), .{ .step = repeated }, output);
+    try std.testing.expectError(
+        error.InvalidPreviousSettlement,
+        idx.Index.init(Native, std.testing.allocator, extended, &.{}),
+    );
+    var initial = head();
+    initial.consumed.items = &.{.{ .task = chainTask(89), .revision = 5, .digest = @splat(0) }};
+    try std.testing.expectError(
+        error.DuplicateConsumption,
+        idx.Index.init(Native, std.testing.allocator, try consumingChain(a, 96, initial), &.{}),
+    );
 }
 
 test "index rebuild orders shuffled heads and pending directives without task completion" {

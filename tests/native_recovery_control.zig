@@ -148,7 +148,10 @@ test "native recovery control validates bindings before mutation and replays exa
         .recovery = reference,
         .exclusive_owner = true,
     } };
-    const released = try taskId(try call(a, &driver, config(), "control-release", command));
+    var renamed = config();
+    renamed.repository.owner = "renamed-owner";
+    renamed.repository.name = "renamed-name";
+    const released = try taskId(try call(a, &driver, renamed, "control-release", command));
     const before = try count(a, &driver);
     var changed = config();
     changed.repository.id += 1;

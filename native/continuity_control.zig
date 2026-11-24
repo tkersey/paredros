@@ -137,7 +137,7 @@ fn finalize(
         try restore.beginTransfer(driver, a, operation, origin, digest);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    var finished = true;
+    var finished = !transfer.genesisPending(&index);
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;

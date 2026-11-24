@@ -1,6 +1,5 @@
 const std = @import("std");
 const c = @import("protean_contracts");
-const native = @import("protean_native");
 const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
@@ -298,6 +297,7 @@ pub fn prepare(
     mode: Mode,
 ) !OwnedBundle {
     if (importPending(index)) return error.ContinuityImportPending;
+    if (genesisPending(index)) return error.ContinuityGenesisPending;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -329,33 +329,6 @@ pub fn capture(driver: anytype, a: std.mem.Allocator, source: Source, mode: Mode
     return prepare(a, &index, source, mode);
 }
 
-pub fn admitCut(
-    service: anytype,
-    a: std.mem.Allocator,
-    origin: t.Origin,
-    bundle: Bundle,
-) !t.Id {
-    if (origin != .local) return error.TransferLocalOnly;
-    try continuity.validate(a, bundle);
-    const bytes = try c.encodeOwned(Bundle, a, bundle);
-    defer a.free(bytes);
-    const identity = continuity.hash(bytes);
-    const operation = try std.fmt.allocPrint(a, "continuity-cut:{s}", .{
-        std.fmt.bytesToHex(identity, .lower),
-    });
-    defer a.free(operation);
-    const result = try service.submit(a, operation, .{ .continuity_cut = .{
-        .envelope = .{
-            .operation = .{ .bytes = operation },
-            .stable_request = identity,
-            .origin = origin,
-        },
-        .bundle_digest = identity,
-        .bytes = .{ .bytes = bytes },
-    } });
-    return result.receipt.task;
-}
-
 pub const ImportProgress = struct {
     phase: continuity.ImportPhase,
     manifest: t.Id,
@@ -379,12 +352,8 @@ pub fn validateBindings(
         var head = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
         defer head.deinit();
         if (head.value.mode == .cancelled) continue;
-        if (!try continuity.equal(
-            a,
-            t.Repository,
-            head.value.specification.repository,
-            bindings.repository,
-        )) return error.ContinuityResourceMismatch;
+        if (!bindings.admits(head.value.specification.repository))
+            return error.ContinuityResourceMismatch;
     }
 }
 
@@ -486,25 +455,6 @@ fn genesisInput(
     };
     const bytes = try c.encodeOwned(t.Genesis, a, value);
     return (try c.decodeOwned(t.Genesis, a, bytes)).value;
-}
-
-pub fn importBundle(
-    driver: anytype,
-    a: std.mem.Allocator,
-    config: configuration.Config,
-    origin: t.Origin,
-    bundle: Bundle,
-) !ImportProgress {
-    if (!driver.attached or origin != .local) return error.TransferLocalOnly;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    var index = try driver.rebuild(scratch);
-    defer index.deinit();
-    const namespace = driver.service.namespace.identity;
-    if (try validateImport(scratch, &index, config, namespace, bundle) == null)
-        _ = try admitCut(driver.service, scratch, origin, bundle);
-    return importProgress(driver, a);
 }
 
 pub fn importProgress(driver: anytype, a: std.mem.Allocator) !ImportProgress {
@@ -712,20 +662,6 @@ fn writeBytes(
     return continuity.hash(bytes);
 }
 
-pub fn writeSnapshot(
-    a: std.mem.Allocator,
-    io: std.Io,
-    directory: []const u8,
-    name: []const u8,
-    bundle: Bundle,
-) !t.Digest {
-    if (bundle.mode != .snapshot) return error.UncommittedTransfer;
-    try continuity.validate(a, bundle);
-    const bytes = try c.encodeOwned(Bundle, a, bundle);
-    defer a.free(bytes);
-    return writeBytes(a, io, directory, name, bytes);
-}
-
 pub fn writeCommitted(
     a: std.mem.Allocator,
     io: std.Io,
@@ -739,20 +675,6 @@ pub fn writeCommitted(
     const bytes = try c.encodeOwned(Bundle, a, bundle.value);
     defer a.free(bytes);
     return writeBytes(a, io, directory, name, bytes);
-}
-
-pub fn readBundle(
-    a: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-    bytes_max: ?usize,
-) !OwnedBundle {
-    const bytes = try native.configuration.readFile(a, io, path, bytes_max, true);
-    defer a.free(bytes);
-    var bundle = try c.decodeOwned(Bundle, a, bytes);
-    errdefer bundle.deinit();
-    try continuity.validate(a, bundle.value);
-    return bundle;
 }
 
 fn pendingControlKeys(
@@ -897,6 +819,17 @@ pub fn pendingControlsAdmitted(a: std.mem.Allocator, index: *const idx.Index, ta
 pub fn importPending(index: anytype) bool {
     const view = index.continuity_import orelse return false;
     return view.phase != .materialized;
+}
+
+pub fn genesisPending(index: *const idx.Index) bool {
+    for (index.records) |record| {
+        if (record.input != .genesis) continue;
+        switch ((record.owner_snapshot orelse return true).outcome) {
+            .progressed, .yielded, .requested => return true,
+            .completed, .failed, .cancelled => {},
+        }
+    }
+    return false;
 }
 
 pub fn validateExportDestination(io: std.Io, directory: []const u8, name: []const u8) !void {

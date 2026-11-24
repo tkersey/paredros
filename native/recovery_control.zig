@@ -1,5 +1,4 @@
 const std = @import("std");
-const c = @import("protean_contracts");
 const t = @import("application_types");
 const configuration = @import("configuration.zig");
 const restore = @import("restore.zig");
@@ -9,22 +8,13 @@ pub const Release = struct {
     exclusive_owner: bool,
 };
 
-pub fn validateBindings(a: std.mem.Allocator, index: anytype, config: configuration.Config) !void {
+pub fn validateBindings(_: std.mem.Allocator, index: anytype, config: configuration.Config) !void {
     const bound = configuration.bindings(config);
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
-        if (!try equal(a, t.Repository, head.specification.repository, bound.repository))
-            return error.RecoveryResourceMismatch;
+        if (!bound.admits(head.specification.repository)) return error.RecoveryResourceMismatch;
     }
-}
-
-fn equal(a: std.mem.Allocator, comptime T: type, left: T, right: T) !bool {
-    const before = try c.encodeOwned(T, a, left);
-    defer a.free(before);
-    const after = try c.encodeOwned(T, a, right);
-    defer a.free(after);
-    return std.mem.eql(u8, before, after);
 }
 
 pub fn validateNewRelease(
