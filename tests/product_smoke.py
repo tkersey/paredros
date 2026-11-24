@@ -150,6 +150,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
     assert audited['report']['native_closure']['continuation_compatibility']=='not_assessed'
     assert audited['report']['tasks']
     assert all(row['disposition'] != 'profile_unresolved' for row in audited['report']['tasks'])
+    assert all(row['disposition'] != {'requires_supersession':'image'} for row in audited['report']['tasks']),audited['report']['tasks']
     results.append('SIGTERM joins and parks before teardown; namespace audit leaves all content unchanged')
     process=start()
     try:

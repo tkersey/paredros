@@ -8,6 +8,7 @@ const control = @import("control.zig");
 const cli = @import("cli.zig");
 const socket = @import("control_socket.zig");
 const restore = @import("restore.zig");
+const continuity = @import("continuity.zig");
 const continuity_control = @import("continuity_control.zig");
 const Driver = @import("driver.zig").Driver(t);
 const Daemon = @import("daemon.zig").Daemon(t);
@@ -283,6 +284,7 @@ fn audit(
     config: configuration.Config,
     registry: native.Registry,
     admitted: *const native.discovery.Application,
+    image: t.Digest,
     runtime: t.Digest,
     selected_profile: ?native.tasks.Profile,
 ) !compatibility.OwnedReport {
@@ -303,7 +305,7 @@ fn audit(
     };
     var candidate = try compatibility.fromProfile(
         scratch,
-        admitted.image_identity,
+        image,
         admitted.controller != null,
         profile,
     );
@@ -317,10 +319,11 @@ fn preflight(
     config: configuration.Config,
     handlers: native.Registry,
     admitted: *const native.discovery.Application,
+    image: t.Digest,
     runtime: t.Digest,
     profile: ?native.tasks.Profile,
 ) !void {
-    var report = try audit(init.gpa, init.io, config, handlers, admitted, runtime, profile);
+    var report = try audit(init.gpa, init.io, config, handlers, admitted, image, runtime, profile);
     defer report.deinit();
     if (profile != null and !report.value.complete()) return error.UnresolvedExecutionBinding;
 }
@@ -340,6 +343,7 @@ fn checkNamespace(
         config,
         handlers,
         &admitted,
+        continuity.hash(assets.image),
         (try executableIdentity(init.io)).sha256,
         null,
     );
@@ -464,14 +468,15 @@ fn serve(
     defer admitted.deinit();
     const existing = try nonempty(io, config.namespace_path);
     const runtime = (try executableIdentity(io)).sha256;
+    const image = continuity.hash(assets.image);
     if (existing and config.mode == .live)
-        try preflight(init, config, handlers, &admitted, runtime, null);
+        try preflight(init, config, handlers, &admitted, image, runtime, null);
     const launch = try configuration.prepare(a, io, config, .{
         .runtime_identity = runtime,
         .image_identity = admitted.image_identity,
     });
     defer launch.deinit();
-    if (existing) try preflight(init, config, handlers, &admitted, runtime, launch.profile);
+    if (existing) try preflight(init, config, handlers, &admitted, image, runtime, launch.profile);
     var namespace = try native.Namespace.open(a, io, config.namespace_path);
     defer namespace.close() catch |err| fatal(err);
     var service = try native.tasks.Service(t).init(
