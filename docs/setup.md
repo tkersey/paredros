@@ -43,12 +43,12 @@ service UID; local clients authenticate the socket owner and peer UID. Inspect
 require fixing the referenced configuration or file. `ModelAccountNotReady`
 requires checking the selected helper account. An incompatible namespace requires
 the original build and a continuity export, as described in the README. Keep the
-old executable and namespace until the transfer and recovery hold are resolved.
+old executable and namespace until the transfer import has materialized.
 
 ## Pending live qualification
 
 With explicitly selected test resources, verify an activation message readable
-with `messages`, a new branch commit producing one confirmed digest, a question
+with `messages`, a new branch commit producing one digest message, a question
 answered with `question answer`, and duplicate ingress returning its original
 admission. Record known/unknown model usage. Offline fixtures and successful
 installation do not discharge this live operational gate.

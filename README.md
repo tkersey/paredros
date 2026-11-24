@@ -112,18 +112,17 @@ and landing. Application qualification and reviews must cover this selected pin;
 upstream verification alone does not qualify PAREDROS. Live-provider qualification
 remains deferred.
 
-By owner decision this release ships without the specified Slack integration.
-Outputs the specification sends to the owner's Slack DM are recorded as local
-messages and read with `messages`; owner input arrives only through the local CLI
-and control socket. There is no Slack ingress, button, history or lineage audit,
-marker reconciliation, or recovery-candidate scan.
-[The implementation specification](docs/implementation-spec.md) is left as
-originally written. The release also omits three other specified behaviors:
+By owner decision this release ships without the specified Slack integration
+and performs no external write. Every output for the owner is a local message
+published with the head that decides it and read with `messages`; owner input
+arrives only through the local CLI and control socket. There are no delivery
+tasks, delivery holds or releases, audits, or rollback boundaries.
+[Amendment 2.2 of the implementation specification](docs/implementation-spec.md)
+states these laws. The release also omits three other specified behaviors:
 GitHub transport health in `status`; the single announcement for a reference that
-returns `404` on consecutive checks (A65), whose head field would make existing
-namespaces unreadable; and the visible storage hold for exhausted storage. When SQLite reports
-a full database, Protean fences the store (`StorageUnavailable`); the `storage`
-delivery-hold variant stays reserved in the schema but is never produced.
+returns `404` on consecutive checks (A65); and a visible storage hold for exhausted
+storage. When SQLite reports a full database, Protean fences the store
+(`StorageUnavailable`).
 
 [Offline measurements](docs/measurements.md) document task storage, startup,
 empty-check costs, reproduction commands, and the current performance limits.
@@ -151,8 +150,8 @@ the same authenticated local socket. Mutations accept `--operation ID` anywhere
 on the command line; reuse an ID only for the same request. An ID is printable
 ASCII without `:`, which is reserved for operations the daemon derives itself; an
 ID containing it is refused with `ReservedOperationId`. An admission response
-means the operation is durable. It does not mean the resulting message has been
-recorded yet.
+means the operation is durable. It does not mean that a step has folded it or
+published a resulting message yet.
 
 A monitor interval (`--interval-ms`, an amendment, a confirmed proposal, or the
 configured default) must be between 1 ms and 366 days (31622400000 ms); a longer
@@ -202,48 +201,43 @@ scenario.
 ## Reading updates
 
 Every output for the owner is a local message: the activation notice, commit
-digests, and questions. A message is recorded when its `delivery` task completes.
-That task performs no external write; the next step folds its confirmation once
-and advances the told frontier. A delivery task left unfinished by a stop or crash
-resumes only while the rules that admit a delivery still allow it: no output hold,
-no transfer, a key outside the restore cut, and an output its obligation still
-wants. Otherwise it stays parked.
+digests, and question prompts. A message is part of the head that decides it and
+is published atomically with that head. The genesis head carries the activation
+notice. The step that renders a digest carries it and advances the told frontier
+to the digest's coverage in the same head, so the told frontier and the retained
+digests that cover it are one fact. The step that raises a question carries its
+prompt; an import carries the prompt of a question that is still pending.
+Directive dispositions are reported by the CLI and in status, not as messages. A
+paused, cancelled, or transferred obligation renders nothing more.
 
 ```sh
 paredros --config /absolute/config.json messages OBLIGATION_ID
 paredros --config /absolute/config.json messages OBLIGATION_ID --after ORDINAL --limit N
 ```
 
-`messages` is read-only and returns a bounded page. A message joins its
-obligation's list when a step folds its confirmation; messages folded by the same
-step are ordered by purpose, then key. After a cancel or transfer no step folds
-again, so the remaining messages are appended together. A new message therefore
-always lands after every message already listed, and an ordinal cursor stays valid
-as messages are added; continue from the last ordinal until the next cursor is
-null. Each item carries its task, purpose, key, issue, superseded key, covered
-sequence range, text, links, and choices, with a state: `delivered` once its
-confirmation is recorded, `undelivered` when its delivery task ended without one
-(a retryable message is then reissued under a new key), `uncertain` when its
-outcome is unknown (a digest is then held until `delivery release`), and `pending`
-otherwise. Each state comes from that message's own delivery task.
+`messages` is read-only and returns a bounded page projected from the
+obligation's selected head chain: one item per head that carries a message, in
+head-sequence order. Heads are only ever appended to the chain, so an ordinal
+cursor stays valid as messages are added; continue from the last ordinal until
+the next cursor is null. Each item carries the head task and sequence, its
+purpose, specification revision, covered frontiers for a digest, question
+identity for a prompt, text, links, and choices. Every listed message is retained.
 
-A question's choices include the command that answers it, `paredros --config
-PATH question answer ID QUESTION_DIGEST CHOICE`. PATH is the absolute path of the
-configuration the daemon was started with, so the command works from any
-directory; `monitor show` also reports the open question. `proposal
-show` and `proposal confirm` handle proposals, and `ask` waits for and prints the
-conversation reply. `task show` of a turn reports `retry_pending` while the daemon
-will still replace or resume an unfinished attempt, so `ask` keeps waiting through
-a blocked, parked, or failed attempt until the retry or the final failure reply
-exists. A held digest is inspected with `delivery show KEY_JSON` and
-released with `delivery release ID KEY_JSON`.
+A pending question's choices include the command that answers it, `paredros
+--config PATH question answer ID QUESTION_DIGEST CHOICE`. PATH is the absolute
+path of the configuration the daemon was started with, so the command works from
+any directory; `monitor show` also reports the open question. Once the question
+closes, its prompt stays in the history without a command. `proposal show` and
+`proposal confirm` handle proposals.
 
-A question pending when a recovery boundary begins (including the one that
-releases an import) is held with the digest: `monitor show` reports it with
-`held` true and its prompt is not delivered. It can still be answered.
-`delivery release ID KEY_JSON` with the prompt's key reissues the prompt under a
-new key, labelled as a replacement that may duplicate an earlier one; each release
-needs a new hold.
+`ask` waits for and prints the conversation reply. Every turn ends with a reply:
+the daemon resumes or replaces an unfinished attempt, retries a failed model call
+once with the frozen context, and then completes a final authored failure reply.
+`task show` of a turn follows its replacements and reports the recorded result
+and task status; it does not predict later daemon decisions. A proposal that can
+no longer be confirmed is listed with `confirmable` false and no command. When the
+reply is not recorded within the wait, `ask` prints the latest task view, says the
+reply is still pending, and exits 75; read it later with `task show`.
 
 ## Upgrading a namespace
 
@@ -254,7 +248,7 @@ build (the old step or turn is cancelled and a new one runs). To keep the earlie
 state as an archive, take a snapshot export with the earlier build before serving
 the namespace with this one.
 
-## Recovery and handoff
+## Backup and handoff
 
 `namespace check` audits compatibility without opening the namespace for normal
 execution. An incompatible build must use a supported continuity bundle exported
@@ -268,8 +262,9 @@ paredros --config /new/config.json transfer import /backup/handoff.paredros
 
 Exports write only into the configured protected `backup_directory`. Snapshot
 export captures an immutable cut while the original responsibility continues.
-Transfer export durably fences the source namespace, folds the transferred
-disposition, and keeps source output disabled. A bundle carries the live
+Transfer export durably marks the source namespace as transferred, folds a
+`transfer` directive into a final `transferred` head for every obligation, and
+dispatches no further work there. A bundle carries the live
 application closure and the imported members it still depends on, once; it never
 contains an earlier bundle, so repeated snapshots and transfer chains do not grow
 with prior cuts. Export refuses a namespace whose own import is incomplete, and
@@ -299,41 +294,29 @@ import PATH` to observe progress; exit 75 means the daemon is still materializin
 The import operation is bound to its path and size limit; resource bindings are
 checked separately, so a configured owner/name rename does not change it. Reusing
 an import operation for a different file is refused as an operation conflict.
-Import preserves portable observations, pending controls,
-method source, and unresolved delivery evidence. Imported output, including
-imported conversation turns, remains held; `recovery status` reports `import_hold`.
-While it is held, `ask`, `monitor add`, and monitor proposals are refused with
-`ContinuityImportHeld`, and live-model experiments wait. Neither
-`recovery begin` nor `serve --recover` opens a boundary before the import is
-materialized (`ContinuityImportPending`); run `serve` to finish it. Establish
-that the original source cannot run again, then declare exclusive ownership when
-releasing: run `recovery begin`, take TASK and DIGEST from `recovery status`, and
-run `recovery release TASK DIGEST --exclusive-owner`.
+Import preserves portable observations, pending controls, method source, and
+known and unknown costs. Each imported obligation starts in its prior mode with no
+hold: an active one resumes checks and renders once its imported pending controls
+are admitted, and a pending question's prompt is published again by the import
+genesis. Messages published before the cut stay in the source namespace, which
+remains their archive. Imported conversation turns that never replied run as
+soon as the import is materialized. While the import is still materializing,
+`ask`, `monitor add`, directives, and exports are refused with
+`ContinuityImportPending`; run `serve` to finish it. A `monitor add` repeated with
+an operation that created an imported obligation returns that obligation, and the
+same operation with a different request is refused as an operation conflict.
 
-After a known filesystem rollback, start with `serve --recover`. Inspect
-`recovery status` and `delivery show KEY_JSON`, and make explicit dispositions for
-uncertain outputs with `delivery release`. `recovery status` prints the
-current boundary as hex `data.recovery.task` and `data.recovery.digest`, which
-`recovery release` accepts unchanged, with the size and SHA-256 of the
-cumulative recovery cut rather than its entries. To release a recovery boundary:
-
-```sh
-paredros --config /absolute/config.json recovery release TASK DIGEST --exclusive-owner
-```
-
-The task and digest come from `recovery status`. Release checks current resource
-bindings and preserves individual uncertainty holds. It cannot reopen a namespace
-fenced for transfer. Local messages leave no external evidence, so an output held
-after a rollback is resolved only by an explicit `delivery release`. A rollback that the operator does not identify cannot be detected
-reliably from stale local state; there is no exactly-once promise across rollback.
+A filesystem rollback or snapshot restore needs no output hold: every message is
+a local record that rolls back with its namespace. Running one lineage in only one
+place remains the operator's responsibility.
 
 ## Service operation
 
 [The systemd example](packaging/systemd/paredros.service) runs one daemon with a
 45-second graceful worker drain and a 60-second service stop deadline. Adapt the
 account, executable, and configuration paths. SIGTERM stops admission, joins or
-terminates the current worker under the native owner, and leaves uncertain work
-visible for recovery. Namespace locking permits one local owner; it cannot fence
+terminates the current worker under the native owner, and leaves unfinished work
+for the next `serve` to resume or replace. Namespace locking permits one local owner; it cannot fence
 a copied namespace on another machine.
 
 Snapshots contain source and conversation data. Keep the original namespace as
