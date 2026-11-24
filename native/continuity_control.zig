@@ -7,7 +7,7 @@ const admission = @import("admission.zig");
 const configuration = @import("configuration.zig");
 const continuity = @import("continuity.zig");
 const transfer = @import("transfer.zig");
-const restore = @import("restore.zig");
+const transfer_marker = @import("transfer_marker.zig");
 
 pub const Environment = struct { io: std.Io, source: transfer.Source };
 pub const Export = struct { name: t.Name, snapshot: bool = false };
@@ -82,8 +82,8 @@ fn exportOperation(
     stable: t.Digest,
 ) []const u8 {
     if (!snapshot) {
-        if (index.recovery_purpose != .transfer) return operation;
-        return index.record(index.recovery.?.task).?.input.restore.envelope.operation.bytes;
+        const marker = index.transfer_marker orelse return operation;
+        return index.records[marker].input.transfer.envelope.operation.bytes;
     }
     if (index.operations.contains(operation)) return operation;
     for (index.records) |record| {
@@ -131,10 +131,10 @@ fn finalize(
     origin: t.Origin,
     digest: t.Digest,
 ) !bool {
-    const marker = if (fenced.recovery_purpose == .transfer)
-        try restore.resumeTransfer(driver, a, origin)
+    const marker = if (fenced.transfer_marker) |position|
+        fenced.records[position].task
     else
-        try restore.beginTransfer(driver, a, operation, origin, digest);
+        try transfer_marker.admit(driver, a, operation, origin, digest);
     var index = try driver.rebuild(a);
     defer index.deinit();
     var finished = !try transfer.genesisPending(driver.service, a, &index);
@@ -217,7 +217,7 @@ pub fn importBundle(
     defer a.free(bytes);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
+    if (index.transferred()) return error.TransferredNamespace;
     const identity = continuity.hash(bytes);
     if (index.operations.get(operation)) |position| {
         const record = index.records[position];

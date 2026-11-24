@@ -6,6 +6,7 @@ const check = @import("check.zig");
 const clock = @import("temporal.zig");
 const equal_bytes = @import("bytes.zig");
 const recovery = @import("phase_recovery.zig");
+const notification = @import("notification.zig");
 
 pub const Input = struct {
     head: t.Head,
@@ -331,7 +332,12 @@ fn rejectedCheck(
 ) !a.Value(Result) {
     _ = time;
     const acquired = try b.field(input, "acquired");
-    const questioned = try b.update(head, .{ .question = try sourceQuestion(c, b, input, head) });
+    const questioned = try notification.raised(
+        c,
+        b,
+        try b.field(head, "question"),
+        try b.update(head, .{ .question = try sourceQuestion(c, b, input, head) }),
+    );
     const next = try b.call(try recovery.rejection(c), .{
         .input = try b.product(try c.schema(recovery.RejectionInput), .{
             .head = questioned,
@@ -417,11 +423,14 @@ fn newQuestion(
         .condition = identity,
         .specification_revision = try pb.field(specification, "revision"),
         .source_condition = try pb.variant(try c.schema(?condition_type), "some", condition),
-        .choices = try c.literal(@FieldType(t.Question, "choices"), .{ .items = &.{
-            .{ .bytes = "accept_gap" },
-        } }),
-        .prompt = try prompt(c, pb, input, head, base, present.payload()),
-        .held = try pb.constant(bool, false),
+        .choices = try c.literal(@FieldType(t.Question, "choices"), .{ .items = &.{.{
+            .value = .{ .bytes = "accept_gap" },
+            .label = .{ .bytes = "Accept explicit gap" },
+        }} }),
+        .prompt = try c.literal(t.Text, .{ .bytes = "The branch comparison is " ++
+            "incomplete or rewritten. Accepting this gap establishes " ++
+            "a new baseline at the comparison tip without claiming that all commits were read. " ++
+            "Older outstanding observations remain owed." }),
     });
     return b.match(
         tip,
@@ -430,63 +439,6 @@ fn newQuestion(
             .some = try present.ret(try preserveQuestion(c, pb, head, question)),
         },
     );
-}
-
-fn prompt(
-    c: protean.Context,
-    b: anytype,
-    input: a.Value(Input),
-    head: a.Value(t.Head),
-    base: a.Value(t.Oid),
-    tip: a.Value(t.Oid),
-) !a.Value(t.DeliveryIntent) {
-    const specification = try b.field(head, "specification");
-    const observed = try b.field(head, "observed");
-    const identity = try b.field(input, "identity");
-    const payload = try b.product(try c.schema(t.LogicalPayload), .{
-        .schema_version = try b.constant(u32, 1),
-        .obligation = try b.variant(try c.schema(?t.Id), "some", try b.field(input, "obligation")),
-        .specification_revision = try b.field(specification, "revision"),
-        .prior_sequence = try b.field(observed, "sequence"),
-        .through_sequence = try b.field(observed, "sequence"),
-        .frozen_text = try c.literal(t.Text, .{ .bytes = "The branch comparison is " ++
-            "incomplete or rewritten. Accepting this gap establishes " ++
-            "a new baseline at the comparison tip without claiming that all commits were read. " ++
-            "Older outstanding observations remain owed." }),
-        .prompt = try b.variant(try c.schema(?t.Digest), "some", identity),
-        .supersedes = try c.literal(?t.DeliveryKey, null),
-        .coverage = try b.variant(try c.schema(?t.Frontier), "some", observed),
-        .issue = try b.constant(u32, 0),
-        .buttons = try c.literal(@FieldType(t.LogicalPayload, "buttons"), .{ .items = &.{.{
-            .block_id = .{ .bytes = "source-gap" },
-            .action_id = .{ .bytes = "answer" },
-            .value = .{ .bytes = "accept_gap" },
-            .label = .{ .bytes = "Accept explicit gap" },
-        }} }),
-        .comparison = try b.variant(try c.schema(@FieldType(
-            t.LogicalPayload,
-            "comparison",
-        )), "some", try b.product(try c.schema(@typeInfo(@FieldType(
-            t.LogicalPayload,
-            "comparison",
-        )).optional.child), .{
-            .repository = try b.field(specification, "repository"),
-            .base = base,
-            .tip = tip,
-        })),
-    });
-    return b.product(try c.schema(t.DeliveryIntent), .{
-        .key = try b.product(try c.schema(t.DeliveryKey), .{
-            .lineage = try b.field(head, "lineage"),
-            .purpose = try c.literal(
-                @FieldType(t.DeliveryKey, "purpose"),
-                .question,
-            ),
-            .identity = identity,
-            .generation = try b.constant(u32, 0),
-        }),
-        .payload = payload,
-    });
 }
 
 fn preserveQuestion(

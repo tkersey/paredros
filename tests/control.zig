@@ -229,7 +229,7 @@ test "control CLI repeats transfer identity but takes a new snapshot identity pe
     );
 }
 
-test "control protocol freezes activation retry and acknowledges persisted restrictive controls" {
+test "control protocol freezes monitor retry and acknowledges persisted restrictive controls" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -255,6 +255,12 @@ test "control protocol freezes activation retry and acknowledges persisted restr
     var receipt = (try fixture.service.?.operationLookup(frame, "pause-one")).?;
     defer receipt.deinit();
     try std.testing.expectEqualDeep(pause_id, receipt.value.task);
+    const system = try control.encode(frame, .{
+        .version = 1,
+        .operation = .{ .bytes = "caller-transfer" },
+        .command = .{ .directive = .{ .target = id, .body = .{ .transfer = {} } } },
+    });
+    try expectRejected(try dispatch(frame, &driver, system, 501), "SystemDirective");
     const show = try cli.request(frame, &.{ "monitor", "show", &hex_id }, "unused");
     const response = try dispatch(frame, &driver, show, 501);
     const data = response.object.get("data").?;
@@ -618,14 +624,13 @@ pub const ConsumerApplication = struct {
                 directive.payload(),
             )),
             .step = try (try b.caseOf(input, "step")).fail(output, failure),
-            .delivery = try (try b.caseOf(input, "delivery")).fail(output, failure),
             .experiment = try (try b.caseOf(input, "experiment")).fail(output, failure),
             .continuity_member = try (try b.caseOf(input, "continuity_member")).fail(
                 output,
                 failure,
             ),
             .continuity_cut = try (try b.caseOf(input, "continuity_cut")).fail(output, failure),
-            .restore = try (try b.caseOf(input, "restore")).fail(output, failure),
+            .transfer = try (try b.caseOf(input, "transfer")).fail(output, failure),
         });
         try context.author.define(function, try b.ret(result));
         return context.author.module(function, try context.schema(t.Failure));
@@ -1002,10 +1007,10 @@ test "control malformed and unsupported operation identities are refused without
     const reserved = [_][]const u8{
         "turn-retry:00112233445566778899aabbccddeeff:1",
         "turn-replace:00112233445566778899aabbccddeeff",
-        "delivery:00",
+        "transfer:00:00",
         "step:00:1:0",
         "continuity-genesis:00",
-        "restore-hold:00:00",
+        "continuity-directive:00",
         "export-cut:00",
         "owner:chosen",
         ":",
@@ -1118,7 +1123,7 @@ test "control malformed and unsupported intervals are refused without admission"
     }
 }
 
-test "control malformed and unsupported proposal state fails task show without omission" {
+test "control task show reports an unconfirmable proposal instead of failing" {
     var fixture: ConsumerFixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -1142,7 +1147,15 @@ test "control malformed and unsupported proposal state fails task show without o
     _ = try consumerExecute(&fixture, "consumer-twin", .{ .turn = twin });
     const id = std.fmt.bytesToHex(turn_id, .lower);
     const request = try cli.request(frame, &.{ "task", "show", &id }, "unused");
-    try expectRejected(try dispatch(frame, &driver, request, 501), "AmbiguousProposal");
+    const shown = try dispatch(frame, &driver, request, 501);
+    const status = try native.json.text(shown.object.get("status").?);
+    try std.testing.expectEqualStrings("observed", status);
+    const data = shown.object.get("data").?;
+    try std.testing.expect(data.object.get("retry_pending") == null);
+    const offered = data.object.get("confirmations").?.array.items;
+    try std.testing.expectEqual(1, offered.len);
+    try std.testing.expect(!offered[0].object.get("confirmable").?.bool);
+    try std.testing.expectEqual(.null, std.meta.activeTag(offered[0].object.get("command").?));
 }
 
 fn widestStatus(frame: std.mem.Allocator, driver: *Driver, index: *const @import(

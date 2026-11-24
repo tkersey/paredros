@@ -220,16 +220,12 @@ fn nativeTests(
 fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []const []const u8 {
     return switch (group) {
         .continuity => switch (partition) {
-            .first => &.{
-                "tests.native_restore.test.",
-                "tests.native_recovery_control.test.",
-                "tests.directive_policy.test.",
-            },
+            .first => &.{"tests.transfer.test."},
             .third => &.{
-                "tests.transfer.test.",
                 "tests.compatibility.test.",
                 "tests.contracts.test.",
                 "tests.native_genesis.test.",
+                "tests.directive_policy.test.",
             },
             .second => &.{
                 "tests.control.test.",

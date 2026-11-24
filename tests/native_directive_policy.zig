@@ -8,27 +8,6 @@ const contracts = @import("contracts.zig");
 const fresh = @import("native_genesis.zig").expectedFresh;
 const Fixture = @import("native_fixture.zig").Fixture(witness.Types, witness.Application);
 
-fn intent() t.DeliveryIntent {
-    return .{
-        .key = .{
-            .lineage = @splat(2),
-            .purpose = .digest,
-            .identity = @splat(3),
-            .generation = 4,
-        },
-        .payload = .{
-            .obligation = @splat(1),
-            .specification_revision = 6,
-            .prior_sequence = 9,
-            .through_sequence = 15,
-            .frozen_text = .{ .bytes = "Seven verified changes." },
-            .prompt = null,
-            .supersedes = null,
-            .coverage = .{ .sequence = 15, .epoch = 2, .tip = @splat('c') },
-        },
-    };
-}
-
 fn head() t.Head {
     var value = fresh(contracts.genesis());
     value.obligation = .{ .task = @splat(1) };
@@ -41,7 +20,6 @@ fn head() t.Head {
     value.next_due_ms = 5000;
     value.observed = .{ .sequence = 18, .epoch = 2, .tip = @splat('a') };
     value.told = .{ .sequence = 9, .epoch = 1, .tip = @splat('b') };
-    value.digest = .{ .delivery = intent(), .hold = .uncertain_transmission, .not_before_ms = 950 };
     value.source_not_before_ms = 1700;
     value.render_not_before_ms = 1800;
     value.accounting = .{
@@ -53,10 +31,6 @@ fn head() t.Head {
 }
 
 fn question() t.Question {
-    var prompt = intent();
-    prompt.key.purpose = .question;
-    prompt.key.identity = @splat(20);
-    prompt.payload.prompt = @splat(20);
     return .{
         .identity = @splat(20),
         .condition = @splat(21),
@@ -67,8 +41,11 @@ fn question() t.Question {
             .tip = @splat('c'),
             .coverage = .diverged,
         },
-        .choices = .{ .items = &.{.{ .bytes = "accept_gap" }} },
-        .prompt = prompt,
+        .choices = .{ .items = &.{.{
+            .value = .{ .bytes = "accept_gap" },
+            .label = .{ .bytes = "Accept explicit gap" },
+        }} },
+        .prompt = .{ .bytes = "Accept the explicit gap?" },
     };
 }
 
@@ -141,12 +118,13 @@ test "native directive policy composes modes coalesced checks and refuses final 
     expected.next_due_ms = expected.clock_ms;
     try std.testing.expectEqualDeep(expected, paused.head);
     for (0..3) |i| try expectApplied(paused, i);
-    var held = head();
-    held.mode = .paused;
-    held.recovery_hold = true;
+    var stopped = head();
+    stopped.mode = .paused;
+    stopped.desired_mode = .paused;
     const resume_case = directive(5, 1, null, .{ .@"resume" = {} });
-    const resumed = try execute(&f, "recovery-resume", held, &.{resume_case});
-    expected = selected(held, resume_case);
+    const resumed = try execute(&f, "resume", stopped, &.{resume_case});
+    expected = selected(stopped, resume_case);
+    expected.mode = .active;
     expected.desired_mode = .active;
     try std.testing.expectEqualDeep(expected, resumed.head);
     const cancel = directive(6, 1, null, .{ .cancel = {} });
@@ -322,158 +300,6 @@ test "native directive policy refuses stale or unbound answers and exhausted sou
     expected.question = null;
     try std.testing.expectEqualDeep(expected, closed.head);
     try std.testing.expect(closed.gap == null);
-}
-
-const warning = "The earlier digest may also have arrived. " ++
-    "This is the authorized replacement issue.\n\n";
-
-test "native directive policy authorizes one new digest issue preserving unknown generations" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
-    const release = directive(2, 1, null, .{ .release = .{ .key = intent().key } });
-    const value = try execute(&f, "release", head(), &.{release});
-    var expected = selected(head(), release);
-    expected.digest.?.delivery.key.identity = release.value.envelope.stable_request;
-    expected.digest.?.delivery.key.generation = 0;
-    expected.digest.?.delivery.payload.issue = 1;
-    expected.digest.?.delivery.payload.supersedes = intent().key;
-    expected.digest.?.delivery.payload.frozen_text = .{
-        .bytes = warning ++ "Seven verified changes.",
-    };
-    expected.digest.?.hold = .none;
-    try std.testing.expectEqualDeep(expected, value.head);
-    try expectApplied(value, 0);
-    var again = value.head;
-    again.digest.?.hold = .uncertain_transmission;
-    const exhausted = directive(3, 2, release.reference, .{ .release = .{
-        .key = again.digest.?.delivery.key,
-    } });
-    const refused = try execute(&f, "second-release", again, &.{exhausted});
-    try std.testing.expectEqualDeep(selected(again, exhausted), refused.head);
-    try expectRejected(refused, 0, "release_not_authorized");
-}
-
-const question_warning = "The earlier question prompt may also have arrived. " ++
-    "This is the authorized replacement issue.\n\n";
-
-test "native directive policy holds a question at a boundary and reissues it once released" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
-    var previous = head();
-    previous.question = question();
-    const boundary: t.InputReference = .{ .task = @splat(30), .digest = @splat(31) };
-    const hold = directive(2, 1, null, .{ .recovery_hold = .{ .recovery = boundary } });
-    const old_key = question().prompt.key;
-    const release = directive(3, 2, hold.reference, .{ .release = .{ .key = old_key } });
-    const value = try execute(&f, "question-release", previous, &.{ hold, release });
-    try expectApplied(value, 0);
-    try expectApplied(value, 1);
-    var expected = question();
-    expected.prompt.key.identity = release.value.envelope.stable_request;
-    expected.prompt.key.generation = 0;
-    expected.prompt.payload.issue = 1;
-    expected.prompt.payload.supersedes = old_key;
-    expected.prompt.payload.frozen_text = .{
-        .bytes = question_warning ++ "Seven verified changes.",
-    };
-    try std.testing.expectEqualDeep(expected, value.head.question.?);
-    try std.testing.expect(value.head.recovery_hold);
-    const again = directive(4, 3, release.reference, .{ .release = .{
-        .key = expected.prompt.key,
-    } });
-    const repeated = try execute(&f, "question-release-again", value.head, &.{again});
-    try std.testing.expectEqualDeep(selected(value.head, again), repeated.head);
-    try expectRejected(repeated, 0, "release_not_authorized");
-    const unheld = directive(5, 1, null, .{ .release = .{ .key = old_key } });
-    const refused = try execute(&f, "question-release-unheld", previous, &.{unheld});
-    try std.testing.expectEqualDeep(selected(previous, unheld), refused.head);
-    try expectRejected(refused, 0, "release_not_authorized");
-    var absent = head();
-    absent.question = null;
-    const missing = try execute(&f, "question-release-missing", absent, &.{unheld});
-    try expectRejected(missing, 0, "question_missing");
-}
-
-const ReleaseCase = enum {
-    key,
-    fault,
-    paused,
-    none,
-    identity,
-    issue,
-    predecessor,
-    lineage,
-    prior,
-    beyond,
-    coverage,
-};
-
-fn changedRelease(case: ReleaseCase, previous: *t.Head, fact: *t.DirectiveFact) void {
-    switch (case) {
-        .key => fact.value.body.release.key.generation += 1,
-        .fault => previous.digest.?.hold = .rendering_fault,
-        .paused => previous.digest.?.hold = .paused,
-        .none => previous.digest.?.hold = .none,
-        .identity => fact.value.envelope.stable_request = intent().key.identity,
-        .issue => previous.digest.?.delivery.payload.issue = 1,
-        .predecessor => previous.digest.?.delivery.payload.supersedes = intent().key,
-        .lineage => {
-            previous.digest.?.delivery.key.lineage = @splat(99);
-            fact.value.body.release.key = previous.digest.?.delivery.key;
-        },
-        .prior => previous.digest.?.delivery.payload.prior_sequence = 8,
-        .beyond => previous.digest.?.delivery.payload.through_sequence = 19,
-        .coverage => previous.digest.?.delivery.payload.coverage = null,
-    }
-}
-
-test "native directive policy rejects wrong keys permanent faults and missing coverage" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
-    for (std.enums.values(ReleaseCase)) |case| {
-        var previous = head();
-        var fact = directive(2, 1, null, .{ .release = .{ .key = intent().key } });
-        changedRelease(case, &previous, &fact);
-        const value = try execute(&f, @tagName(case), previous, &.{fact});
-        try std.testing.expectEqualDeep(selected(previous, fact), value.head);
-        try expectRejected(value, 0, "release_not_authorized");
-    }
-    var absent = head();
-    absent.digest = null;
-    const fact = directive(2, 1, null, .{ .release = .{ .key = intent().key } });
-    const missing = try execute(&f, "missing", absent, &.{fact});
-    try expectRejected(missing, 0, "digest_missing");
-}
-
-test "native directive policy abbreviates full escaped digests with a duplicate warning" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
-    var previous = head();
-    const expanded: [800]u8 = @splat('&');
-    previous.digest.?.delivery.payload.frozen_text = .{ .bytes = &expanded };
-    const release = directive(2, 1, null, .{ .release = .{ .key = intent().key } });
-    const value = try execute(&f, "abbreviated", previous, &.{release});
-    try expectApplied(value, 0);
-    const output = value.head.digest.?.delivery;
-    try std.testing.expectEqualStrings(warning ++
-        "Abbreviated digest: observation records after 9 through 15. " ++
-        "Full entries and evidence remain in local history.", output.payload.frozen_text.bytes);
-    try std.testing.expectEqualDeep(
-        previous.digest.?.delivery.payload.coverage,
-        output.payload.coverage,
-    );
-    var prepared = try @import("../native/delivery_prepare.zig").materialize(
-        f.arena.allocator(),
-        output,
-        .{ .task = @splat(7), .digest = @splat(8) },
-        @splat(9),
-    );
-    defer prepared.deinit();
-    try std.testing.expect(prepared.value.payload.wire_json.bytes.len != 0);
 }
 
 const ExcessGaps = struct {

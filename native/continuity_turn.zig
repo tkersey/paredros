@@ -266,10 +266,10 @@ pub fn admit(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !Progress 
     const scratch = arena.allocator();
     var index = try driver.rebuild(scratch);
     defer index.deinit();
-    if (index.recovery_purpose == .transfer) return error.TransferredNamespace;
+    if (index.transferred()) return error.TransferredNamespace;
     var progress: Progress = .{};
     const selected = try pending(scratch, &index, &progress);
-    if (selected.len == 0 or index.import_hold) return progress;
+    if (selected.len == 0) return progress;
     const first = selected[0];
     const input = try mappedInput(
         scratch,

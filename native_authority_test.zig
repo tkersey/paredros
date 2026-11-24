@@ -5,7 +5,5 @@ test {
     _ = @import("tests/control.zig");
     _ = @import("tests/control_socket.zig");
     _ = @import("tests/index.zig");
-    _ = @import("tests/outbound.zig");
     _ = @import("tests/messages.zig");
-    _ = @import("tests/delivery_fact.zig");
 }

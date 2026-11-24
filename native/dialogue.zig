@@ -123,12 +123,10 @@ fn appendHead(builder: *Builder, record: idx.Record, target: t.Id, head: t.Head)
         .obligation = std.fmt.bytesToHex(target, .lower),
         .specification = head.specification,
         .mode = @tagName(head.mode),
-        .recovery_hold = head.recovery_hold,
         .observed = head.observed,
         .told = head.told,
         .last_observation = head.last_observation,
         .pending_question = head.question,
-        .digest_hold = if (head.digest) |value| @tagName(value.hold) else "none",
         .accounting = head.accounting,
     });
 }

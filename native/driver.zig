@@ -9,7 +9,6 @@ const materialize = @import("materialize.zig");
 const eligibility = @import("eligibility.zig");
 const recovery = @import("recovery.zig");
 const commands = @import("commands.zig");
-const outbound = @import("outbound.zig");
 const configuration = @import("configuration.zig");
 
 pub const Clock = struct {
@@ -115,7 +114,7 @@ pub fn Driver(comptime Types: type) type {
             defer index.deinit();
             const transfer = @import("transfer.zig");
             if (transfer.importPending(&index)) return transfer.advanceImport(self, a, &index);
-            if (index.recovery_purpose == .transfer or index.portable.len == 0) return false;
+            if (index.transferred() or index.portable.len == 0) return false;
             const manifest = index.record(index.portable[0].metadata.manifest.task) orelse
                 return error.MissingContinuityManifest;
             if (manifest.input != .continuity_cut) return error.InvalidContinuityManifest;
@@ -125,19 +124,6 @@ pub fn Driver(comptime Types: type) type {
                 manifest.input.continuity_cut.envelope.origin,
             );
             return progress.admitted != null;
-        }
-
-        pub fn deliveries(self: *Self, a: std.mem.Allocator, target: t.Id) ![]t.Id {
-            if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            return outbound.admitDeliveries(
-                self.service,
-                a,
-                &index,
-                target,
-                try self.clock.now(self.clock.context),
-            );
         }
 
         pub fn importedControls(self: *Self, a: std.mem.Allocator, target: t.Id) !bool {
@@ -221,12 +207,6 @@ pub fn Driver(comptime Types: type) type {
                 const head = index.head(obligation);
                 if (head.mode == .cancelled or head.mode == .transferred)
                     return error.FinalObligation;
-                try @import("restore.zig").validateDirective(
-                    &index,
-                    request.target.?,
-                    self.body,
-                    request.origin,
-                );
                 if (self.body == .adopt)
                     try @import("method_catalog.zig").adoption(a, &index, self.body.adopt.method);
                 var ordinal = head.folded_directive_ordinal;
@@ -296,12 +276,11 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
             return true;
     for (index.records) |record| {
         if (record.input == .step) continue;
-        const target = materialize.factTarget(index, record) orelse continue;
+        const target = materialize.factTarget(record) orelse continue;
         if (!std.meta.eql(target, obligation.task)) continue;
         if (materialize.unsettled(obligation, record)) return true;
     }
     if (!obligation.ordinaryDispatch()) return false;
     if (clock_ms >= head.next_due_ms and clock_ms >= head.source_not_before_ms) return true;
-    return head.digest == null and head.observed.sequence > head.told.sequence and
-        clock_ms >= head.render_not_before_ms;
+    return head.observed.sequence > head.told.sequence and clock_ms >= head.render_not_before_ms;
 }

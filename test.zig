@@ -1,5 +1,4 @@
 test {
-    _ = @import("tests/restore.zig");
     _ = @import("tests/experiment.zig");
     _ = @import("tests/method.zig");
     _ = @import("tests/github.zig");
@@ -17,7 +16,6 @@ test {
     _ = @import("tests/settlement.zig");
     _ = @import("tests/phase_recovery.zig");
     _ = @import("tests/render_frame.zig");
-    _ = @import("tests/delivery_prepare.zig");
     _ = @import("tests/check_publish.zig");
     _ = @import("tests/directive_policy.zig");
     _ = @import("tests/step.zig");

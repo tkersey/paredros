@@ -22,9 +22,8 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
 }
 
 fn advanceOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !?t.Id {
-    const attempt = record.input.turn.attempt;
     const state = try recovery_status.turn(driver.service, a, record);
-    if (!recovery_status.continues(state.action, attempt)) return null;
+    if (state.action == .stay) return null;
     if (state.action == .replace) return try replace(driver, a, record);
     const resumed = try recovery_status.resumeSelected(
         driver.service,
@@ -34,8 +33,7 @@ fn advanceOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !?t.Id 
         state.action,
         state.occurrence,
     );
-    if (resumed == .incompatible and recovery_status.replaceable(attempt))
-        return try replace(driver, a, record);
+    if (resumed == .incompatible) return try replace(driver, a, record);
     return null;
 }
 

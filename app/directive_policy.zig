@@ -8,16 +8,12 @@ const mode = @import("mode.zig");
 const revision = @import("revision.zig");
 const chain = @import("directive_chain.zig");
 
-const ChoiceArgs = struct { choices: cts.Vector(t.Name, 8), choice: t.Name, index: u64 };
+const ChoiceArgs = struct { choices: cts.Vector(t.Choice, 8), choice: t.Name, index: u64 };
 const Choices = a.Function(ChoiceArgs, bool);
-const FitsArgs = struct { text: t.Text, index: u64, used: u64 };
-const Fits = a.Function(FitsArgs, bool);
 const Helpers = struct {
-    ids: a.Function(bytes.Parameters(16), bool),
     digests: a.Function(bytes.Parameters(32), bool),
     oids: a.Function(bytes.Parameters(40), bool),
     choices: Choices,
-    fits: Fits,
     mode: mode.Function,
     revision: revision.Function,
 };
@@ -25,11 +21,9 @@ const SourceCondition = @typeInfo(@FieldType(t.Question, "source_condition")).op
 
 pub fn emit(c: protean.Context) !chain.Apply {
     const helpers: Helpers = .{
-        .ids = try bytes.emit(c, 16),
         .digests = try bytes.emit(c, 32),
         .oids = try bytes.emit(c, 40),
         .choices = try choicesFunction(c),
-        .fits = try fitsFunction(c),
         .mode = try mode.emit(c),
         .revision = try revision.emit(c),
     };
@@ -50,7 +44,7 @@ pub fn emit(c: protean.Context) !chain.Apply {
     const allowed = try b.booleanNot(final);
     const active = try b.branch();
     const ended = try b.branch();
-    const next = try applyBody(c, active, helpers, head, directive, body);
+    const next = try applyBody(c, active, helpers, head, body);
     const applied = try b.conditional(
         allowed,
         try active.ret(next),
@@ -65,7 +59,6 @@ fn applyBody(
     b: anytype,
     h: Helpers,
     head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
     body: a.Value(t.DirectiveBody),
 ) !a.Value(chain.Applied) {
     const pause = try b.caseOf(body, "pause");
@@ -77,9 +70,6 @@ fn applyBody(
     const adopt = try b.caseOf(body, "adopt");
     const revert = try b.caseOf(body, "revert");
     const answer = try b.caseOf(body, "answer");
-    const release = try b.caseOf(body, "release");
-    const recovery_hold = try b.caseOf(body, "recovery_hold");
-    const recovery_release = try b.caseOf(body, "recovery_release");
     const due = try check.body().update(
         head,
         .{ .next_due_ms = try check.body().field(head, "clock_ms") },
@@ -87,10 +77,6 @@ fn applyBody(
     const amended = try revise(c, amend.body(), h.revision, head, "amend", amend.payload());
     const adopted = try revise(c, adopt.body(), h.revision, head, "adopt", adopt.payload());
     const reverted = try revise(c, revert.body(), h.revision, head, "revert", revert.payload());
-    const hb = recovery_hold.body();
-    const rb = recovery_release.body();
-    const held = try holdRecovery(c, hb, head, directive, recovery_hold.payload());
-    const released = try releaseRecovery(c, rb, h, head, directive, recovery_release.payload());
     return b.match(body, .{
         .pause = try pause.ret(try control(c, pause.body(), h.mode, head, .pause)),
         .@"resume" = try run.ret(try control(c, run.body(), h.mode, head, .@"resume")),
@@ -101,78 +87,6 @@ fn applyBody(
         .adopt = try adopt.ret(adopted),
         .revert = try revert.ret(reverted),
         .answer = try answer.ret(try answerQuestion(c, answer.body(), h, head, answer.payload())),
-        .release = try release.ret(try releaseOutput(
-            c,
-            release.body(),
-            h,
-            head,
-            directive,
-            try release.body().field(release.payload(), "key"),
-        )),
-        .recovery_hold = try recovery_hold.ret(held),
-        .recovery_release = try recovery_release.ret(released),
-    });
-}
-
-fn localOrigin(b: anytype, directive: a.Value(t.Directive)) !a.Value(bool) {
-    const origin = try b.field(try b.field(directive, "envelope"), "origin");
-    return b.equal(
-        try b.variantTag(origin),
-        try b.constant(u64, std.meta.fieldIndex(t.Origin, "local").?),
-    );
-}
-
-fn holdRecovery(
-    c: protean.Context,
-    b: anytype,
-    head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
-    request: a.Value(@FieldType(t.DirectiveBody, "recovery_hold")),
-) !a.Value(chain.Applied) {
-    const next = try mode.recoveryHold(c, b, head, try b.field(request, "recovery"));
-    return b.select(
-        try localOrigin(b, directive),
-        try accept(c, b, next),
-        try refuse(c, b, head, "recovery_local_only"),
-    );
-}
-
-fn releaseRecovery(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
-    request: a.Value(@FieldType(t.DirectiveBody, "recovery_release")),
-) !a.Value(chain.Applied) {
-    const boundary = try b.field(head, "recovery_boundary");
-    const none = try b.caseOf(boundary, "none");
-    const some = try b.caseOf(boundary, "some");
-    const sb = some.body();
-    const reference = try sb.field(request, "recovery");
-    const same = try all(sb, &.{
-        try sb.call(h.ids, .{
-            .left = try sb.field(some.payload(), "task"),
-            .right = try sb.field(reference, "task"),
-            .index = try sb.constant(u64, 0),
-        }),
-        try digestEqual(
-            sb,
-            h,
-            try sb.field(some.payload(), "digest"),
-            try sb.field(reference, "digest"),
-        ),
-        try sb.field(request, "exclusive_owner"),
-        try localOrigin(sb, directive),
-    });
-    const result = try sb.select(
-        same,
-        try accept(c, sb, try mode.recoveryRelease(c, sb, head)),
-        try refuse(c, sb, head, "recovery_release_not_authorized"),
-    );
-    return b.match(boundary, .{
-        .none = try none.ret(try refuse(c, none.body(), head, "recovery_boundary_missing")),
-        .some = try some.ret(result),
     });
 }
 
@@ -405,249 +319,9 @@ fn publishGap(
     });
 }
 
-fn releaseOutput(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
-    requested: a.Value(t.DeliveryKey),
-) !a.Value(chain.Applied) {
-    const Purpose = @FieldType(t.DeliveryKey, "purpose");
-    const prompt = try mode.enumIs(c, b, Purpose, try b.field(requested, "purpose"), .question);
-    const question = try b.branch();
-    const digest = try b.branch();
-    return b.conditional(
-        prompt,
-        try question.ret(try releaseQuestion(c, question, h, head, directive, requested)),
-        try digest.ret(try releaseDigest(c, digest, h, head, directive, requested)),
-    );
-}
-
-fn releaseQuestion(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
-    requested: a.Value(t.DeliveryKey),
-) !a.Value(chain.Applied) {
-    const question = try b.field(head, "question");
-    const none = try b.caseOf(question, "none");
-    const some = try b.caseOf(question, "some");
-    const sb = some.body();
-    const key = try sb.field(try sb.field(some.payload(), "prompt"), "key");
-    const identity = try sb.field(try sb.field(directive, "envelope"), "stable_request");
-    const valid = try all(sb, &.{
-        try keyEqual(sb, h, key, requested),
-        try sb.field(some.payload(), "held"),
-        try sb.booleanNot(try digestEqual(sb, h, identity, try sb.field(key, "identity"))),
-        try digestEqual(sb, h, try sb.field(key, "lineage"), try sb.field(head, "lineage")),
-    });
-    const accepted = try sb.branch();
-    const rejected = try sb.branch();
-    const next = try reissueQuestion(c, accepted, head, some.payload(), identity);
-    const applied = try sb.conditional(
-        valid,
-        try accepted.ret(next),
-        try rejected.ret(try refuse(c, rejected, head, "release_not_authorized")),
-    );
-    return b.match(question, .{
-        .none = try none.ret(try refuse(c, none.body(), head, "question_missing")),
-        .some = try some.ret(applied),
-    });
-}
-
-fn reissueQuestion(
-    c: protean.Context,
-    b: anytype,
-    head: a.Value(t.Head),
-    question: a.Value(t.Question),
-    identity: a.Value(t.Digest),
-) !a.Value(chain.Applied) {
-    const prompt = try b.field(question, "prompt");
-    const old_key = try b.field(prompt, "key");
-    const old_payload = try b.field(prompt, "payload");
-    const key = try b.update(
-        old_key,
-        .{ .identity = identity, .generation = try b.constant(u32, 0) },
-    );
-    const warning = try c.literal(t.Text, .{
-        .bytes = "The earlier question prompt may also have arrived. " ++
-            "This is the authorized replacement issue.\n\n",
-    });
-    const payload = try b.update(old_payload, .{
-        .issue = try b.checked(
-            .add,
-            try b.field(old_payload, "issue"),
-            try b.constant(u32, 1),
-            .{ .overflow = try a.failure(c, "question_issue_overflow") },
-        ),
-        .supersedes = try b.variant(try c.schema(?t.DeliveryKey), "some", old_key),
-        .frozen_text = try join(c, b, warning, try b.field(old_payload, "frozen_text")),
-    });
-    const reissued = try b.update(question, .{
-        .prompt = try b.update(prompt, .{ .key = key, .payload = payload }),
-        .held = try b.constant(bool, false),
-    });
-    return accept(c, b, try b.update(head, .{
-        .question = try b.variant(try c.schema(?t.Question), "some", reissued),
-    }));
-}
-
-fn releaseDigest(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    directive: a.Value(t.Directive),
-    requested: a.Value(t.DeliveryKey),
-) !a.Value(chain.Applied) {
-    const digest = try b.field(head, "digest");
-    const none = try b.caseOf(digest, "none");
-    const some = try b.caseOf(digest, "some");
-    const sb = some.body();
-    const delivery = try sb.field(some.payload(), "delivery");
-    const key = try sb.field(delivery, "key");
-    const payload = try sb.field(delivery, "payload");
-    const new_identity = try sb.field(try sb.field(directive, "envelope"), "stable_request");
-    const same_key = try keyEqual(sb, h, key, requested);
-    const held = try mode.enumIs(
-        c,
-        sb,
-        t.DeliveryHold,
-        try sb.field(some.payload(), "hold"),
-        .uncertain_transmission,
-    );
-    const purpose = try mode.enumIs(
-        c,
-        sb,
-        @FieldType(t.DeliveryKey, "purpose"),
-        try sb.field(key, "purpose"),
-        .digest,
-    );
-    const fresh = try sb.equal(try sb.field(payload, "issue"), try sb.constant(u32, 0));
-    const original = try isNone(c, sb, ?t.DeliveryKey, try sb.field(payload, "supersedes"));
-    const distinct = try sb.booleanNot(try digestEqual(
-        sb,
-        h,
-        new_identity,
-        try sb.field(key, "identity"),
-    ));
-    const lineage = try digestEqual(
-        sb,
-        h,
-        try sb.field(key, "lineage"),
-        try sb.field(head, "lineage"),
-    );
-    const coverage = try releasableCoverage(c, sb, head, payload);
-    const valid = try all(
-        sb,
-        &.{ same_key, held, purpose, fresh, original, distinct, lineage, coverage },
-    );
-    const accepted = try sb.branch();
-    const rejected = try sb.branch();
-    const next = try replacement(c, accepted, h, head, some.payload(), new_identity);
-    const applied = try sb.conditional(
-        valid,
-        try accepted.ret(next),
-        try rejected.ret(try refuse(c, rejected, head, "release_not_authorized")),
-    );
-    return b.match(digest, .{
-        .none = try none.ret(try refuse(c, none.body(), head, "digest_missing")),
-        .some = try some.ret(applied),
-    });
-}
-
-fn releasableCoverage(
-    c: protean.Context,
-    b: anytype,
-    head: a.Value(t.Head),
-    payload: a.Value(t.LogicalPayload),
-) !a.Value(bool) {
-    _ = c;
-    const prior = try b.field(payload, "prior_sequence");
-    const through = try b.field(payload, "through_sequence");
-    const observed = try b.field(head, "observed");
-    const current = try b.equal(prior, try b.field(try b.field(head, "told"), "sequence"));
-    const growing = try b.less(prior, through);
-    const acquired = try b.booleanNot(try b.less(try b.field(observed, "sequence"), through));
-    const coverage = try b.field(payload, "coverage");
-    const none = try b.caseOf(coverage, "none");
-    const some = try b.caseOf(coverage, "some");
-    const exact = try some.body().equal(through, try some.body().field(some.payload(), "sequence"));
-    const available = try b.match(coverage, .{
-        .none = try none.ret(try none.body().constant(bool, false)),
-        .some = try some.ret(exact),
-    });
-    return all(b, &.{ current, growing, acquired, available });
-}
-
-fn replacement(
-    c: protean.Context,
-    b: anytype,
-    h: Helpers,
-    head: a.Value(t.Head),
-    intent: a.Value(t.DigestIntent),
-    identity: a.Value(t.Digest),
-) !a.Value(chain.Applied) {
-    const delivery = try b.field(intent, "delivery");
-    const old_key = try b.field(delivery, "key");
-    const old_payload = try b.field(delivery, "payload");
-    const key = try b.update(
-        old_key,
-        .{ .identity = identity, .generation = try b.constant(u32, 0) },
-    );
-    const payload = try b.update(old_payload, .{
-        .issue = try b.constant(u32, 1),
-        .supersedes = try b.variant(try c.schema(?t.DeliveryKey), "some", old_key),
-        .frozen_text = try replacementText(c, b, h.fits, old_payload),
-    });
-    const issued = try b.update(intent, .{
-        .delivery = try b.update(delivery, .{ .key = key, .payload = payload }),
-        .hold = try c.literal(t.DeliveryHold, .none),
-    });
-    return accept(c, b, try b.update(head, .{
-        .digest = try b.variant(try c.schema(?t.DigestIntent), "some", issued),
-    }));
-}
-
-fn replacementText(
-    c: protean.Context,
-    b: anytype,
-    fits: Fits,
-    payload: a.Value(t.LogicalPayload),
-) !a.Value(t.Text) {
-    const old = try b.field(payload, "frozen_text");
-    const retained = try b.branch();
-    const abbreviated = try b.branch();
-    const warning = try c.literal(t.Text, .{
-        .bytes = "The earlier digest may also have arrived. " ++
-            "This is the authorized replacement issue.\n\n",
-    });
-    const complete = try join(c, retained, warning, old);
-    const lower = try abbreviated.textInteger(try abbreviated.field(payload, "prior_sequence"));
-    const upper = try abbreviated.textInteger(try abbreviated.field(payload, "through_sequence"));
-    var summary = try join(c, abbreviated, warning, try c.literal(t.Text, .{
-        .bytes = "Abbreviated digest: observation records after ",
-    }));
-    summary = try join(c, abbreviated, summary, lower);
-    summary = try join(c, abbreviated, summary, try c.literal(t.Text, .{ .bytes = " through " }));
-    summary = try join(c, abbreviated, summary, upper);
-    summary = try join(c, abbreviated, summary, try c.literal(t.Text, .{
-        .bytes = ". Full entries and evidence remain in local history.",
-    }));
-    const keep = try b.call(fits, .{
-        .text = old,
-        .index = try b.constant(u64, 0),
-        .used = try b.constant(u64, 0),
-    });
-    return b.conditional(keep, try retained.ret(complete), try abbreviated.ret(summary));
-}
-
 fn choicesFunction(c: protean.Context) !Choices {
     const function = try c.author.function("match offered question answer", .{
-        .choices = try c.schema(cts.Vector(t.Name, 8)),
+        .choices = try c.schema(cts.Vector(t.Choice, 8)),
         .choice = try c.schema(t.Name),
         .index = try c.schema(u64),
     }, try c.schema(bool), &.{});
@@ -672,7 +346,7 @@ fn choicesFunction(c: protean.Context) !Choices {
         }),
     });
     const selected = try more.conditional(
-        try textEqual(more, option, choice),
+        try textEqual(more, try more.field(option, "value"), choice),
         try found.ret(try found.constant(bool, true)),
         try next.ret(continued),
     );
@@ -685,61 +359,6 @@ fn choicesFunction(c: protean.Context) !Choices {
     return function;
 }
 
-fn fitsFunction(c: protean.Context) !Fits {
-    const function = try c.author.function("bound escaped replacement text", .{
-        .text = try c.schema(t.Text),
-        .index = try c.schema(u64),
-        .used = try c.schema(u64),
-    }, try c.schema(bool), &.{});
-    const b = try c.author.body(function);
-    const text = try b.parameter("text");
-    const index = try b.parameter("index");
-    const used = try b.parameter("used");
-    const more = try b.branch();
-    const done = try b.branch();
-    const byte = try more.variantPayload(
-        try more.blobByte(text, index),
-        "some",
-        try a.failure(c, "replacement_text_bounds"),
-    );
-    const ampersand = try more.equal(byte, try more.constant(u8, '&'));
-    const angle = try more.select(
-        try more.equal(byte, try more.constant(u8, '<')),
-        try more.constant(bool, true),
-        try more.equal(byte, try more.constant(u8, '>')),
-    );
-    const width = try more.select(
-        ampersand,
-        try more.constant(u64, 5),
-        try more.select(angle, try more.constant(u64, 4), try more.constant(u64, 1)),
-    );
-    const continued = try more.call(function, .{
-        .text = text,
-        .index = try more.checked(.add, index, try more.constant(u64, 1), .{
-            .overflow = try a.failure(c, "replacement_text_overflow"),
-        }),
-        .used = try more.checked(.add, used, width, .{
-            .overflow = try a.failure(c, "replacement_text_overflow"),
-        }),
-    });
-    const ended = try b.select(
-        try b.less(try b.constant(u64, 3800), used),
-        try b.constant(bool, false),
-        try b.constant(bool, true),
-    );
-    const active = try all(b, &.{ try b.less(index, try b.blobLength(text)), ended });
-    const value = try b.conditional(active, try more.ret(continued), try done.ret(ended));
-    try c.author.define(function, try b.ret(value));
-    return function;
-}
-
-fn bodyIs(b: anytype, body: a.Value(t.DirectiveBody), comptime tag: []const u8) !a.Value(bool) {
-    return b.equal(
-        try b.variantTag(body),
-        try b.constant(u64, std.meta.fieldIndex(t.DirectiveBody, tag).?),
-    );
-}
-
 fn digestEqual(
     b: anytype,
     h: Helpers,
@@ -747,23 +366,6 @@ fn digestEqual(
     right: a.Value(t.Digest),
 ) !a.Value(bool) {
     return b.call(h.digests, .{ .left = left, .right = right, .index = try b.constant(u64, 0) });
-}
-
-fn keyEqual(
-    b: anytype,
-    h: Helpers,
-    left: a.Value(t.DeliveryKey),
-    right: a.Value(t.DeliveryKey),
-) !a.Value(bool) {
-    return all(b, &.{
-        try digestEqual(b, h, try b.field(left, "lineage"), try b.field(right, "lineage")),
-        try digestEqual(b, h, try b.field(left, "identity"), try b.field(right, "identity")),
-        try b.equal(
-            try b.enumTag(try b.field(left, "purpose")),
-            try b.enumTag(try b.field(right, "purpose")),
-        ),
-        try b.equal(try b.field(left, "generation"), try b.field(right, "generation")),
-    });
 }
 
 fn textEqual(b: anytype, left: anytype, right: anytype) !a.Value(bool) {
@@ -778,17 +380,4 @@ fn all(b: anytype, values: []const a.Value(bool)) !a.Value(bool) {
         try b.constant(bool, false),
     );
     return conjunction;
-}
-
-fn isNone(c: protean.Context, b: anytype, comptime T: type, value: a.Value(T)) !a.Value(bool) {
-    return b.equal(try b.variantTag(value), try b.variantTag(try c.literal(T, null)));
-}
-
-fn join(c: protean.Context, b: anytype, left: anytype, right: anytype) !a.Value(t.Text) {
-    return b.blobConcat(
-        try c.schema(t.Text),
-        left,
-        right,
-        try a.failure(c, "directive_text_capacity"),
-    );
 }

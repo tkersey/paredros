@@ -43,13 +43,10 @@ pub fn expectedFresh(input: t.Genesis) t.Head {
         .specification = input.specification,
         .mode = .active,
         .desired_mode = .active,
-        .recovery_hold = false,
         .observed = .{ .sequence = 0, .epoch = 0, .tip = null },
         .told = .{ .sequence = 0, .epoch = 0, .tip = null },
-        .told_receipt = null,
         .last_observation = null,
-        .digest = null,
-        .activation = expectedActivation(input),
+        .message = activation,
         .question = null,
         .method = .{ .ordinary = {} },
         .next_due_ms = input.clock_ms,
@@ -65,26 +62,11 @@ pub fn expectedFresh(input: t.Genesis) t.Head {
     };
 }
 
-fn expectedActivation(input: t.Genesis) t.DeliveryIntent {
-    return .{
-        .key = .{
-            .lineage = input.lineage,
-            .purpose = .activation,
-            .identity = input.envelope.stable_request,
-            .generation = 0,
-        },
-        .payload = .{
-            .obligation = null,
-            .specification_revision = 0,
-            .prior_sequence = 0,
-            .through_sequence = 0,
-            .frozen_text = .{ .bytes = "PAREDROS is active. " ++
-                "First source observation is pending." },
-            .prompt = null,
-            .supersedes = null,
-        },
-    };
-}
+pub const activation: t.Notification = .{
+    .specification_revision = 0,
+    .text = .{ .bytes = "PAREDROS is active. First source observation is pending." },
+    .purpose = .{ .activation = {} },
+};
 
 test "native genesis retains exact fresh head and rejects invalid inputs across restart" {
     var fixture: Fixture = .{};
@@ -108,7 +90,24 @@ test "native genesis retains exact fresh head and rejects invalid inputs across 
     try std.testing.expectEqual(.idle, try fixture.service.?.pump(fixture.arena.allocator()));
 }
 
-fn importedInput(cancelled: bool) t.Genesis {
+pub const question: t.Question = .{
+    .identity = @splat(11),
+    .condition = @splat(11),
+    .specification_revision = 4,
+    .source_condition = .{
+        .epoch = 3,
+        .base = @splat('a'),
+        .tip = @splat('c'),
+        .coverage = .diverged,
+    },
+    .choices = .{ .items = &.{.{
+        .value = .{ .bytes = "accept_gap" },
+        .label = .{ .bytes = "Accept explicit gap" },
+    }} },
+    .prompt = .{ .bytes = "Accept the gap?" },
+};
+
+fn importedInput(desired: @FieldType(t.Head, "desired_mode"), asked: bool) t.Genesis {
     var input = fixtures.genesis();
     var previous = expectedFresh(input);
     previous.obligation = .{ .task = @splat(7) };
@@ -126,28 +125,32 @@ fn importedInput(cancelled: bool) t.Genesis {
         .state = .{ .bytes = "retained-method-state" },
         .consecutive_faults = 1,
     } };
-    previous.desired_mode = if (cancelled) .cancelled else .active;
-    previous.mode = if (cancelled) .cancelled else .transferred;
+    previous.desired_mode = desired;
+    previous.mode = if (desired == .cancelled) .cancelled else .transferred;
+    previous.message = null;
+    previous.question = if (asked) question else null;
     previous.accounting = .{ .known_calls = 7, .possible_charged_calls = 2 };
     input.clock_ms = 900;
     input.imported = .{
         .source = .{ .task = @splat(8), .digest = @splat(9) },
         .head = previous,
-        .exclusive_owner = true,
     };
     return input;
 }
 
-test "native genesis import preserves activation frontier method accounting and cancellation" {
+test "native genesis import resumes the prior mode and emits a pending prompt again" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
-    for ([_]bool{ false, true }) |cancelled| {
-        const input = importedInput(cancelled);
-        const task = try fixture.execute(
-            if (cancelled) "cancelled-import" else "active-import",
-            input,
-        );
+    const Desired = @FieldType(t.Head, "desired_mode");
+    const cases = [_]struct { desired: Desired, mode: t.Mode, asked: bool, name: []const u8 }{
+        .{ .desired = .active, .mode = .active, .asked = false, .name = "active-import" },
+        .{ .desired = .paused, .mode = .paused, .asked = true, .name = "paused-import" },
+        .{ .desired = .cancelled, .mode = .cancelled, .asked = false, .name = "cancelled-import" },
+    };
+    for (cases) |case| {
+        const input = importedInput(case.desired, case.asked);
+        const task = try fixture.execute(case.name, input);
         const result = try fixture.output(task);
         var expected = input.imported.?.head;
         expected.obligation = .{ .self = {} };
@@ -156,10 +159,22 @@ test "native genesis import preserves activation frontier method accounting and 
         expected.attempt = 0;
         expected.superseded = null;
         expected.consumed = .{ .items = &.{} };
-        expected.mode = if (cancelled) .cancelled else .paused;
-        expected.recovery_hold = true;
+        expected.mode = case.mode;
         expected.clock_ms = input.clock_ms;
         expected.next_due_ms = input.clock_ms;
+        expected.message = if (case.asked) .{
+            .specification_revision = question.specification_revision,
+            .text = question.prompt,
+            .comparison = .{
+                .repository = expected.specification.repository,
+                .base = question.source_condition.?.base,
+                .tip = question.source_condition.?.tip,
+            },
+            .purpose = .{ .question = .{
+                .identity = question.identity,
+                .choices = question.choices,
+            } },
+        } else null;
         try std.testing.expectEqualDeep(expected, result);
     }
 }

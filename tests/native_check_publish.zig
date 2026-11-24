@@ -4,7 +4,6 @@ const publish = @import("../app/check_publish.zig");
 const check = @import("../app/check.zig");
 const genesis = @import("native_genesis.zig");
 const fixtures = @import("contracts.zig");
-const preparation = @import("../native/delivery_prepare.zig");
 
 const Types = struct {
     pub const application_id = "paredros.source-publication.witness";
@@ -94,23 +93,30 @@ test "native source publication binds and preserves questions until condition ch
     try std.testing.expectEqualDeep(head.told, first.head.told);
     try std.testing.expectEqual(@as(t.Digest, @splat(6)), first.head.question.?.identity);
     try std.testing.expectEqual(.diverged, first.head.question.?.source_condition.?.coverage);
-    var sealed = try preparation.materialize(
-        std.testing.allocator,
-        first.head.question.?.prompt,
-        .{ .task = @splat(7), .digest = @splat(8) },
-        @splat(9),
+    const prompt = first.head.message.?;
+    try std.testing.expectEqualDeep(first.head.question.?.prompt, prompt.text);
+    try std.testing.expectEqualDeep(@as(t.Digest, @splat(6)), prompt.purpose.question.identity);
+    try std.testing.expectEqualStrings(
+        "accept_gap",
+        prompt.purpose.question.choices.items[0].value.bytes,
     );
-    defer sealed.deinit();
-    try preparation.verifyStored(std.testing.allocator, sealed.value);
+    try std.testing.expectEqual(@as(t.Oid, @splat('b')), prompt.comparison.?.tip);
+    var quiet = first.head;
+    quiet.message = null;
     const repeat = try fixture.output(
-        try fixture.execute("same-condition", input(first.head, rejected, 7)),
+        try fixture.execute("same-condition", input(quiet, rejected, 7)),
     );
     try std.testing.expectEqualDeep(first.head.question, repeat.head.question);
+    try std.testing.expect(repeat.head.message == null);
     rejected.tip = @splat('d');
     const changed = try fixture.output(
         try fixture.execute("new-condition", input(repeat.head, rejected, 8)),
     );
     try std.testing.expectEqual(@as(t.Digest, @splat(8)), changed.head.question.?.identity);
+    try std.testing.expectEqual(
+        @as(t.Digest, @splat(8)),
+        changed.head.message.?.purpose.question.identity,
+    );
     try std.testing.expectEqual(
         @as(t.Oid, @splat('d')),
         changed.head.question.?.source_condition.?.tip,

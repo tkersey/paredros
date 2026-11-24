@@ -6,10 +6,8 @@ const configuration = @import("configuration.zig");
 const commands = @import("commands.zig");
 const idx = @import("index.zig");
 const experiments = @import("experiments.zig");
-const recovery_control = @import("recovery_control.zig");
 const continuity_control = @import("continuity_control.zig");
 const transfer = @import("transfer.zig");
-const restore = @import("restore.zig");
 const ingress_policy = @import("ingress_policy.zig");
 const messages = @import("messages.zig");
 const cli = @import("cli.zig");
@@ -37,11 +35,7 @@ pub const Request = struct {
         experiment_run: experiments.Request,
         experiment_show: t.Digest,
         task_show: t.Id,
-        delivery_show: t.DeliveryKey,
         method_show: t.Id,
-        recovery_status: void,
-        recovery_begin: void,
-        recovery_release: recovery_control.Release,
         transfer_export: continuity_control.Export,
         transfer_import: continuity_control.Import,
     },
@@ -216,7 +210,7 @@ fn execute(
     }
     const operation_id = try operation(request);
     if (request.command != .transfer_export and request.command != .transfer_import)
-        try admissionOpen(a, driver, operation_id, request.command == .ask);
+        try admissionOpen(a, driver, operation_id);
     var response = if (request.command == .transfer_export or request.command == .transfer_import)
         try continuityCommand(a, driver, config, origin, request, environment)
     else
@@ -251,11 +245,9 @@ fn readOnly(request: Request) bool {
         .monitor_directives,
         .messages,
         .task_show,
-        .delivery_show,
         .method_show,
         .proposal_show,
         .experiment_show,
-        .recovery_status,
         => true,
         else => false,
     };
@@ -265,7 +257,6 @@ fn admissionOpen(
     a: std.mem.Allocator,
     driver: anytype,
     operation_id: []const u8,
-    output: bool,
 ) !void {
     if (try driver.service.operationLookup(a, operation_id)) |found| {
         var receipt = found;
@@ -274,7 +265,6 @@ fn admissionOpen(
     }
     var index = try driver.rebuild(a);
     defer index.deinit();
-    if (output) return ingress_policy.output(&index);
     try ingress_policy.validate(&index);
 }
 
@@ -295,7 +285,7 @@ fn admitCommand(
             try specification(config, value.wording, value.interval_ms),
         ),
         .directive => |value| {
-            try validateDirective(a, driver, config, operation_id, value.target, value.body);
+            try validateDirective(a, driver, operation_id, value.target, value.body);
             return driver.directive(a, operation_id, origin, value.target, value.body);
         },
         .ask => |value| return driver.turn(
@@ -319,16 +309,6 @@ fn admitCommand(
         .proposal_confirm => |value| return confirmProposal(
             a,
             driver,
-            config,
-            operation_id,
-            origin,
-            value,
-        ),
-        .recovery_begin => return restore.begin(driver, a, operation_id, origin),
-        .recovery_release => |value| return recovery_control.release(
-            a,
-            driver,
-            config,
             operation_id,
             origin,
             value,
@@ -340,22 +320,20 @@ fn admitCommand(
 fn validateDirective(
     a: std.mem.Allocator,
     driver: anytype,
-    config: configuration.Config,
     operation_id: []const u8,
     target: t.Id,
     body: t.DirectiveBody,
 ) !void {
-    if (body == .amend) if (body.amend.interval_ms) |interval_ms| try checkInterval(interval_ms);
     if (try driver.service.operationLookup(a, operation_id)) |found| {
         var receipt = found;
         defer receipt.deinit();
         return;
     }
+    if (body == .transfer) return error.SystemDirective;
+    if (body == .amend) if (body.amend.interval_ms) |interval_ms| try checkInterval(interval_ms);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    try ingress_policy.directive(a, &index, target, body);
-    if (body == .recovery_release)
-        try recovery_control.validateBindings(a, &index, config);
+    try ingress_policy.directive(a, &index, target);
 }
 
 fn continuityCommand(
@@ -417,7 +395,6 @@ fn continuityCommand(
 fn confirmProposal(
     a: std.mem.Allocator,
     driver: anytype,
-    config: configuration.Config,
     operation_id: []const u8,
     origin: t.Origin,
     selector: commands.ProposalSelector,
@@ -433,7 +410,6 @@ fn confirmProposal(
     if (selected.body == .directive) try validateDirective(
         a,
         driver,
-        config,
         operation_id,
         selected.target orelse return error.InvalidProposalTarget,
         selected.body.directive,
@@ -505,51 +481,11 @@ fn inspect(
             a,
             index.head(index.obligation(id) orelse return error.UnknownObligation).method,
         ),
-        .delivery_show => |key| try deliveries(a, service, index, key, config_path),
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
-        .recovery_status => try recoveryStatus(a, index),
         else => return error.InvalidReadCommand,
     };
     return reply(a, "observed", data);
-}
-
-fn recoveryStatus(a: std.mem.Allocator, index: *const idx.Index) !native.json.Value {
-    var result = try native.values.toJson(struct {
-        recovery_hold: bool,
-        import_hold: bool,
-        restore_cut_size: u64,
-        recovery_purpose: ?t.RestorePurpose,
-    }, a, .{
-        .recovery_hold = index.recovery_hold,
-        .import_hold = index.import_hold,
-        .restore_cut_size = index.restore_cut.len,
-        .recovery_purpose = index.recovery_purpose,
-    });
-    const cut = try hexText(a, &try cutDigest(a, index.restore_cut));
-    try native.json.put(a, &result, "restore_cut_digest", native.json.string(cut));
-    try native.json.put(a, &result, "recovery", try boundary(a, index.recovery));
-    return result;
-}
-
-fn boundary(a: std.mem.Allocator, reference: ?t.InputReference) !native.json.Value {
-    const value = reference orelse return .null;
-    var result = native.json.object();
-    try native.json.put(a, &result, "task", native.json.string(try hexText(a, &value.task)));
-    try native.json.put(a, &result, "digest", native.json.string(try hexText(a, &value.digest)));
-    return result;
-}
-
-fn hexText(a: std.mem.Allocator, bytes: anytype) ![]const u8 {
-    return a.dupe(u8, &std.fmt.bytesToHex(bytes.*, .lower));
-}
-
-fn cutDigest(a: std.mem.Allocator, cut: []const t.InputReference) !t.Digest {
-    const bytes = try c.encodeOwned(c.Vector(t.InputReference, null), a, .{ .items = cut });
-    defer a.free(bytes);
-    var digest: t.Digest = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return digest;
 }
 
 fn campaign(a: std.mem.Allocator, index: *const idx.Index, id: t.Digest) !native.json.Value {
@@ -861,9 +797,7 @@ fn task(
     try native.json.put(a, &result, "superseded", .{ .bool = record.superseded });
     const confirming = try confirmations(a, index, record, config_path);
     try native.json.put(a, &result, "confirmations", confirming);
-    const progress = try taskProgress(a, service, record);
-    try native.json.put(a, &result, "retry_pending", .{ .bool = progress.retry_pending });
-    try native.json.put(a, &result, "task_status", if (progress.status) |value|
+    try native.json.put(a, &result, "task_status", if (try taskStatus(a, service, record)) |value|
         native.json.string(@tagName(value))
     else
         .null);
@@ -879,18 +813,18 @@ fn task(
     return result;
 }
 
-const Progress = struct { status: ?native.tasks.Status, retry_pending: bool };
-
-fn taskProgress(a: std.mem.Allocator, service: anytype, record: *const idx.Record) !Progress {
-    if (!recovery_status.recoverableTurn(record.*)) return .{
-        .status = if (record.owner_evidence) |evidence| evidence.status else null,
-        .retry_pending = false,
+fn taskStatus(
+    a: std.mem.Allocator,
+    service: anytype,
+    record: *const idx.Record,
+) !?native.tasks.Status {
+    const recorded = if (record.owner_evidence) |evidence| evidence.status else null;
+    if (!recovery_status.recoverableTurn(record.*)) return recorded;
+    const state = recovery_status.turn(service, a, record.*) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return recorded,
     };
-    const state = try recovery_status.turn(service, a, record.*);
-    return .{
-        .status = state.status,
-        .retry_pending = recovery_status.continues(state.action, record.input.turn.attempt),
-    };
+    return state.status;
 }
 
 fn confirmations(
@@ -909,12 +843,8 @@ fn confirmations(
             .attempt = turn.attempt,
             .ordinal = @intCast(ordinal),
         };
-        const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch |err|
-            switch (err) {
-                error.UnknownProposal, error.InvalidProposalIdentity => continue,
-                else => return err,
-            };
-        if (!std.meta.eql(resolved.turn.task, record.task)) continue;
+        const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch null;
+        if (resolved) |value| if (!std.meta.eql(value.turn.task, record.task)) continue;
         const token = try std.fmt.allocPrint(a, "{s}:{d}:{d}", .{
             &std.fmt.bytesToHex(identity.request, .lower),
             identity.attempt,
@@ -922,9 +852,13 @@ fn confirmations(
         });
         var item = native.json.object();
         try native.json.put(a, &item, "identity", native.json.string(token));
-        try native.json.put(a, &item, "command", if (config_path) |path| native.json.string(
-            try cli.commandLine(a, path, &.{ "proposal", "confirm", token }),
-        ) else .null);
+        try native.json.put(a, &item, "confirmable", .{ .bool = resolved != null });
+        try native.json.put(a, &item, "command", if (resolved != null and config_path != null)
+            native.json.string(
+                try cli.commandLine(a, config_path.?, &.{ "proposal", "confirm", token }),
+            )
+        else
+            .null);
         try items.append(item);
     }
     return .{ .array = items };
@@ -932,7 +866,7 @@ fn confirmations(
 
 fn currentTask(index: *const idx.Index, id: t.Id) !*const idx.Record {
     var record = index.record(id) orelse return error.UnknownTask;
-    for (0..3) |_| {
+    for (0..index.records.len) |_| {
         if (record.input != .turn or !record.superseded) return record;
         var child: ?*const idx.Record = null;
         for (index.records) |*candidate| {
@@ -945,20 +879,4 @@ fn currentTask(index: *const idx.Index, id: t.Id) !*const idx.Record {
         record = child orelse return error.MissingTurnSuccessor;
     }
     return error.InvalidTurnAttempt;
-}
-
-fn deliveries(
-    a: std.mem.Allocator,
-    service: anytype,
-    index: *const idx.Index,
-    key: t.DeliveryKey,
-    config_path: ?[]const u8,
-) !native.json.Value {
-    var items: std.array_list.Managed(native.json.Value) = .init(a);
-    for (index.records) |record| {
-        if (record.input != .delivery or !std.meta.eql(record.input.delivery.key, key)) continue;
-        try items.append(try task(a, service, index, record.task, config_path));
-    }
-    if (items.items.len == 0) return error.UnknownDelivery;
-    return .{ .array = items };
 }

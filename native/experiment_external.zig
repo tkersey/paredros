@@ -256,7 +256,7 @@ fn validateCases(a: std.mem.Allocator, cases: []const e.Case) !void {
 fn validateCase(a: std.mem.Allocator, selected: e.Case) !void {
     const input = selected.input;
     if (selected.name.bytes.len == 0 or selected.trial == 0 or
-        input.head.method != .ordinary or input.head.digest != null or
+        input.head.method != .ordinary or
         input.head.method_disposition != null or input.step.batches.items.len == 0)
         return error.InvalidExperimentCase;
     const first = input.step.batches.items[0].value;
@@ -352,14 +352,15 @@ fn preserved(a: std.mem.Allocator, before: t.Head, after: t.Head) !bool {
     var projected = after;
     projected.method = before.method;
     projected.method_disposition = before.method_disposition;
-    projected.digest = before.digest;
+    projected.message = before.message;
+    projected.told = before.told;
     projected.render_failure_streak = before.render_failure_streak;
+    projected.render_not_before_ms = before.render_not_before_ms;
     return std.meta.eql(try digest(a, t.Head, before), try digest(a, t.Head, projected));
 }
 
 fn observe(a: std.mem.Allocator, input: e.Observation) !e.Observed {
-    const intended = input.output.digest;
-    const text = if (intended) |intent| intent.delivery.payload.frozen_text.bytes else "";
+    const text = if (input.output.message) |published| published.text.bytes else "";
     if (text.len > 4000) return error.RenderOutputBound;
     var quality: e.Quality = .{
         .required_present = true,

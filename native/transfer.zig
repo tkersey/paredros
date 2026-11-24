@@ -32,20 +32,12 @@ fn recordLineage(index: *const idx.Index, record: idx.Record) !t.Digest {
         .step => |value| value.obligation,
         .directive => |value| value.obligation,
         .turn => |value| value.target,
-        .delivery => |value| return deliveryLineage(index, value.key.lineage),
         else => null,
     };
     const source = if (target) |value| index.record(value) else null;
     if (source) |value| {
         if (value.input != .genesis) return error.InvalidContinuityTarget;
         return value.input.genesis.lineage;
-    }
-    return global();
-}
-
-fn deliveryLineage(index: *const idx.Index, value: t.Digest) t.Digest {
-    for (index.obligations) |obligation| {
-        if (std.meta.eql(index.head(&obligation).lineage, value)) return value;
     }
     return global();
 }
@@ -174,15 +166,6 @@ const Builder = struct {
                     .result = if (value.result) |output| output.turn else null,
                 });
             },
-            .delivery => |input| {
-                _ = try self.add(.delivery, lineage_id, value, try rowReference(
-                    value,
-                    value.result != null,
-                ), .{
-                    .input = input,
-                    .result = if (value.result) |output| output.delivery else null,
-                });
-            },
             .step => if (value.selected and value.result != null) {
                 if (value.result.?.step.batch) |batch|
                     _ = try self.add(
@@ -199,7 +182,7 @@ const Builder = struct {
                     .result = output.experiment,
                 });
             },
-            .genesis, .continuity_member, .continuity_cut, .restore => {},
+            .genesis, .continuity_member, .continuity_cut, .transfer => {},
         }
     }
 };
@@ -371,7 +354,6 @@ fn validateFresh(index: *const idx.Index, identity: t.Digest) !void {
             const metadata = imported.continuity orelse return error.ImportTargetNotFresh;
             if (!std.meta.eql(metadata.bundle, identity)) return error.ContinuityImportConflict;
         },
-        .restore => {},
         else => return error.ImportTargetNotFresh,
     };
 }
@@ -444,7 +426,6 @@ fn genesisInput(
         .imported = .{
             .source = root.source_head,
             .head = rebased,
-            .exclusive_owner = false,
             .continuity = .{
                 .bundle = identity,
                 .manifest = manifest,

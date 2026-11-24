@@ -48,7 +48,6 @@ pub const Repository = struct {
     ref: c.Text(1024),
 };
 pub const Policies = struct {
-    uncertain_digest: enum { hold, one_superseding_issue } = .hold,
     notification_interval_ms: u64 = 60_000,
     clock_regression_tolerance_ms: u64 = 300_000,
     phase_attempts: u32 = 3,
@@ -91,78 +90,6 @@ pub const Accounting = struct {
     failed_attempts: u64 = 0,
     possible_charged_calls: u64 = 0,
 };
-pub const DeliveryKey = struct {
-    lineage: Digest,
-    purpose: enum { activation, digest, question },
-    identity: Digest,
-    generation: u32,
-};
-pub const Receipt = struct {
-    key: DeliveryKey,
-    timestamp: Timestamp,
-    payload_digest: Digest,
-    evidence: Reference,
-};
-pub const Button = struct {
-    block_id: c.Text(255),
-    action_id: c.Text(255),
-    value: c.Text(2000),
-    label: c.Text(75),
-};
-pub const LogicalPayload = struct {
-    schema_version: u32 = 1,
-    obligation: ?Id,
-    specification_revision: u64,
-    prior_sequence: u64,
-    through_sequence: u64,
-    frozen_text: Text,
-    prompt: ?Digest,
-    supersedes: ?DeliveryKey,
-    coverage: ?Frontier = null,
-    issue: u32 = 0,
-    buttons: c.Vector(Button, 8) = .{ .items = &.{} },
-    comparison: ?struct { repository: Repository, base: Oid, tip: Oid } = null,
-};
-pub const DeliveryIntent = struct {
-    key: DeliveryKey,
-    payload: LogicalPayload,
-};
-pub const DeliveryPayload = struct {
-    logical: LogicalPayload,
-    content_digest: Digest,
-    marker_digest: Digest,
-    evidence_digest: Digest,
-    wire_json: c.Bytes(128 * 1024),
-};
-pub const Delivery = struct {
-    envelope: Envelope,
-    key: DeliveryKey,
-    payload: DeliveryPayload,
-};
-pub const DeliveryOutcome = union(enum) {
-    confirmed: struct {
-        timestamp: Timestamp,
-        metadata_observed: bool,
-        rendering_fault: bool = false,
-    },
-    rejected: struct { code: Name, retryable: bool = false, retry_after: ?Name = null },
-    indeterminate: Name,
-};
-pub const DeliveryHold = enum {
-    none,
-    uncertain_transmission,
-    recovery,
-    paused,
-    binding_removed,
-    storage,
-    rendering_fault,
-    rejected,
-};
-pub const DigestIntent = struct {
-    delivery: DeliveryIntent,
-    hold: DeliveryHold,
-    not_before_ms: i64,
-};
 pub const Question = struct {
     identity: Digest,
     condition: Digest,
@@ -173,9 +100,20 @@ pub const Question = struct {
         tip: Oid,
         coverage: enum { behind, diverged, incomplete },
     } = null,
-    choices: c.Vector(Name, 8),
-    prompt: DeliveryIntent,
-    held: bool = false,
+    choices: c.Vector(Choice, 8),
+    prompt: Text,
+};
+pub const Comparison = struct { repository: Repository, base: Oid, tip: Oid };
+pub const Choice = struct { value: Name, label: Name };
+pub const Notification = struct {
+    specification_revision: u64,
+    text: Text,
+    comparison: ?Comparison = null,
+    purpose: union(enum) {
+        activation: void,
+        digest: struct { prior: Frontier, through: Frontier },
+        question: struct { identity: Digest, choices: c.Vector(Choice, 8) },
+    },
 };
 pub const Method = union(enum) {
     ordinary: void,
@@ -217,14 +155,10 @@ pub const Head = struct {
     specification: Specification,
     mode: Mode,
     desired_mode: enum { active, paused, cancelled },
-    recovery_hold: bool,
-    recovery_boundary: ?InputReference = null,
     observed: Frontier,
     told: Frontier,
-    told_receipt: ?Receipt,
     last_observation: ?Observation,
-    digest: ?DigestIntent,
-    activation: ?DeliveryIntent = null,
+    message: ?Notification,
     question: ?Question,
     method: Method,
     method_disposition: ?MethodDisposition = null,
@@ -253,12 +187,9 @@ pub const DirectiveBody = union(enum) {
     check: void,
     amend: Amendment,
     answer: struct { question: Digest, choice: Name },
-    release: struct { key: DeliveryKey },
     adopt: struct { expected_revision: u64, method: Method },
     revert: struct { expected_revision: u64 },
     transfer: void,
-    recovery_hold: struct { recovery: InputReference },
-    recovery_release: struct { recovery: InputReference, exclusive_owner: bool },
 };
 pub const Directive = struct {
     envelope: Envelope,
@@ -308,11 +239,10 @@ pub const Batch = struct {
 pub const Settlement = struct {
     reference: RevisionReference,
     owner_snapshot: c.Bytes(null) = .{ .bytes = "" },
-    kind: enum { phase, delivery, turn, experiment, superseded },
+    kind: enum { phase, turn, experiment, superseded },
     accounting: Accounting,
     previous_accounting: Accounting = .{},
     previous_reference: ?RevisionReference = null,
-    delivery: ?struct { admitted: Delivery, outcome: DeliveryOutcome, receipt: ?Receipt },
 };
 pub const Supersession = struct {
     input: InputReference,
@@ -326,7 +256,6 @@ pub const ContinuityKind = enum {
     batch,
     directive,
     turn,
-    delivery,
     settlement,
     method_source,
     method_report,
@@ -368,18 +297,7 @@ pub const ContinuityImport = struct {
     source_cut: Digest,
     members: c.Vector(ContinuityBinding, null),
 };
-pub const RestorePurpose = enum { rollback, transfer };
-pub const Restore = struct {
-    envelope: Envelope,
-    action: union(enum) {
-        begin: struct {
-            previous: ?InputReference,
-            cut: c.Vector(InputReference, null),
-            purpose: RestorePurpose = .rollback,
-        },
-        release: struct { recovery: InputReference, exclusive_owner: bool },
-    },
-};
+pub const TransferMarker = struct { envelope: Envelope };
 pub const Genesis = struct {
     envelope: Envelope,
     lineage: Digest,
@@ -388,7 +306,6 @@ pub const Genesis = struct {
     imported: ?struct {
         source: Reference,
         head: Head,
-        exclusive_owner: bool,
         continuity: ?ContinuityImport = null,
     },
 };
@@ -470,23 +387,21 @@ pub const Input = union(enum) {
     genesis: Genesis,
     step: Step,
     directive: Directive,
-    delivery: Delivery,
     turn: Turn,
     experiment: Experiment,
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
-    restore: Restore,
+    transfer: TransferMarker,
 };
 pub const Output = union(enum) {
     genesis: Head,
     step: StepResult,
     directive: Directive,
-    delivery: DeliveryOutcome,
     turn: TurnResult,
     experiment: ExperimentResult,
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
-    restore: Restore,
+    transfer: TransferMarker,
 };
 pub const Failure = struct { code: Name };
 pub const Message = union(enum) { pause: struct { directive: InputReference } };

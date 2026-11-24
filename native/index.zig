@@ -1,10 +1,9 @@
 const std = @import("std");
 const c = @import("protean_contracts");
 const t = @import("application_types");
-const preparation = @import("delivery_prepare.zig");
 const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
-const restore = @import("restore.zig");
+const transfer_marker = @import("transfer_marker.zig");
 const admission = @import("admission.zig");
 
 pub const Encoding = enum { contract, json };
@@ -47,11 +46,11 @@ pub const Obligation = struct {
     eligible: ?usize,
     folded_mode: t.Mode,
     effective_mode: t.Mode,
-    recovery_hold: bool,
+    controls_pending: bool,
     settlements: std.AutoHashMapUnmanaged(t.Id, t.Settlement) = .empty,
 
     pub fn ordinaryDispatch(self: Obligation) bool {
-        return self.effective_mode == .active and !self.recovery_hold;
+        return self.effective_mode == .active and !self.controls_pending;
     }
 };
 pub const Index = struct {
@@ -66,14 +65,10 @@ pub const Index = struct {
     continuity_import: ?continuity.ImportView = null,
     imports: []const continuity.Imported = &.{},
     portable: []const continuity.Portable = &.{},
-    recovery: ?t.InputReference = null,
-    recovery_hold: bool = false,
-    recovery_purpose: ?t.RestorePurpose = null,
-    restore_cut: []const t.InputReference = &.{},
-    import_hold: bool = false,
+    transfer_marker: ?usize = null,
 
-    pub fn outputHeld(self: *const Index) bool {
-        return self.recovery_hold or self.import_hold;
+    pub fn transferred(self: *const Index) bool {
+        return self.transfer_marker != null;
     }
 
     pub fn deinit(self: *Index) void {
@@ -150,13 +145,8 @@ pub const Index = struct {
         const scratch = self.arena.allocator();
         var obligations: std.ArrayList(Obligation) = .empty;
         try validateOperations(self, scratch);
-        const recovery_view = try restore.inspect(scratch, self);
-        self.recovery = recovery_view.recovery;
-        self.recovery_hold = recovery_view.recovery_hold;
-        self.recovery_purpose = recovery_view.recovery_purpose;
-        self.restore_cut = recovery_view.restore_cut;
+        self.transfer_marker = try transfer_marker.inspect(scratch, self);
         self.continuity_import = try continuity.prepareImport(scratch, self);
-        self.import_hold = restore.importHeld(self);
         self.imports = try continuity.prepareImports(scratch, self);
         self.portable = try continuity.preparePortable(scratch, self);
         try validateTurns(self, cancellations);
@@ -293,16 +283,6 @@ fn decodeRow(
 
 fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
     for (self.records, 0..) |item, position| {
-        switch (item.input) {
-            .delivery => |delivery| try preparation.verifyStored(a, delivery),
-            .directive => |directive| try restore.validateRetainedDirective(
-                self,
-                directive.obligation,
-                directive.body,
-                directive.envelope.origin,
-            ),
-            else => {},
-        }
         const envelope = switch (item.input) {
             inline else => |value| value.envelope,
         };
@@ -343,8 +323,7 @@ fn validateTurns(self: *Index, receipts: []const Cancellation) !void {
     for (self.records) |record| {
         if (record.input != .turn) continue;
         const turn = record.input.turn;
-        if (turn.attempt > 2 or turn.envelope.origin == .derived)
-            return error.InvalidTurnAttempt;
+        if (turn.envelope.origin == .derived) return error.InvalidTurnAttempt;
         const replacement = turn.replacement orelse {
             if (turn.continuity != null) {
                 try @import("continuity_turn.zig").validateMapped(a, self, turn);
@@ -485,13 +464,12 @@ fn buildObligation(
         return error.OrphanStep;
     const latest = recordHead(self.records[selected]).?;
     var effective = latest.mode;
-    var recovery_hold = latest.recovery_hold or self.outputHeld() or
+    const controls_pending =
         !try continuity.controlsComplete(a, self, genesis.task, latest.folded_directive_ordinal);
     for (directives) |position| {
         const directive = self.records[position].input.directive;
         if (directive.ordinal <= latest.folded_directive_ordinal) continue;
         effective = restrict(effective, directive.body);
-        if (directive.body == .recovery_hold) recovery_hold = true;
     }
     return .{
         .task = genesis.task,
@@ -500,7 +478,7 @@ fn buildObligation(
         .eligible = eligible,
         .folded_mode = latest.mode,
         .effective_mode = effective,
-        .recovery_hold = recovery_hold,
+        .controls_pending = controls_pending,
         .settlements = chain.settlements,
     };
 }
@@ -512,20 +490,15 @@ fn validateGenesis(record: Record, initial: t.Head) !void {
         !std.meta.eql(initial.lineage, input.lineage)) return error.InvalidGenesisHead;
     if (input.imported) |imported| {
         if (!std.meta.eql(initial.predecessor, @as(?t.Reference, imported.source)) or
-            initial.folded_directive_ordinal != 0 or initial.last_directive != null or
-            !initial.recovery_hold) return error.InvalidGenesisHead;
+            initial.folded_directive_ordinal != 0 or initial.last_directive != null)
+            return error.InvalidGenesisHead;
     } else if (initial.predecessor != null or initial.folded_directive_ordinal != 0 or
         initial.last_directive != null) return error.InvalidGenesisHead;
 }
 
 fn restrict(mode: t.Mode, body: t.DirectiveBody) t.Mode {
-    if (body == .@"resume" or body == .recovery_release) return mode;
-    var state: ControlState = .{
-        .mode = mode,
-        .desired = .active,
-        .recovery_hold = false,
-        .boundary = null,
-    };
+    if (body == .@"resume") return mode;
+    var state: ControlState = .{ .mode = mode, .desired = .active };
     state.apply(body);
     return state.mode;
 }
@@ -633,16 +606,9 @@ fn validateSupersession(
 const ControlState = struct {
     mode: t.Mode,
     desired: @FieldType(t.Head, "desired_mode"),
-    recovery_hold: bool,
-    boundary: ?t.InputReference,
 
     fn fromHead(head: t.Head) ControlState {
-        return .{
-            .mode = head.mode,
-            .desired = head.desired_mode,
-            .recovery_hold = head.recovery_hold,
-            .boundary = head.recovery_boundary,
-        };
+        return .{ .mode = head.mode, .desired = head.desired_mode };
     }
 
     fn apply(self: *ControlState, body: t.DirectiveBody) void {
@@ -658,24 +624,8 @@ const ControlState = struct {
             },
             .transfer => self.mode = .transferred,
             .@"resume" => {
-                self.mode = if (self.recovery_hold) .paused else .active;
+                self.mode = .active;
                 self.desired = .active;
-            },
-            .recovery_hold => |value| {
-                self.mode = .paused;
-                self.recovery_hold = true;
-                self.boundary = value.recovery;
-            },
-            .recovery_release => |value| {
-                if (self.boundary == null or !value.exclusive_owner or
-                    !std.meta.eql(self.boundary.?, value.recovery)) return;
-                self.mode = switch (self.desired) {
-                    .active => .active,
-                    .paused => .paused,
-                    .cancelled => .cancelled,
-                };
-                self.recovery_hold = false;
-                self.boundary = null;
             },
             else => {},
         }
@@ -778,12 +728,6 @@ fn validateFacts(self: *Index, step: t.Step, chain: *const Chain) !void {
             value.deinit();
         };
         try retained.verifySettlement(fact, snapshot, previous);
-        var frozen = item.*;
-        if (snapshot.value.result == null) {
-            frozen.result = null;
-            frozen.result_digest = null;
-        }
-        try validateDeliveryFact(a, fact, frozen, snapshot.value);
         for (step.facts.items[0..position]) |prior|
             if (sameCut(prior.reference, fact.reference)) return error.DuplicateConsumption;
         if (chain.consumed.contains(.{
@@ -872,30 +816,6 @@ fn validateRetainedAttempt(
     if (before.output_tokens) |tokens|
         if (after.output_tokens == null or tokens != after.output_tokens.?)
             return error.AccountingMismatch;
-}
-
-fn validateDeliveryFact(
-    a: std.mem.Allocator,
-    fact: t.Settlement,
-    item: Record,
-    snapshot: retained.Snapshot,
-) !void {
-    if (fact.kind != .delivery) {
-        if (fact.delivery != null) return error.UnexpectedDeliveryFact;
-        return;
-    }
-    if (item.input != .delivery) return error.FactKindMismatch;
-    const evidence = item.owner_evidence orelse return error.MissingOwnerEvidence;
-    var expected = try @import("delivery_fact.zig").settlement(a, snapshot, evidence);
-    defer expected.deinit();
-    if ((fact.delivery == null) != (expected.value == null)) return error.CopiedDeliveryMismatch;
-    const claimed = fact.delivery orelse return;
-    const actual = expected.value.?;
-    if (!try sameValue(a, t.Delivery, claimed.admitted, actual.admitted) or
-        !try sameValue(a, t.DeliveryOutcome, claimed.outcome, actual.outcome))
-        return error.CopiedDeliveryMismatch;
-    if (!try sameValue(a, ?t.Receipt, claimed.receipt, actual.receipt))
-        return error.InvalidDeliveryReceipt;
 }
 
 pub fn readCancellation(

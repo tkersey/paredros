@@ -146,7 +146,7 @@ test "native conversation turn binds distinct proposals and freezes model contex
     try std.testing.expectEqual(.failed, task.value.outcome_kind);
 }
 
-test "native conversation final failure and absent configuration cannot invoke the model" {
+test "native conversation final failures and absent configuration cannot invoke the model" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -162,10 +162,10 @@ test "native conversation final failure and absent configuration cannot invoke t
     try std.testing.expectEqual(0, absent.proposals.items.len);
     try std.testing.expect(std.mem.find(u8, absent.reply.bytes, "No model") != null);
     request.attempt = 3;
-    const invalid = try fixture.execute("excess-attempt", request);
-    var task = try fixture.service.?.task(fixture.arena.allocator(), invalid);
-    defer task.deinit();
-    try std.testing.expectEqual(.failed, task.value.outcome_kind);
+    request.model = turnInput().model;
+    const later = try fixture.output(try fixture.execute("later-attempt", request));
+    try std.testing.expectEqual(0, later.proposals.items.len);
+    try std.testing.expect(std.mem.find(u8, later.reply.bytes, "could not complete") != null);
 }
 
 fn amendment(wording: []const u8) @FieldType(t.Proposal, "body") {

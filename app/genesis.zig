@@ -1,6 +1,7 @@
 const protean = @import("protean");
 const t = @import("application_types");
 const a = @import("author.zig");
+const notification = @import("notification.zig");
 
 pub const Function = a.Function(struct { input: t.Genesis }, t.Head);
 
@@ -50,18 +51,14 @@ fn freshHead(c: protean.Context, b: anytype, input: a.Value(t.Genesis)) !a.Value
         .specification = specification,
         .mode = try c.literal(t.Mode, .active),
         .desired_mode = try c.literal(@FieldType(t.Head, "desired_mode"), .active),
-        .recovery_hold = try b.constant(bool, false),
-        .recovery_boundary = try c.literal(?t.InputReference, null),
         .observed = try c.literal(t.Frontier, .{ .sequence = 0, .epoch = 0, .tip = null }),
         .told = try c.literal(t.Frontier, .{ .sequence = 0, .epoch = 0, .tip = null }),
-        .told_receipt = try c.literal(?t.Receipt, null),
         .last_observation = try c.literal(?t.Observation, null),
-        .digest = try c.literal(?t.DigestIntent, null),
-        .activation = try b.variant(
-            try c.schema(?t.DeliveryIntent),
-            "some",
-            try activation(c, b, input),
-        ),
+        .message = try c.literal(?t.Notification, .{
+            .specification_revision = 0,
+            .text = .{ .bytes = "PAREDROS is active. First source observation is pending." },
+            .purpose = .{ .activation = {} },
+        }),
         .question = try c.literal(?t.Question, null),
         .method = try c.literal(t.Method, .{ .ordinary = {} }),
         .method_disposition = try c.literal(?t.MethodDisposition, null),
@@ -85,10 +82,16 @@ fn importedHead(
     imported: a.Value(@typeInfo(@FieldType(t.Genesis, "imported")).optional.child),
 ) !a.Value(t.Head) {
     const previous = try b.field(imported, "head");
+    const Desired = @FieldType(t.Head, "desired_mode");
     const desired = try b.field(previous, "desired_mode");
-    const cancelled = try b.equal(
-        try b.enumTag(desired),
-        try b.enumTag(try c.literal(@FieldType(t.Head, "desired_mode"), .cancelled)),
+    const prior = try b.select(
+        try enumIs(c, b, Desired, desired, .cancelled),
+        try c.literal(t.Mode, .cancelled),
+        try b.select(
+            try enumIs(c, b, Desired, desired, .paused),
+            try c.literal(t.Mode, .paused),
+            try c.literal(t.Mode, .active),
+        ),
     );
     return a.replace(c, b, t.Head, previous, .{
         .obligation = try c.literal(t.GenesisIdentity, .{ .self = {} }),
@@ -103,39 +106,19 @@ fn importedHead(
         .consumed = try c.literal(@FieldType(t.Head, "consumed"), .{ .items = &.{} }),
         .folded_directive_ordinal = try b.constant(u64, 0),
         .last_directive = try c.literal(?t.InputReference, null),
-        .mode = try b.select(
-            cancelled,
-            try c.literal(t.Mode, .cancelled),
-            try c.literal(t.Mode, .paused),
-        ),
-        .recovery_hold = try b.constant(bool, true),
-        .recovery_boundary = try c.literal(?t.InputReference, null),
+        .mode = prior,
+        .message = try notification.pending(c, b, previous),
         .clock_ms = try b.field(input, "clock_ms"),
         .next_due_ms = try b.field(input, "clock_ms"),
     });
 }
 
-fn activation(
+fn enumIs(
     c: protean.Context,
     b: anytype,
-    input: a.Value(t.Genesis),
-) !a.Value(t.DeliveryIntent) {
-    return b.product(try c.schema(t.DeliveryIntent), .{
-        .key = try b.product(try c.schema(t.DeliveryKey), .{
-            .lineage = try b.field(input, "lineage"),
-            .purpose = try c.literal(@FieldType(t.DeliveryKey, "purpose"), .activation),
-            .identity = try b.field(try b.field(input, "envelope"), "stable_request"),
-            .generation = try b.constant(u32, 0),
-        }),
-        .payload = try c.literal(t.LogicalPayload, .{
-            .obligation = null,
-            .specification_revision = 0,
-            .prior_sequence = 0,
-            .through_sequence = 0,
-            .frozen_text = .{ .bytes = "PAREDROS is active. " ++
-                "First source observation is pending." },
-            .prompt = null,
-            .supersedes = null,
-        }),
-    });
+    comptime T: type,
+    value: a.Value(T),
+    expected: T,
+) !a.Value(bool) {
+    return b.equal(try b.enumTag(value), try b.enumTag(try c.literal(T, expected)));
 }

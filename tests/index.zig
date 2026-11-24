@@ -3,7 +3,6 @@ const c = @import("protean_contracts");
 const Native = @import("protean_native");
 const t = @import("application_types");
 const idx = @import("../native/index.zig");
-const preparation = @import("../native/delivery_prepare.zig");
 const fixture = @import("contracts.zig");
 const retained_views = @import("../native/retained.zig");
 
@@ -21,12 +20,10 @@ pub fn head() t.Head {
         .specification = fixture.specification(),
         .mode = .active,
         .desired_mode = .active,
-        .recovery_hold = false,
         .observed = .{ .sequence = 0, .epoch = 0, .tip = null },
         .told = .{ .sequence = 0, .epoch = 0, .tip = null },
-        .told_receipt = null,
         .last_observation = null,
-        .digest = null,
+        .message = null,
         .question = null,
         .method = .{ .ordinary = {} },
         .next_due_ms = 100,
@@ -202,7 +199,6 @@ fn phaseFact(a: std.mem.Allocator, source: idx.Row) !t.Settlement {
         .owner_snapshot = .{ .bytes = bytes },
         .kind = .phase,
         .accounting = source.owner_snapshot.?.accounting,
-        .delivery = null,
     };
 }
 
@@ -285,35 +281,42 @@ test "index rebuild orders shuffled heads and pending directives without task co
     try std.testing.expectEqualSlices(usize, &.{ 3, 1 }, state.directives);
 }
 
-test "index pending recovery hold pauses effective mode until a release folds" {
+test "index treats one local transfer marker as a terminal namespace fence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const initial = try genesis(a);
-    const begun = try row(a, 4, .{ .restore = .{
-        .envelope = envelope("restore"),
-        .action = .{ .begin = .{ .previous = null, .cut = .{ .items = &.{} } } },
-    } }, null);
-    const boundary = inputRef(begun);
-    const hold = directive("hold", 1, null, .{ .recovery_hold = .{ .recovery = boundary } });
-    const held = try row(a, 2, .{ .directive = hold }, null);
-    const release = directive("release", 2, inputRef(held), .{ .recovery_release = .{
-        .recovery = boundary,
-        .exclusive_owner = true,
-    } });
-    const released = try row(a, 3, .{ .directive = release }, null);
-    var index = try idx.Index.init(
-        Native,
-        std.testing.allocator,
-        &.{ released, held, begun, initial },
-        &.{},
-    );
+    const marker: t.Input = .{ .transfer = .{ .envelope = envelope("transfer") } };
+    const first = try row(a, 4, marker, markerOutput(marker));
+    var index = try idx.Index.init(Native, std.testing.allocator, &.{ first, initial }, &.{});
     defer index.deinit();
-    const state = index.obligation(@splat(1)).?;
-    try std.testing.expectEqual(t.Mode.active, state.folded_mode);
-    try std.testing.expectEqual(t.Mode.paused, state.effective_mode);
-    try std.testing.expect(state.recovery_hold);
-    try std.testing.expect(!state.ordinaryDispatch());
+    try std.testing.expect(index.transferred());
+    try std.testing.expectEqualDeep(first.input.task, index.records[index.transfer_marker.?].task);
+    var other_input = marker;
+    other_input.transfer.envelope.operation = .{ .bytes = "transfer-again" };
+    const second = try row(a, 5, other_input, null);
+    try std.testing.expectError(
+        error.DuplicateTransferMarker,
+        idx.Index.init(Native, std.testing.allocator, &.{ first, second, initial }, &.{}),
+    );
+    var remote = marker;
+    remote.transfer.envelope.origin = .{ .derived = .{ .predecessor = ref(initial) } };
+    const derived = try row(a, 6, remote, null);
+    try std.testing.expectError(
+        error.TransferLocalOnly,
+        idx.Index.init(Native, std.testing.allocator, &.{ derived, initial }, &.{}),
+    );
+    var changed = marker;
+    changed.transfer.envelope.stable_request = @splat(3);
+    const mismatched = try row(a, 7, marker, .{ .transfer = changed.transfer });
+    try std.testing.expectError(
+        error.TransferMarkerMismatch,
+        idx.Index.init(Native, std.testing.allocator, &.{ mismatched, initial }, &.{}),
+    );
+}
+
+fn markerOutput(input: t.Input) t.Output {
+    return .{ .transfer = input.transfer };
 }
 
 test "index resume permits dispatch only after folding the directive chain" {
@@ -584,12 +587,9 @@ test "index rejects an imported head without a verified continuity manifest" {
     input.imported = .{
         .source = .{ .task = @splat(9), .digest = @splat(9) },
         .head = head(),
-        .exclusive_owner = true,
     };
     var imported = head();
     imported.predecessor = input.imported.?.source;
-    imported.mode = .paused;
-    imported.recovery_hold = true;
     const initial = try row(a, 1, .{ .genesis = input }, .{ .genesis = imported });
     try std.testing.expectError(
         error.UnprovenContinuityImport,
@@ -728,201 +728,6 @@ test "index copied batches must be the contiguous outstanding prefix" {
             try std.testing.expectEqual(2, backlog.untold_batches);
             try std.testing.expect(backlog.oldest == null);
         }
-    }
-}
-
-pub fn pendingDelivery(a: std.mem.Allocator, producer: t.Reference) !t.Delivery {
-    const delivery = try preparation.materialize(a, .{
-        .key = .{
-            .lineage = @splat(8),
-            .purpose = .digest,
-            .identity = @splat(9),
-            .generation = 0,
-        },
-        .payload = .{
-            .obligation = @splat(1),
-            .specification_revision = 1,
-            .prior_sequence = 0,
-            .through_sequence = 1,
-            .frozen_text = .{ .bytes = "one commit" },
-            .coverage = .{ .sequence = 1, .epoch = 0, .tip = @splat('b') },
-            .issue = 1,
-            .buttons = .{ .items = &.{.{
-                .block_id = .{ .bytes = "proposal" },
-                .action_id = .{ .bytes = "approve" },
-                .value = .{ .bytes = "approved-operation" },
-                .label = .{ .bytes = "Approve" },
-            }} },
-            .prompt = null,
-            .supersedes = null,
-        },
-    }, producer, @splat(7));
-    return delivery.value;
-}
-
-test "index authenticates copied delivery input and outcome before settlement" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const intent = try pendingDelivery(a, ref(initial));
-    const outcome: t.DeliveryOutcome = .{ .indeterminate = .{ .bytes = "lost response" } };
-    const sent = try row(a, 2, .{ .delivery = intent }, .{ .delivery = outcome });
-    const bytes = try snapshotBytes(a, sent);
-    const original: t.Settlement = .{
-        .reference = .{ .task = sent.input.task, .revision = 5, .digest = idx.digest(bytes) },
-        .owner_snapshot = .{ .bytes = bytes },
-        .kind = .delivery,
-        .accounting = .{},
-        .delivery = .{ .admitted = intent, .outcome = outcome, .receipt = null },
-    };
-    for (0..5) |variant| {
-        var fact = original;
-        switch (variant) {
-            0 => {},
-            1 => fact.delivery.?.admitted.key.generation += 1,
-            2 => fact.delivery.?.admitted.payload.logical.issue += 1,
-            3 => fact.delivery.?.admitted.payload.logical.frozen_text.bytes = "different",
-            4 => fact.delivery.?.outcome = .{ .rejected = .{ .code = .{ .bytes = "denied" } } },
-            else => unreachable,
-        }
-        var next = step(head(), ref(initial), "fold");
-        next.facts.items = &.{fact};
-        const folding = try row(a, 3, .{ .step = next }, null);
-        if (variant == 0) {
-            var index = try idx.Index.init(
-                Native,
-                std.testing.allocator,
-                &.{ folding, sent, initial },
-                &.{},
-            );
-            index.deinit();
-        } else try std.testing.expectError(
-            error.CopiedDeliveryMismatch,
-            idx.Index.init(Native, std.testing.allocator, &.{ folding, sent, initial }, &.{}),
-        );
-    }
-}
-
-fn foldedFact(a: std.mem.Allocator, initial: idx.Row, fact: t.Settlement) !idx.Row {
-    var next = step(head(), ref(initial), "fold");
-    next.facts.items = &.{fact};
-    return row(a, 3, .{ .step = next }, null);
-}
-
-fn expectFact(
-    a: std.mem.Allocator,
-    initial: idx.Row,
-    source: idx.Row,
-    fact: t.Settlement,
-    expected: ?anyerror,
-) !void {
-    const folding = try foldedFact(a, initial, fact);
-    const rebuilt = idx.Index.init(
-        Native,
-        std.testing.allocator,
-        &.{ folding, source, initial },
-        &.{},
-    );
-    if (expected) |err| {
-        try std.testing.expectError(err, rebuilt);
-    } else {
-        var index = try rebuilt;
-        defer index.deinit();
-        try std.testing.expectEqual(3, index.records.len);
-    }
-}
-
-const confirmation: t.DeliveryOutcome = .{ .confirmed = .{
-    .timestamp = .{ .bytes = "1700000000.000001" },
-    .metadata_observed = true,
-} };
-
-fn testReceipt(source: idx.Row, admitted: t.Delivery) t.Receipt {
-    return .{
-        .key = admitted.key,
-        .timestamp = confirmation.confirmed.timestamp,
-        .payload_digest = admitted.payload.content_digest,
-        .evidence = ref(source),
-    };
-}
-
-fn testSettlement(a: std.mem.Allocator, source: idx.Row, admitted: t.Delivery) !t.Settlement {
-    const bytes = try snapshotBytes(a, source);
-    return .{
-        .reference = .{
-            .task = source.input.task,
-            .revision = 5,
-            .digest = idx.digest(bytes),
-        },
-        .owner_snapshot = .{ .bytes = bytes },
-        .kind = .delivery,
-        .accounting = .{},
-        .delivery = .{
-            .admitted = admitted,
-            .outcome = confirmation,
-            .receipt = testReceipt(source, admitted),
-        },
-    };
-}
-
-test "index rejects authentic retained input with invalid delivery seals or envelope" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const original = try pendingDelivery(a, ref(initial));
-    for (0..5) |variant| {
-        var admitted = original;
-        var buttons = [_]t.Button{original.payload.logical.buttons.items[0]};
-        switch (variant) {
-            0 => admitted.payload.wire_json.bytes = "{}",
-            1 => {
-                buttons[0].value.bytes = "different-operation";
-                admitted.payload.logical.buttons.items = &buttons;
-            },
-            2 => admitted.envelope.stable_request[0] ^= 1,
-            3 => admitted.envelope.operation.bytes = "different-operation",
-            4 => admitted.envelope.origin = .{ .local = .{ .uid = 501 } },
-            else => unreachable,
-        }
-        const retained = try row(a, 2, .{ .delivery = admitted }, null);
-        try std.testing.expectError(error.InvalidPayload, idx.Index.init(
-            Native,
-            std.testing.allocator,
-            &.{ retained, initial },
-            &.{},
-        ));
-    }
-}
-
-test "index confirmed delivery receipt binds actual retained response reference" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const admitted = try pendingDelivery(a, ref(initial));
-    const sent = try row(a, 2, .{ .delivery = admitted }, .{ .delivery = confirmation });
-    const original = try testSettlement(a, sent, admitted);
-    for (0..7) |variant| {
-        var selected = original;
-        switch (variant) {
-            0 => {},
-            1 => selected.delivery.?.receipt.?.key.generation += 1,
-            2 => selected.delivery.?.receipt.?.key.purpose = .question,
-            3 => selected.delivery.?.receipt.?.payload_digest[0] ^= 1,
-            4 => selected.delivery.?.receipt.?.evidence.task[0] ^= 1,
-            5 => selected.delivery.?.receipt.?.evidence.digest[0] ^= 1,
-            6 => selected.delivery.?.receipt.?.timestamp.bytes = "1700000000.000002",
-            else => unreachable,
-        }
-        try expectFact(
-            a,
-            initial,
-            sent,
-            selected,
-            if (variant == 0) null else error.InvalidDeliveryReceipt,
-        );
     }
 }
 
@@ -1278,44 +1083,4 @@ test "index driver admits a clock regression before the stale due instant" {
     try std.testing.expect(!driver.needsStep(&index, obligation, 0));
     try std.testing.expect(driver.needsStep(&index, obligation, -600_000));
     try std.testing.expect(driver.needsStep(&index, obligation, std.math.minInt(i64)));
-}
-
-fn rebuildFolded(
-    a: std.mem.Allocator,
-    rows: []const idx.Row,
-    fact: t.Settlement,
-    expected: ?anyerror,
-) !void {
-    const folding = try foldedFact(a, rows[rows.len - 1], fact);
-    const all = try std.mem.concat(a, idx.Row, &.{ &[_]idx.Row{folding}, rows });
-    const rebuilt = idx.Index.init(Native, std.testing.allocator, all, &.{});
-    if (expected) |err| return std.testing.expectError(err, rebuilt);
-    var index = try rebuilt;
-    index.deinit();
-}
-
-test "index rebuilds an unsettled local delivery fact across task status changes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const initial = try genesis(a);
-    const admitted = try pendingDelivery(a, ref(initial));
-    var source = try row(a, 2, .{ .delivery = admitted }, null);
-    const bytes = try snapshotBytes(a, source);
-    var fact: t.Settlement = .{
-        .reference = .{ .task = source.input.task, .revision = 5, .digest = idx.digest(bytes) },
-        .owner_snapshot = .{ .bytes = bytes },
-        .kind = .delivery,
-        .accounting = .{},
-        .delivery = null,
-    };
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    source.owner_evidence.?.status = .unknown;
-    try rebuildFolded(a, &.{ source, initial }, fact, null);
-    fact.delivery = .{
-        .admitted = admitted,
-        .outcome = .{ .indeterminate = .{ .bytes = "possibly_transmitted" } },
-        .receipt = null,
-    };
-    try rebuildFolded(a, &.{ source, initial }, fact, error.CopiedDeliveryMismatch);
 }

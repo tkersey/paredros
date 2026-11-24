@@ -6,7 +6,7 @@ const Command = @FieldType(control.Request, "command");
 
 pub const help =
     \\paredros --config PATH COMMAND
-    \\  serve [--recover]                 Run the daemon
+    \\  serve                             Run the daemon
     \\  status [--after ID] [--limit N]    Inspect durable state
     \\  ask TEXT [--target ID]            Admit a conversation turn
     \\  monitor add [--wording TEXT] [--interval-ms N]
@@ -17,11 +17,9 @@ pub const help =
     \\  question answer ID QUESTION_DIGEST CHOICE
     \\  proposal show | confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
     \\  task show ID                     Inspect admitted input and result
-    \\  delivery show KEY_JSON | release ID KEY_JSON
     \\  method show ID | revert ID REVISION | adopt ID REVISION METHOD_JSON
     \\  experiment run CAMPAIGN ATTEMPT PLAN_JSON [--live] | show CAMPAIGN
     \\  namespace check | describe-build | licenses
-    \\  recovery status | begin | release TASK DIGEST --exclusive-owner
     \\  transfer export NAME [--snapshot]
     \\  transfer import PATH [--bytes-max N]
     \\  request JSON | stdio              Machine-readable daemon access
@@ -120,11 +118,9 @@ pub fn request(
         .monitor_directives,
         .messages,
         .task_show,
-        .delivery_show,
         .method_show,
         .proposal_show,
         .experiment_show,
-        .recovery_status,
         => false,
         else => true,
     };
@@ -151,22 +147,9 @@ fn parse(a: std.mem.Allocator, args: []const []const u8) !Command {
             .question = try hex(t.Digest, args[3]),
             .choice = .{ .bytes = args[4] },
         } });
-    if (same(name, "delivery")) return delivery(a, args[1..]);
     if (same(name, "method")) return method(a, args[1..]);
-    if (same(name, "recovery")) return recovery(args[1..]);
     if (same(name, "transfer")) return transfer(args[1..]);
     return error.InvalidArguments;
-}
-
-fn recovery(args: []const []const u8) !Command {
-    if (args.len == 1 and same(args[0], "status")) return .recovery_status;
-    if (args.len == 1 and same(args[0], "begin")) return .recovery_begin;
-    if (args.len != 4 or !same(args[0], "release") or
-        !same(args[3], "--exclusive-owner")) return error.InvalidArguments;
-    return .{ .recovery_release = .{
-        .recovery = .{ .task = try hex(t.Id, args[1]), .digest = try hex(t.Digest, args[2]) },
-        .exclusive_owner = true,
-    } };
 }
 
 fn transfer(args: []const []const u8) !Command {
@@ -401,15 +384,6 @@ fn amend(a: std.mem.Allocator, args: []const []const u8) !Command {
             return error.InvalidArguments;
     }
     return directive(try hex(t.Id, args[0]), .{ .amend = value });
-}
-
-fn delivery(a: std.mem.Allocator, args: []const []const u8) !Command {
-    if (args.len == 2 and same(args[0], "show"))
-        return .{ .delivery_show = try decode(t.DeliveryKey, a, args[1]) };
-    if (args.len != 3 or !same(args[0], "release")) return error.InvalidArguments;
-    return directive(try hex(t.Id, args[1]), .{ .release = .{
-        .key = try decode(t.DeliveryKey, a, args[2]),
-    } });
 }
 
 fn method(a: std.mem.Allocator, args: []const []const u8) !Command {

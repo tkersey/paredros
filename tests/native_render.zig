@@ -240,31 +240,31 @@ fn contains(text: []const u8, expected: []const u8) !void {
     try std.testing.expect(std.mem.find(u8, text, expected) != null);
 }
 
-fn assertFrame(previous: t.Head, result: t.Head, last: Fact) !t.DeliveryIntent {
-    const delivery = result.digest.?.delivery;
+fn assertFrame(previous: t.Head, result: t.Head, last: Fact) !t.Notification {
+    const published = result.message.?;
+    const through: t.Frontier = .{
+        .sequence = last.value.sequence,
+        .epoch = last.value.epoch,
+        .tip = last.value.tip,
+    };
     var unchanged = result;
-    unchanged.digest = previous.digest;
+    unchanged.message = previous.message;
+    unchanged.told = previous.told;
     unchanged.render_failure_streak = previous.render_failure_streak;
+    unchanged.render_not_before_ms = previous.render_not_before_ms;
     try std.testing.expectEqualDeep(previous, unchanged);
     try std.testing.expectEqual(0, result.render_failure_streak);
-    try std.testing.expectEqual(.none, result.digest.?.hold);
-    try std.testing.expectEqual(previous.clock_ms, result.digest.?.not_before_ms);
-    try std.testing.expectEqual(@as(t.Digest, @splat(4)), delivery.key.identity);
-    try std.testing.expectEqualDeep(previous.lineage, delivery.key.lineage);
-    try std.testing.expectEqual(.digest, delivery.key.purpose);
-    try std.testing.expectEqual(0, delivery.key.generation);
-    try std.testing.expectEqual(last.value.sequence, delivery.payload.through_sequence);
-    try std.testing.expectEqual(previous.told.sequence, delivery.payload.prior_sequence);
-    try std.testing.expectEqualDeep(
-        t.Frontier{
-            .sequence = last.value.sequence,
-            .epoch = last.value.epoch,
-            .tip = last.value.tip,
-        },
-        delivery.payload.coverage.?,
+    try std.testing.expectEqualDeep(through, result.told);
+    const interval: i64 = @intCast(previous.specification.policies.notification_interval_ms);
+    try std.testing.expectEqual(previous.clock_ms + interval, result.render_not_before_ms);
+    try std.testing.expectEqual(
+        previous.specification.revision,
+        published.specification_revision,
     );
-    try std.testing.expect(delivery.payload.frozen_text.bytes.len <= 4000);
-    return delivery;
+    try std.testing.expectEqualDeep(previous.told, published.purpose.digest.prior);
+    try std.testing.expectEqualDeep(through, published.purpose.digest.through);
+    try std.testing.expect(published.text.bytes.len <= 4000);
+    return published;
 }
 
 test "native ordinary render chooses an exact whole batch byte prefix and skips small models" {
@@ -286,20 +286,20 @@ test "native ordinary render chooses an exact whole batch byte prefix and skips 
     var previous = head(3);
     previous.specification.policies.render_input_bytes = expected.len;
     const value = try execute(&f, "exact-budget", input(previous, &facts));
-    const delivery = try assertFrame(previous, value, facts[1]);
-    try contains(delivery.payload.frozen_text.bytes, "Verified commits: 4");
-    try contains(delivery.payload.frozen_text.bytes, "observations after 0 through 2; epoch 2");
+    const published = try assertFrame(previous, value, facts[1]);
+    try contains(published.text.bytes, "Verified commits: 4");
+    try contains(published.text.bytes, "observations after 0 through 2; epoch 2");
     try std.testing.expectEqual(2, scenario.calls);
     try std.testing.expectEqualStrings(expected, scenario.context.?);
-    try std.testing.expectEqualDeep(oid(0), delivery.payload.comparison.?.base);
-    try std.testing.expectEqualDeep(oid(4), delivery.payload.comparison.?.tip);
+    try std.testing.expectEqualDeep(oid(0), published.comparison.?.base);
+    try std.testing.expectEqualDeep(oid(4), published.comparison.?.tip);
     previous.specification.policies.render_input_bytes = expected.len - 1;
     const smaller = try execute(&f, "one-byte-short", input(previous, &facts));
     const first = try assertFrame(previous, smaller, facts[0]);
     try std.testing.expectEqual(2, scenario.calls);
     try std.testing.expect(std.mem.find(
         u8,
-        first.payload.frozen_text.bytes,
+        first.text.bytes,
         "Large-batch fallback",
     ) == null);
 }
@@ -316,12 +316,12 @@ test "native ordinary render keeps oversized complete evidence and records deter
     var previous = head(2);
     previous.specification.policies.render_input_bytes = 100;
     const value = try execute(&f, "large-batch", input(previous, &.{ first, later }));
-    const delivery = try assertFrame(previous, value, first);
-    try contains(delivery.payload.frozen_text.bytes, "Verified commits: 137");
-    try contains(delivery.payload.frozen_text.bytes, "Listed 8 of 137");
-    try contains(delivery.payload.frozen_text.bytes, "Large-batch fallback");
+    const published = try assertFrame(previous, value, first);
+    try contains(published.text.bytes, "Verified commits: 137");
+    try contains(published.text.bytes, "Listed 8 of 137");
+    try contains(published.text.bytes, "Large-batch fallback");
     try std.testing.expectEqual(0, scenario.calls);
-    try std.testing.expectEqualDeep(oid(137), delivery.payload.comparison.?.tip);
+    try std.testing.expectEqualDeep(oid(137), published.comparison.?.tip);
 }
 
 fn raw(body: []const u8) t.ReadEvidence {
@@ -374,7 +374,7 @@ test "native ordinary render bounds its exact model context and not retained raw
     try std.testing.expectEqualStrings(expected, scenario.context.?);
     previous.specification.policies.render_input_bytes = expected.len - 1;
     const oversized = try execute(&f, "context-too-large", input(previous, &.{first}));
-    try contains(oversized.digest.?.delivery.payload.frozen_text.bytes, "Large-batch fallback");
+    try contains(oversized.message.?.text.bytes, "Large-batch fallback");
     try std.testing.expectEqual(2, scenario.calls);
 }
 
@@ -470,18 +470,18 @@ test "native ordinary render calls one model with complete provenance and valida
     const facts = [_]Fact{ batch(1, 0, 2, values[0..2]), batch(2, 2, 4, values[2..4]) };
     const previous = head(2);
     const value = try execute(&f, "model-summary", input(previous, &facts));
-    const delivery = try assertFrame(previous, value, facts[1]);
+    const published = try assertFrame(previous, value, facts[1]);
     try std.testing.expectEqual(1, scenario.calls);
     try contains(scenario.context.?, "Operator instruction bytes=");
     try contains(scenario.context.?, "retained task bytes=[1,1,");
     try contains(scenario.context.?, "retained task bytes=[2,2,");
     for (values) |commit| try contains(scenario.context.?, commit.message.bytes);
-    try contains(delivery.payload.frozen_text.bytes, "Candidate summary without authority.");
-    try contains(delivery.payload.frozen_text.bytes, "Verified fourth commit.");
-    try contains(delivery.payload.frozen_text.bytes, "Dropped invalid highlights: 1");
+    try contains(published.text.bytes, "Candidate summary without authority.");
+    try contains(published.text.bytes, "Verified fourth commit.");
+    try contains(published.text.bytes, "Dropped invalid highlights: 1");
     try std.testing.expect(std.mem.find(
         u8,
-        delivery.payload.frozen_text.bytes,
+        published.text.bytes,
         "Invented highlight.",
     ) == null);
 }
@@ -499,10 +499,10 @@ test "native ordinary render never retries rejected or wrong shape model candida
         scenario.kind = kind;
         const before = scenario.calls;
         const value = try execute(&f, @tagName(kind), input(previous, &.{first}));
-        const delivery = try assertFrame(previous, value, first);
+        const published = try assertFrame(previous, value, first);
         try std.testing.expectEqual(before + 1, scenario.calls);
-        try contains(delivery.payload.frozen_text.bytes, "Rejected model candidate");
-        try contains(delivery.payload.frozen_text.bytes, "Verified commits: 4");
+        try contains(published.text.bytes, "Rejected model candidate");
+        try contains(published.text.bytes, "Verified commits: 4");
     }
 }
 
@@ -517,12 +517,12 @@ test "native ordinary render makes context exhaustion explicit without truncatio
     var previous = head(1);
     previous.specification.policies.context_bytes = 50;
     const value = try execute(&f, "small-context", input(previous, &.{first}));
-    try contains(value.digest.?.delivery.payload.frozen_text.bytes, "Large-batch fallback");
+    try contains(value.message.?.text.bytes, "Large-batch fallback");
     try std.testing.expectEqual(0, scenario.calls);
     var missing = input(head(1), &.{first});
     missing.step.model = null;
     const no_model = try execute(&f, "no-model", missing);
-    try contains(no_model.digest.?.delivery.payload.frozen_text.bytes, "No model configured");
+    try contains(no_model.message.?.text.bytes, "No model configured");
     try std.testing.expectEqual(0, scenario.calls);
 }
 
@@ -545,10 +545,10 @@ test "native ordinary render stops at an accepted gap and publishes its honest s
     _ = try assertFrame(previous, prefix, first);
     previous.told = .{ .sequence = 1, .epoch = 2, .tip = oid(1) };
     const accepted = try execute(&f, "accepted-gap", input(previous, &.{ gap, later }));
-    const delivery = try assertFrame(previous, accepted, gap);
-    try std.testing.expect(delivery.payload.comparison == null);
-    try contains(delivery.payload.frozen_text.bytes, "Accepted source gap");
-    try contains(delivery.payload.frozen_text.bytes, "No complete comparison is claimed");
+    const published = try assertFrame(previous, accepted, gap);
+    try std.testing.expect(published.comparison == null);
+    try contains(published.text.bytes, "Accepted source gap");
+    try contains(published.text.bytes, "No complete comparison is claimed");
     try std.testing.expectEqual(0, scenario.calls);
 }
 
@@ -643,7 +643,7 @@ test "native ordinary render preserves empty ordinary and retained state" {
     const values = try commits(f.arena.allocator(), 1);
     const first = batch(1, 0, 1, values);
     const rendered = try execute(&f, "first", input(head(1), &.{first}));
-    try f.rejected("pending", input(rendered, &.{first}), "render_digest_pending");
+    try f.rejected("told", input(rendered, &.{first}), "render_noncontiguous_batches");
     try std.testing.expectEqual(0, scenario.calls);
 }
 
@@ -708,7 +708,7 @@ fn methodInput(f: *Fixture, first: Fact, options: method_fixture.GuestOptions) !
     return value;
 }
 
-fn methodFrame(previous: t.Head, result: t.Head, last: Fact) !t.DeliveryIntent {
+fn methodFrame(previous: t.Head, result: t.Head, last: Fact) !t.Notification {
     var expected = previous;
     expected.method = result.method;
     expected.method_disposition = result.method_disposition;
@@ -742,18 +742,18 @@ test "native retained render updates bounded state and filters candidate highlig
     value.head.method.retained.consecutive_faults = 2;
     value.step.model = null;
     const result = try execute(&f, "retained-state", value);
-    const delivery = try methodFrame(value.head, result, first);
+    const published = try methodFrame(value.head, result, first);
     try std.testing.expectEqual(0, result.method.retained.consecutive_faults);
     try std.testing.expectEqualStrings(
         "new bounded method state",
         result.method.retained.state.bytes,
     );
     try std.testing.expect(result.method_disposition == null);
-    try contains(delivery.payload.frozen_text.bytes, "Retained complete-prefix summary");
-    try contains(delivery.payload.frozen_text.bytes, "Verified retained highlight");
+    try contains(published.text.bytes, "Retained complete-prefix summary");
+    try contains(published.text.bytes, "Verified retained highlight");
     try std.testing.expect(std.mem.find(
         u8,
-        delivery.payload.frozen_text.bytes,
+        published.text.bytes,
         "Invented retained highlight",
     ) == null);
     try std.testing.expectEqual(0, scenario.calls);
@@ -793,21 +793,21 @@ test "native retained render discards crowding state for a batch within its boun
     value.head.specification.policies.render_input_bytes = encoded.len + 1;
     value.step.previous = value.head;
     const result = try execute(&f, "retained-state-crowded", value);
-    const delivery = try methodFrame(value.head, result, first);
+    const published = try methodFrame(value.head, result, first);
     try std.testing.expect(result.method_disposition == null);
     try std.testing.expectEqual(0, result.method.retained.consecutive_faults);
     try std.testing.expectEqualStrings("", result.method.retained.state.bytes);
-    try contains(delivery.payload.frozen_text.bytes, "Retained method");
+    try contains(published.text.bytes, "Retained method");
     try std.testing.expect(std.mem.find(
         u8,
-        delivery.payload.frozen_text.bytes,
+        published.text.bytes,
         "Large-batch fallback",
     ) == null);
     value.head.specification.policies.render_input_bytes = encoded.len;
     value.step.previous = value.head;
     const oversized = try execute(&f, "retained-batch-oversized", value);
     const large = try assertFrame(value.head, oversized, first);
-    try contains(large.payload.frozen_text.bytes, "Large-batch fallback");
+    try contains(large.text.bytes, "Large-batch fallback");
     try std.testing.expectEqualStrings("retained state", oversized.method.retained.state.bytes);
     try std.testing.expectEqual(0, scenario.calls);
 }
@@ -822,14 +822,14 @@ test "native retained render before-call fault permits one ordinary completion" 
     const first = batch(1, 0, 4, values);
     const value = try methodInput(&f, first, .{ .wrong_output = true });
     const result = try execute(&f, "retained-before-call", value);
-    const delivery = try methodFrame(value.head, result, first);
+    const published = try methodFrame(value.head, result, first);
     try std.testing.expectEqual(1, result.method.retained.consecutive_faults);
     try std.testing.expectEqualStrings("", result.method.retained.state.bytes);
     const disposition = result.method_disposition.?;
     try std.testing.expect(!disposition.model_consumed);
     try std.testing.expect(!disposition.reverted);
     try std.testing.expectEqualDeep(value.head.method.retained.source, disposition.source);
-    try contains(delivery.payload.frozen_text.bytes, "Candidate summary without authority.");
+    try contains(published.text.bytes, "Candidate summary without authority.");
     try std.testing.expectEqual(1, scenario.calls);
 }
 
@@ -845,14 +845,14 @@ test "native retained render after-call fault reverts at policy bound" {
     value.head.method.retained.consecutive_faults = 2;
     value.head.specification.policies.method_faults = 3;
     const result = try execute(&f, "retained-after-call", value);
-    const delivery = try methodFrame(value.head, result, first);
+    const published = try methodFrame(value.head, result, first);
     try std.testing.expectEqual(.ordinary, std.meta.activeTag(result.method));
     const disposition = result.method_disposition.?;
     try std.testing.expect(disposition.model_consumed);
     try std.testing.expect(disposition.reverted);
     try std.testing.expectEqual(3, disposition.consecutive_faults);
     try std.testing.expectEqualDeep(value.head.method.retained.source, disposition.source);
-    try contains(delivery.payload.frozen_text.bytes, "Retained method fault after completion");
+    try contains(published.text.bytes, "Retained method fault after completion");
     try std.testing.expectEqual(1, scenario.calls);
 }
 
@@ -897,7 +897,7 @@ test "native retained render preserves whole oversized batch without method or m
     var value = try methodInput(&f, first, .{ .ports = 1 });
     value.head.specification.policies.render_input_bytes = 1;
     const result = try execute(&f, "oversized-retained", value);
-    const delivery = try assertFrame(value.head, result, first);
-    try contains(delivery.payload.frozen_text.bytes, "Large-batch fallback");
+    const published = try assertFrame(value.head, result, first);
+    try contains(published.text.bytes, "Large-batch fallback");
     try std.testing.expectEqual(0, scenario.calls);
 }

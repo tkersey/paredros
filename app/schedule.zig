@@ -68,7 +68,6 @@ pub const PhaseInputs = struct {
     check_due: bool,
     check_backoff: bool,
     renderable_prefix: bool,
-    unresolved_digest: bool,
     send_backoff: bool,
     previous_phase: Phase,
     previous_check_overran: bool,
@@ -76,7 +75,7 @@ pub const PhaseInputs = struct {
 
 pub fn phase(input: PhaseInputs) Phase {
     if (!input.active) return .fold;
-    const render = input.renderable_prefix and !input.unresolved_digest and !input.send_backoff;
+    const render = input.renderable_prefix and !input.send_backoff;
     if (input.check_due and !input.check_backoff) {
         if (render and input.previous_phase == .check and input.previous_check_overran)
             return .render;

@@ -22,18 +22,6 @@ pub fn recoverableTurn(record: idx.Record) bool {
     return record.input == .turn and !record.superseded and record.result == null;
 }
 
-pub fn replaceable(attempt: u32) bool {
-    return attempt < 2;
-}
-
-pub fn continues(action: Action, attempt: u32) bool {
-    return switch (action) {
-        .stay => false,
-        .replace => replaceable(attempt),
-        .resume_captured, .resume_parked => true,
-    };
-}
-
 pub fn turn(service: anytype, a: std.mem.Allocator, record: idx.Record) !Turn {
     std.debug.assert(recoverableTurn(record));
     var saved = try service.task(a, record.task);

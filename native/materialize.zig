@@ -4,9 +4,7 @@ const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
 const admission = @import("admission.zig");
-const delivery = @import("delivery_fact.zig");
 const continuity = @import("continuity.zig");
-const delivery_target = @import("delivery_target.zig");
 const measure = @import("render_measure.zig");
 
 pub fn step(
@@ -101,8 +99,6 @@ fn controlBoundary(pending: []const t.DirectiveFact) bool {
         .adopt,
         .revert,
         .@"resume",
-        .recovery_hold,
-        .recovery_release,
         => return true,
         else => {},
     };
@@ -128,23 +124,22 @@ fn directives(
     return result.toOwnedSlice(a);
 }
 
-pub fn factTarget(index: *const idx.Index, record: idx.Record) ?t.Id {
+pub fn factTarget(record: idx.Record) ?t.Id {
     return switch (record.input) {
         .step => |value| value.obligation,
-        .delivery => |value| delivery_target.resolve(index, value),
         .turn => |value| value.target,
         .genesis,
         .directive,
         .experiment,
         .continuity_member,
         .continuity_cut,
-        .restore,
+        .transfer,
         => null,
     };
 }
 
-fn belongs(index: *const idx.Index, record: idx.Record, target: t.Id) bool {
-    const selected = factTarget(index, record) orelse return false;
+fn belongs(record: idx.Record, target: t.Id) bool {
+    const selected = factTarget(record) orelse return false;
     return std.meta.eql(selected, target);
 }
 
@@ -156,7 +151,7 @@ fn facts(
     var result: std.ArrayList(t.Settlement) = .empty;
     var ordered: std.ArrayList(usize) = .empty;
     for (index.records, 0..) |record, position| {
-        if (belongs(index, record, obligation.task)) try ordered.append(a, position);
+        if (belongs(record, obligation.task)) try ordered.append(a, position);
     }
     std.mem.sort(usize, ordered.items, index, struct {
         fn less(context: *const idx.Index, left: usize, right: usize) bool {
@@ -178,18 +173,8 @@ fn facts(
 }
 
 pub fn unsettled(obligation: *const idx.Obligation, record: idx.Record) bool {
-    if (!readyFact(record)) return false;
     const previous = obligation.settlements.get(record.task) orelse return true;
     return previous.reference.revision != record.revision;
-}
-
-pub fn readyFact(record: idx.Record) bool {
-    if (record.input != .delivery) return true;
-    const snapshot = record.owner_snapshot orelse return false;
-    if (snapshot.outcome == .completed or snapshot.outcome == .failed or
-        snapshot.outcome == .cancelled) return true;
-    const evidence = record.owner_evidence orelse return false;
-    return evidence.status == .unknown;
 }
 
 fn settlement(
@@ -199,14 +184,6 @@ fn settlement(
 ) !t.Settlement {
     const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
     const bytes = try c.encodeOwned(retained.Snapshot, a, snapshot);
-    const disposition = if (record.input == .delivery)
-        (try delivery.settlement(
-            a,
-            snapshot,
-            record.owner_evidence orelse return error.MissingOwnerEvidence,
-        )).value
-    else
-        null;
     return .{
         .reference = .{
             .task = record.task,
@@ -216,14 +193,12 @@ fn settlement(
         .owner_snapshot = .{ .bytes = bytes },
         .kind = switch (record.input) {
             .step => if (record.superseded) .superseded else .phase,
-            .delivery => .delivery,
             .turn => .turn,
             else => return error.UnexpectedSettlement,
         },
         .accounting = snapshot.accounting,
         .previous_accounting = if (previous) |value| value.accounting else .{},
         .previous_reference = if (previous) |value| value.reference else null,
-        .delivery = disposition,
     };
 }
 

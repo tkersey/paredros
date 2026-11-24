@@ -5,6 +5,7 @@ const idx = @import("index.zig");
 const admission = @import("admission.zig");
 const dialogue = @import("dialogue.zig");
 const ingress_policy = @import("ingress_policy.zig");
+const continuity = @import("continuity.zig");
 
 pub const TurnRequest = struct {
     text: t.Text,
@@ -113,7 +114,7 @@ fn admitGenesis(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
-            try ingress_policy.output(self.index);
+            try ingress_policy.validate(self.index);
             const envelope = genesisEnvelope(requested);
             const clock_ms = try self.driver.clock.now(self.driver.clock.context);
             var frozen = self.specification;
@@ -153,7 +154,12 @@ fn importedGenesis(
     request: admission.Request,
 ) !?t.Id {
     const lineage = try admission.stableDigest(a, genesisEnvelope(request));
-    const position = index.lineages.get(lineage) orelse return null;
+    const position = index.lineages.get(lineage) orelse {
+        const source = try continuity.sourceOperation(a, index, request.operation) orelse
+            return null;
+        if (source == .genesis) return error.OperationConflict;
+        return null;
+    };
     const existing = index.records[position].input.genesis;
     if (std.mem.eql(u8, existing.envelope.operation.bytes, request.operation)) return null;
     if (existing.imported == null) return error.DuplicateLineage;

@@ -19,8 +19,6 @@ pub fn emit(c: protean.Context, completion: model.Function, effects: anytype) !F
     }, try c.schema(t.TurnResult), effects);
     const b = try c.author.body(function);
     const input = try b.parameter("input");
-    const attempt = try b.field(input, "attempt");
-    try a.require(c, b, try b.less(attempt, try b.constant(u32, 3)), "turn_attempt_limit");
     const refusal = try b.field(input, "refusal");
     const ordinary = try b.caseOf(refusal, "none");
     const refused = try b.caseOf(refusal, "some");
@@ -59,7 +57,7 @@ fn respond(
         .some = try present.ret(acquired),
     });
     return b.conditional(
-        try b.equal(attempt, try b.constant(u32, 2)),
+        try b.less(try b.constant(u32, 1), attempt),
         try final.ret(try failure(c, "I could not complete this turn. No action was admitted.")),
         try eligible.ret(configured),
     );

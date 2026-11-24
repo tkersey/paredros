@@ -24,7 +24,6 @@ pub fn Daemon(comptime Types: type) type {
             select_obligation,
             import_controls: t.Id,
             step: t.Id,
-            deliveries: t.Id,
         };
         pub const Handler = struct {
             context: *anyopaque,
@@ -232,24 +231,10 @@ pub fn Daemon(comptime Types: type) type {
                 },
                 .step => |target| {
                     const changed = try self.driver.nextStep(a, target) != null;
-                    self.scheduling = .{ .deliveries = target };
-                    return changed;
-                },
-                .deliveries => |target| {
-                    const changed = try self.outputs(a, target);
                     self.scheduling = .retained;
                     return changed;
                 },
             }
-        }
-
-        fn outputs(self: *Self, a: std.mem.Allocator, target: t.Id) !bool {
-            var index = try self.driver.rebuild(a);
-            defer index.deinit();
-            const tasks = try self.driver.deliveries(a, target);
-            defer a.free(tasks);
-            for (tasks) |task| if (index.record(task) == null) return true;
-            return false;
         }
 
         fn stop(self: *Self, a: std.mem.Allocator, now_ms: i64, started: i64) !Progress {

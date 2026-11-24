@@ -32,23 +32,14 @@ fn method() t.Method {
     } };
 }
 
-fn delivery() t.DeliveryIntent {
+fn message() t.Notification {
     return .{
-        .key = .{
-            .lineage = @splat(2),
-            .purpose = .digest,
-            .identity = @splat(3),
-            .generation = 7,
-        },
-        .payload = .{
-            .obligation = @splat(4),
-            .specification_revision = 6,
-            .prior_sequence = 10,
-            .through_sequence = 17,
-            .frozen_text = .{ .bytes = "pending digest" },
-            .prompt = @splat(6),
-            .supersedes = null,
-        },
+        .specification_revision = 6,
+        .text = .{ .bytes = "rendered digest" },
+        .purpose = .{ .digest = .{
+            .prior = .{ .sequence = 3, .epoch = 2, .tip = @splat('c') },
+            .through = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') },
+        } },
     };
 }
 
@@ -69,12 +60,6 @@ fn head() t.Head {
     result.specification.revision = 6;
     result.observed = .{ .sequence = 17, .epoch = 2, .tip = @splat('a') };
     result.told = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') };
-    result.told_receipt = .{
-        .key = delivery().key,
-        .timestamp = .{ .bytes = "1700000000.000001" },
-        .payload_digest = @splat(17),
-        .evidence = .{ .task = @splat(18), .digest = @splat(19) },
-    };
     result.last_observation = .{
         .sequence = 17,
         .epoch = 2,
@@ -85,17 +70,16 @@ fn head() t.Head {
         .provider_date = .{ .bytes = "provider-time" },
         .commit_count = 7,
     };
-    result.digest = .{
-        .delivery = delivery(),
-        .hold = .uncertain_transmission,
-        .not_before_ms = 920,
-    };
+    result.message = message();
     result.question = .{
         .identity = @splat(22),
         .condition = @splat(23),
         .specification_revision = 6,
-        .choices = .{ .items = &.{.{ .bytes = "accept" }} },
-        .prompt = delivery(),
+        .choices = .{ .items = &.{.{
+            .value = .{ .bytes = "accept" },
+            .label = .{ .bytes = "Accept" },
+        }} },
+        .prompt = .{ .bytes = "pending question" },
     };
     result.method = method();
     result.next_due_ms = 1300;

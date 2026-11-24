@@ -81,42 +81,12 @@ test "application composition admits exact provider effects without protected di
 pub fn NativeTests(comptime native: type) type {
     return struct {
         const bridge = @import("../native/application.zig");
-        const prepare = @import("../native/delivery_prepare.zig");
         const fixtures = @import("contracts.zig");
         const allocator = std.testing.allocator;
         const Fixture = @import("native_fixture.zig").Fixture(bridge.Types, struct {
             pub const use_product_assets = true;
             pub const declarations = bridge.Application.declarations;
         });
-
-        fn intent() t.DeliveryIntent {
-            return .{
-                .key = .{
-                    .lineage = @splat(1),
-                    .purpose = .activation,
-                    .identity = @splat(2),
-                    .generation = 0,
-                },
-                .payload = .{
-                    .obligation = @splat(3),
-                    .specification_revision = 4,
-                    .prior_sequence = 5,
-                    .through_sequence = 5,
-                    .frozen_text = .{ .bytes = "pause applied." },
-                    .prompt = null,
-                    .supersedes = null,
-                },
-            };
-        }
-
-        fn delivery() !@import("protean_contracts").Decoded(t.Delivery) {
-            return prepare.materialize(
-                allocator,
-                intent(),
-                .{ .task = @splat(4), .digest = @splat(5) },
-                @splat(6),
-            );
-        }
 
         test "native application declarations match production capability schemas" {
             try std.testing.expectEqual(expected.len, bridge.Application.declarations.len);
@@ -137,20 +107,20 @@ pub fn NativeTests(comptime native: type) type {
             }
         }
 
-        test "native application completes local deliveries and refuses future envelopes" {
+        test "native application preserves transfer markers and refuses future envelopes" {
             var f: Fixture = .{};
             defer f.deinit();
             try f.init();
-            var admitted = try delivery();
-            defer admitted.deinit();
-            const task = try f.execute("local-delivery", .{ .delivery = admitted.value });
-            try std.testing.expectEqualDeep(t.Output{ .delivery = .{ .confirmed = .{
-                .timestamp = .{ .bytes = "local" },
-                .metadata_observed = true,
-            } } }, try f.output(task));
-            var future = admitted.value;
+            const marker: t.TransferMarker = .{ .envelope = .{
+                .operation = .{ .bytes = "local-transfer" },
+                .stable_request = @splat(6),
+                .origin = .{ .local = .{ .uid = 501 } },
+            } };
+            const task = try f.execute("local-transfer", .{ .transfer = marker });
+            try std.testing.expectEqualDeep(t.Output{ .transfer = marker }, try f.output(task));
+            var future = marker;
             future.envelope.version = 2;
-            try f.rejected("future-delivery", .{ .delivery = future }, "unsupported_input_version");
+            try f.rejected("future-transfer", .{ .transfer = future }, "unsupported_input_version");
         }
     };
 }

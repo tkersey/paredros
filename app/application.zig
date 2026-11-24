@@ -92,12 +92,11 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
     const initial = try b.caseOf(input, "genesis");
     const advance = try b.caseOf(input, "step");
     const directive = try b.caseOf(input, "directive");
-    const delivery = try b.caseOf(input, "delivery");
     const converse = try b.caseOf(input, "turn");
     const compare = try b.caseOf(input, "experiment");
     const member = try b.caseOf(input, "continuity_member");
     const cut = try b.caseOf(input, "continuity_cut");
-    const restore = try b.caseOf(input, "restore");
+    const marker = try b.caseOf(input, "transfer");
     try envelope(c, directive.body(), directive.payload());
     const result = try b.match(input, .{
         .genesis = try initial.ret(try invoke(c, initial, functions.genesis, "genesis")),
@@ -107,24 +106,14 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
             "directive",
             directive.payload(),
         )),
-        .delivery = try delivery.ret(try deliver(c, delivery)),
         .turn = try converse.ret(try invoke(c, converse, functions.turn, "turn")),
         .experiment = try compare.ret(try invoke(c, compare, functions.experiment, "experiment")),
         .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
         .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
-        .restore = try restore.ret(try preserve(c, restore, "restore")),
+        .transfer = try marker.ret(try preserve(c, marker, "transfer")),
     });
     try c.author.define(function, try b.ret(result));
     return function;
-}
-
-fn deliver(c: protean.Context, case: anytype) !a.Value(t.Output) {
-    const b = case.body();
-    const input = case.payload();
-    try envelope(c, b, input);
-    return b.variant(try c.schema(t.Output), "delivery", try c.literal(t.DeliveryOutcome, .{
-        .confirmed = .{ .timestamp = .{ .bytes = "local" }, .metadata_observed = true },
-    }));
 }
 
 fn preserve(c: protean.Context, case: anytype, comptime tag: []const u8) !a.Value(t.Output) {

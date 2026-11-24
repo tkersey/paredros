@@ -123,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
                         status_samples.append(time.monotonic()-before)
                     time.sleep(.1)
                 stdout,stderr=answer_process.communicate(timeout=5)
-                assert answer_process.returncode in (0,1),(answer_process.returncode,stdout,stderr)
+                assert answer_process.returncode in (0,75),(answer_process.returncode,stdout,stderr)
                 answer=subprocess.CompletedProcess(answer_process.args,answer_process.returncode,stdout,stderr)
                 measurements['ask_with_status_probes_seconds']=time.monotonic()-started
                 measurements['status_during_ask_seconds']=status_samples
@@ -133,7 +133,8 @@ with tempfile.TemporaryDirectory(prefix='paredros-smoke-',dir='/tmp') as raw:
                     answer_process.wait(timeout=5)
             answer_value=json.loads(answer.stdout)
             assert answer_value['status']=='observed'
-            assert answer_value['data']['task_status'] in {'completed','failed','cancelled','waiting_input','parked','blocked','unknown'}
+            assert 'retry_pending' not in answer_value['data']
+            if answer.returncode==0: assert answer_value['data']['result']['value']['reply']
         results.append('offline daemon status, idempotent monitor, local activation message, durable pause, JSON relay'
                        + ('' if args.essential else ', and ask settlement'))
         results.append('client-only live metadata does not read unavailable secrets or execute helper')

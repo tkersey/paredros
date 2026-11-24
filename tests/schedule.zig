@@ -58,19 +58,18 @@ test "anchor arithmetic is strict and checked across signed timestamp boundaries
     try std.testing.expectEqual(0, try schedule.firstAfter(0, std.math.maxInt(u64), -1));
 }
 
-test "phase policy observes during delivery hold and prevents sustained check starvation" {
+test "phase policy observes before rendering and prevents sustained check starvation" {
     var inputs: schedule.PhaseInputs = .{
         .active = true,
         .check_due = true,
         .check_backoff = false,
-        .renderable_prefix = true,
-        .unresolved_digest = true,
+        .renderable_prefix = false,
         .send_backoff = false,
         .previous_phase = .check,
         .previous_check_overran = true,
     };
     try std.testing.expectEqual(.check, schedule.phase(inputs));
-    inputs.unresolved_digest = false;
+    inputs.renderable_prefix = true;
     try std.testing.expectEqual(.render, schedule.phase(inputs));
     inputs.previous_phase = .render;
     try std.testing.expectEqual(.check, schedule.phase(inputs));

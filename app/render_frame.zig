@@ -12,7 +12,7 @@ pub const Commits = cts.Vector(t.Commit, null);
 pub const Highlights = cts.Vector(Highlight, 8);
 pub const Oids = cts.Vector(t.Oid, 8);
 pub const Text = cts.Text(4000);
-pub const Comparison = struct { repository: t.Repository, base: t.Oid, tip: t.Oid };
+pub const Comparison = t.Comparison;
 pub const Input = struct {
     repository: t.Repository,
     base: t.Oid,

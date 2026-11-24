@@ -49,7 +49,6 @@ pub const Bundle = struct {
     archive_boundary: c.Text(1024),
 };
 pub const TurnFact = struct { input: t.Turn, result: ?t.TurnResult };
-pub const DeliveryFact = struct { input: t.Delivery, result: ?t.DeliveryOutcome };
 pub const ExperimentFact = struct { input: t.Experiment, result: t.ExperimentResult };
 pub const ContextFact = struct {
     text: c.Text(256 * 1024),
@@ -127,7 +126,6 @@ pub fn Payload(comptime kind: t.ContinuityKind) type {
         .batch => t.Batch,
         .directive => t.Directive,
         .turn => TurnFact,
-        .delivery => DeliveryFact,
         .settlement => SourceFact,
         .method_source => t.RetainedMethodSource,
         .method_report => ExperimentFact,
@@ -317,7 +315,6 @@ fn validateResponsibilities(a: std.mem.Allocator, bundle: Bundle) !void {
         switch (input.value) {
             .directive => |value| try retainedInput(a, bundle, item, .directive, value),
             .turn => |value| try retainedInput(a, bundle, item, .turn, value),
-            .delivery => |value| try retainedInput(a, bundle, item, .delivery, value),
             else => {},
         }
     }
@@ -409,8 +406,6 @@ pub fn rebaseHead(
         if (batch.* == .retained)
             batch.retained = try mapReference(bundle, mappings, .batch, batch.retained);
     };
-    if (head.told_receipt) |*receipt|
-        receipt.evidence = try mapReference(bundle, mappings, .delivery, receipt.evidence);
     if (head.method == .retained) {
         head.method.retained.source = try mapReference(
             bundle,
@@ -526,7 +521,7 @@ pub fn rebaseFrom(
 }
 
 pub fn historicalControl(body: t.DirectiveBody) bool {
-    return body == .transfer or body == .recovery_hold or body == .recovery_release;
+    return body == .transfer;
 }
 
 pub fn directiveOperation(a: std.mem.Allocator, bundle: t.Digest, identity: t.Digest) ![]u8 {
@@ -655,12 +650,11 @@ fn producedPayload(a: std.mem.Allocator, item: Member, input: t.Input, output: ?
             if (input != .directive) return error.ContinuityProducerMismatch;
             try samePayload(a, item, .directive, input.directive);
         },
-        inline .turn, .delivery => |kind| {
-            if (!std.mem.eql(u8, @tagName(input), @tagName(kind)))
-                return error.ContinuityProducerMismatch;
-            try samePayload(a, item, kind, .{
-                .input = @field(input, @tagName(kind)),
-                .result = if (output) |value| @field(value, @tagName(kind)) else null,
+        .turn => {
+            if (input != .turn) return error.ContinuityProducerMismatch;
+            try samePayload(a, item, .turn, .{
+                .input = input.turn,
+                .result = if (output) |value| value.turn else null,
             });
         },
         .method_report => {
@@ -784,6 +778,21 @@ fn validatePending(a: std.mem.Allocator, bundle: Bundle, root: Lineage, head: t.
             control.value.ordinal > head.folded_directive_ordinal) count += 1;
     }
     if (count != root.pending_controls.items.len) return error.MissingContinuityControl;
+}
+
+pub fn sourceOperation(a: std.mem.Allocator, index: anytype, operation: []const u8) !?t.Input {
+    const view = index.continuity_import orelse return null;
+    const bundle = view.bundle orelse return null;
+    for (bundle.members.items) |item| {
+        if (item.data.kind != .settlement) continue;
+        const fact = try decode(.settlement, a, item.data);
+        const input = try sourceInput(a, fact.value.input);
+        const envelope = switch (input) {
+            inline else => |value| value.envelope,
+        };
+        if (std.mem.eql(u8, envelope.operation.bytes, operation)) return input;
+    }
+    return null;
 }
 
 pub fn preparePortable(a: std.mem.Allocator, index: anytype) ![]const Portable {

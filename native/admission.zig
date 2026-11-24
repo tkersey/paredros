@@ -69,7 +69,6 @@ fn target(input: t.Input) ?t.Id {
         .directive => |value| value.obligation,
         .step => |value| value.obligation,
         .turn => |value| value.target,
-        .delivery => |value| value.payload.logical.obligation,
         else => null,
     };
 }

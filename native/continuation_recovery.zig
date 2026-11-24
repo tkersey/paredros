@@ -1,21 +1,17 @@
 const std = @import("std");
 const idx = @import("index.zig");
 const recovery = @import("recovery_status.zig");
-const outbound = @import("outbound.zig");
 
 pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) !u32 {
     if (!driver.attached) return error.DriverDetached;
     if (limit == 0) return error.InvalidRecoveryLimit;
     var index = try driver.rebuild(a);
     defer index.deinit();
-    const clock_ms = try driver.clock.now(driver.clock.context);
     var resumed: u32 = 0;
     for (index.records) |record| {
         if (record.superseded or record.result != null or
             record.input == .step or record.input == .turn) continue;
         if (resumed == limit) break;
-        if (record.input == .delivery and
-            !try outbound.resumable(a, &index, record.input.delivery, clock_ms)) continue;
         if (try resumeOne(driver.service, a, record) == .resumed) resumed += 1;
     }
     return resumed;

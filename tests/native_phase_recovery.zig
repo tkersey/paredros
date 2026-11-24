@@ -263,7 +263,6 @@ test "native phase recovery replacement folds pending controls and unknown accou
         .reference = .{ .task = @splat(8), .revision = 2, .digest = @splat(9) },
         .kind = .superseded,
         .accounting = .{ .possible_charged_calls = 1 },
-        .delivery = null,
     };
     request.facts.items = &.{fact};
     const result = try fixture.output(try fixture.execute("fold-unknown", .{ .step = request }));

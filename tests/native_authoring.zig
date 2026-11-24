@@ -220,26 +220,6 @@ test "native authoring temporal agrees with independent schedule oracle at exact
     }
 }
 
-fn delivery() t.DeliveryIntent {
-    return .{
-        .key = .{
-            .lineage = @splat(2),
-            .purpose = .digest,
-            .identity = @splat(3),
-            .generation = 7,
-        },
-        .payload = .{
-            .obligation = @splat(4),
-            .specification_revision = 6,
-            .prior_sequence = 10,
-            .through_sequence = 17,
-            .frozen_text = .{ .bytes = "pending digest" },
-            .prompt = @splat(6),
-            .supersedes = null,
-        },
-    };
-}
-
 fn populatedObservation() t.Observation {
     return .{
         .sequence = 17,
@@ -266,24 +246,24 @@ fn populatedHead() t.Head {
     head.specification.revision = 6;
     head.observed = .{ .sequence = 17, .epoch = 2, .tip = @splat('a') };
     head.told = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') };
-    head.told_receipt = .{
-        .key = delivery().key,
-        .timestamp = .{ .bytes = "1700000000.000001" },
-        .payload_digest = @splat(16),
-        .evidence = .{ .task = @splat(17), .digest = @splat(18) },
-    };
     head.last_observation = populatedObservation();
-    head.digest = .{
-        .delivery = delivery(),
-        .hold = .uncertain_transmission,
-        .not_before_ms = 920,
+    head.message = .{
+        .specification_revision = 6,
+        .text = .{ .bytes = "rendered digest" },
+        .purpose = .{ .digest = .{
+            .prior = .{ .sequence = 4, .epoch = 2, .tip = @splat('c') },
+            .through = .{ .sequence = 10, .epoch = 2, .tip = @splat('b') },
+        } },
     };
     head.question = .{
         .identity = @splat(21),
         .condition = @splat(22),
         .specification_revision = 6,
-        .choices = .{ .items = &.{.{ .bytes = "accept" }} },
-        .prompt = delivery(),
+        .choices = .{ .items = &.{.{
+            .value = .{ .bytes = "accept" },
+            .label = .{ .bytes = "Accept" },
+        }} },
+        .prompt = .{ .bytes = "pending question" },
     };
     head.method = .{ .retained = .{
         .source = .{ .task = @splat(25), .digest = @splat(26) },
@@ -323,7 +303,7 @@ fn controlledHead(previous: t.Head, control: mode.Control) t.Head {
             head.desired_mode = .paused;
         },
         .@"resume" => {
-            head.mode = if (head.recovery_hold) .paused else .active;
+            head.mode = .active;
             head.desired_mode = .active;
         },
         .cancel => {
@@ -335,32 +315,29 @@ fn controlledHead(previous: t.Head, control: mode.Control) t.Head {
     return head;
 }
 
-test "native authoring modes preserve other head fields across controls holds and final states" {
+test "native authoring modes preserve other head fields across controls and final states" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
     var index: u32 = 0;
     for ([_]t.Mode{ .active, .paused, .cancelled, .transferred }) |old_mode| {
-        for ([_]bool{ false, true }) |hold| {
-            for ([_]mode.Control{ .pause, .@"resume", .cancel, .transfer }) |control| {
-                var previous = populatedHead();
-                previous.mode = old_mode;
-                previous.desired_mode = if (old_mode == .cancelled) .cancelled else .active;
-                previous.recovery_hold = hold;
-                const operation = try std.fmt.allocPrint(
-                    fixture.arena.allocator(),
-                    "mode-{d}",
-                    .{index},
-                );
-                index += 1;
-                const task = try fixture.execute(
-                    operation,
-                    .{ .mode = .{ .head = previous, .control = control } },
-                );
-                const result = try fixture.output(task);
-                try std.testing.expectEqualDeep(controlledHead(previous, control), result.mode);
-            }
+        for ([_]mode.Control{ .pause, .@"resume", .cancel, .transfer }) |control| {
+            var previous = populatedHead();
+            previous.mode = old_mode;
+            previous.desired_mode = if (old_mode == .cancelled) .cancelled else .active;
+            const operation = try std.fmt.allocPrint(
+                fixture.arena.allocator(),
+                "mode-{d}",
+                .{index},
+            );
+            index += 1;
+            const task = try fixture.execute(
+                operation,
+                .{ .mode = .{ .head = previous, .control = control } },
+            );
+            const result = try fixture.output(task);
+            try std.testing.expectEqualDeep(controlledHead(previous, control), result.mode);
         }
     }
-    try std.testing.expectEqual(32, index);
+    try std.testing.expectEqual(16, index);
 }

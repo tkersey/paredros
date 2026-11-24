@@ -151,6 +151,7 @@ fn fold(
     const prepared = try b.update(previous, .{
         .clock_ms = instant,
         .next_due_ms = try b.field(scheduled, "next_due_ms"),
+        .message = try c.literal(?t.Notification, null),
     });
     const controls = try b.call(directives, .{ .input = try b.product(try c.schema(chain.Input), .{
         .obligation = try b.field(input, "obligation"),
@@ -267,27 +268,11 @@ fn selectPhase(
         try b.field(head, "source_not_before_ms"),
     ));
     const checking = try b.select(check_due, source_ready, no);
-    const pending = try b.field(head, "digest");
-    var rendering = try b.equal(
-        try b.variantTag(pending),
-        try b.variantTag(try c.literal(?t.DigestIntent, null)),
-    );
-    rendering = try b.select(
-        rendering,
+    const rendering = try b.select(
         try b.less(try b.constant(u64, 0), try b.sequenceLength(try b.field(input, "batches"))),
-        no,
-    );
-    rendering = try b.select(
-        rendering,
         try b.booleanNot(try b.less(now, try b.field(head, "render_not_before_ms"))),
         no,
     );
-    const told = try b.field(head, "told");
-    const anchor = try b.field(try b.field(input, "previous"), "told");
-    inline for (.{ "sequence", "epoch" }) |name| rendering = try b.select(rendering, try b.equal(
-        try b.field(told, name),
-        try b.field(anchor, name),
-    ), no);
     const last_check = try isPhase(c, b, try b.field(head, "phase"), .check);
     const alternate = try b.select(last_check, try b.field(head, "previous_check_overran"), no);
     const check_phase = try b.select(

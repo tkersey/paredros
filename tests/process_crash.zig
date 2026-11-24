@@ -8,6 +8,7 @@ const model = @import("../native/model_external.zig");
 const model_contract = @import("../app/model_contract.zig");
 const contract = @import("../app/github_contract.zig");
 const retained = @import("../native/retained.zig");
+const messages = @import("../native/messages.zig");
 const Driver = @import("../native/driver.zig").Driver(t);
 const examples = @import("contracts.zig");
 const Phase = enum {
@@ -15,9 +16,7 @@ const Phase = enum {
     replacement_admitted,
     read_dispatched,
     read_captured,
-    delivery_admitted,
-    delivery_completed,
-    delivery_consumed,
+    genesis_admitted,
     turn_admitted,
     model_dispatched,
     model_captured,
@@ -103,11 +102,6 @@ fn clock(_: *anyopaque) !i64 {
     return now_ms;
 }
 
-fn deliveries() bool {
-    return phase == .delivery_admitted or phase == .delivery_completed or
-        phase == .delivery_consumed;
-}
-
 fn models() bool {
     return phase == .turn_admitted or phase == .model_dispatched or phase == .model_captured;
 }
@@ -176,10 +170,7 @@ fn drive(f: *Fixture, session: *native.Session(t), task: t.Id) !void {
         _ = try session.tick(a);
         var state = try f.service.?.task(a, task);
         defer state.deinit();
-        if (state.value.terminal()) {
-            try stopAt(.delivery_completed);
-            return;
-        }
+        if (state.value.terminal()) return;
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.CrashFixtureDidNotComplete;
@@ -188,9 +179,14 @@ fn drive(f: *Fixture, session: *native.Session(t), task: t.Id) !void {
 fn createCut(f: *Fixture, driver: *Driver) !void {
     const a = f.arena.allocator();
     const initial = examples.genesis();
+    if (phase == .genesis_admitted) {
+        const operation = initial.envelope.operation.bytes;
+        const admitted = try f.service.?.submit(a, operation, .{ .genesis = initial });
+        try remember(driver, admitted.receipt.task, admitted.receipt.task, null);
+        return stopAt(.genesis_admitted);
+    }
     const target = try f.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
     const origin: t.Origin = .{ .local = .{ .uid = 501 } };
-    if (deliveries()) return createDeliveryCut(f, driver, target);
     if (models()) return createModelCut(f, driver, target);
     if (phase == .control_admitted) {
         const pause = try driver.directive(a, "crash-pause", origin, target, .pause);
@@ -209,37 +205,6 @@ fn createCut(f: *Fixture, driver: *Driver) !void {
     defer session.deinit() catch @panic("session left busy");
     try drive(f, &session, step);
     return error.CrashBoundaryNotReached;
-}
-
-fn createDeliveryCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
-    const a = f.arena.allocator();
-    const admitted = try driver.deliveries(a, target);
-    try std.testing.expectEqual(1, admitted.len);
-    try remember(driver, target, admitted[0], null);
-    if (phase == .delivery_admitted) return stopAt(.delivery_admitted);
-    var session = try native.Session(t).init(&f.service.?);
-    defer session.deinit() catch @panic("session left busy");
-    try drive(f, &session, witness.subject);
-    try drive(f, &session, (try driver.nextStep(a, target)).?);
-    try std.testing.expectEqual(1, try consumptions(driver, a));
-    try stopAt(.delivery_consumed);
-    return error.CrashBoundaryNotReached;
-}
-
-fn consumptions(driver: *Driver, a: std.mem.Allocator) !u32 {
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const obligation = index.obligation(witness.target).?;
-    var count: u32 = 0;
-    for (obligation.chain) |position| {
-        const output = index.records[position].result.?;
-        const head = if (output == .genesis) output.genesis else output.step.head;
-        for (head.consumed.items) |fact| {
-            if (std.meta.eql(fact.task, witness.subject)) count += 1;
-        }
-    }
-    if (count == 1) try std.testing.expect(index.head(obligation).activation == null);
-    return count;
 }
 
 fn createModelCut(f: *Fixture, driver: *Driver, target: t.Id) !void {
@@ -326,37 +291,23 @@ fn verifyRead(f: *Fixture, driver: *Driver) !void {
     }
 }
 
-fn verifyDelivery(f: *Fixture, driver: *Driver) !void {
+fn verifyGenesis(f: *Fixture, driver: *Driver) !void {
     const a = f.arena.allocator();
     var state = try f.service.?.task(a, witness.subject);
     const completed = state.value.terminal();
     state.deinit();
-    try std.testing.expectEqual(phase != .delivery_admitted, completed);
-    try std.testing.expectEqual(
-        @as(u32, if (phase == .delivery_consumed) 1 else 0),
-        try consumptions(driver, a),
-    );
-    const repeated = try driver.deliveries(a, witness.target);
-    if (phase == .delivery_consumed) {
-        for (repeated) |task| try std.testing.expect(!std.meta.eql(witness.subject, task));
-    } else {
-        try std.testing.expectEqual(1, repeated.len);
-        try std.testing.expectEqualDeep(witness.subject, repeated[0]);
-    }
-    try std.testing.expectEqual(
-        @as(u32, if (completed) 0 else 1),
-        try driver.resumeRetained(a, 8),
-    );
+    try std.testing.expect(!completed);
     var session = try native.Session(t).init(&f.service.?);
     defer session.deinit() catch @panic("session left busy");
     try drive(f, &session, witness.subject);
-    try std.testing.expectEqualDeep(t.Output{ .delivery = .{ .confirmed = .{
-        .timestamp = .{ .bytes = "local" },
-        .metadata_observed = true,
-    } } }, try f.output(witness.subject));
-    var saved = try retained.load(&f.service.?, a, witness.subject, 128);
-    defer saved.deinit();
-    try std.testing.expectEqual(0, saved.snapshot.value.attempts.items.len);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const obligation = index.obligation(witness.target).?;
+    const published = index.head(obligation).message.?;
+    try std.testing.expectEqual(.activation, std.meta.activeTag(published.purpose));
+    const page = try messages.page(a, &index, witness.target, null, 64, null);
+    try std.testing.expectEqual(1, page.total);
+    try std.testing.expectEqual(.activation, page.messages.items[0].purpose);
     try std.testing.expectEqual(0, acquisitions);
 }
 
@@ -440,8 +391,8 @@ test "process crash owner fixture" {
     );
     if (models())
         try verifyModel(&f, &driver)
-    else if (deliveries())
-        try verifyDelivery(&f, &driver)
+    else if (phase == .genesis_admitted)
+        try verifyGenesis(&f, &driver)
     else if (phase == .control_admitted or phase == .replacement_admitted)
         try verifyControl(&f, &driver)
     else

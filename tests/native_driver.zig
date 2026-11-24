@@ -358,7 +358,7 @@ fn expectTurnProgress(
     driver: *Driver,
     turn: t.Id,
     status: []const u8,
-    pending: bool,
+    replied: bool,
 ) !void {
     const config: @import("../native/configuration.zig").Config = .{
         .version = 1,
@@ -384,10 +384,11 @@ fn expectTurnProgress(
     const data = parsed.value.object.get("data").?;
     const shown = try native.json.text(data.object.get("task_status").?);
     try std.testing.expectEqualStrings(status, shown);
-    try std.testing.expectEqual(pending, data.object.get("retry_pending").?.bool);
+    try std.testing.expect(data.object.get("retry_pending") == null);
+    try std.testing.expectEqual(replied, data.object.get("result").? != .null);
 }
 
-test "native driver reports a turn pending exactly while recovery will replace or resume it" {
+test "native driver continues every unfinished turn lineage until it replies" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -409,7 +410,7 @@ test "native driver reports a turn pending exactly while recovery will replace o
     try fixture.open();
     driver.service = &fixture.service.?;
     try driver.attach(a);
-    try expectTurnProgress(a, &driver, old, "parked", true);
+    try expectTurnProgress(a, &driver, old, "parked", false);
     var index = try driver.rebuild(a);
     defer index.deinit();
     const snapshot = index.record(old).?.owner_snapshot.?;
@@ -420,35 +421,29 @@ test "native driver reports a turn pending exactly while recovery will replace o
         observation_blocked,
         waiting_workspace,
     };
-    const Case = struct {
-        status: native.tasks.Status,
-        blocker: ?Blocker,
-        attempt: u32,
-        pending: bool,
-    };
+    const Case = struct { status: native.tasks.Status, blocker: ?Blocker, moves: bool };
     const cases = [_]Case{
-        .{ .status = .blocked, .blocker = .credential_unavailable, .attempt = 0, .pending = true },
-        .{ .status = .blocked, .blocker = .model_unavailable, .attempt = 1, .pending = true },
-        .{ .status = .blocked, .blocker = .model_unavailable, .attempt = 2, .pending = false },
-        .{ .status = .blocked, .blocker = .incompatible_profile, .attempt = 1, .pending = true },
-        .{ .status = .blocked, .blocker = .observation_blocked, .attempt = 0, .pending = false },
-        .{ .status = .blocked, .blocker = .waiting_workspace, .attempt = 0, .pending = false },
-        .{ .status = .blocked, .blocker = null, .attempt = 0, .pending = false },
-        .{ .status = .parked, .blocker = null, .attempt = 2, .pending = true },
-        .{ .status = .failed, .blocker = null, .attempt = 1, .pending = true },
-        .{ .status = .cancelled, .blocker = null, .attempt = 2, .pending = false },
-        .{ .status = .unknown, .blocker = null, .attempt = 0, .pending = true },
-        .{ .status = .running, .blocker = null, .attempt = 0, .pending = false },
-        .{ .status = .waiting_input, .blocker = null, .attempt = 0, .pending = false },
+        .{ .status = .blocked, .blocker = .credential_unavailable, .moves = true },
+        .{ .status = .blocked, .blocker = .model_unavailable, .moves = true },
+        .{ .status = .blocked, .blocker = .incompatible_profile, .moves = true },
+        .{ .status = .blocked, .blocker = .observation_blocked, .moves = false },
+        .{ .status = .blocked, .blocker = .waiting_workspace, .moves = false },
+        .{ .status = .blocked, .blocker = null, .moves = false },
+        .{ .status = .parked, .blocker = null, .moves = true },
+        .{ .status = .failed, .blocker = null, .moves = true },
+        .{ .status = .cancelled, .blocker = null, .moves = true },
+        .{ .status = .unknown, .blocker = null, .moves = true },
+        .{ .status = .running, .blocker = null, .moves = false },
+        .{ .status = .waiting_input, .blocker = null, .moves = false },
     };
     const recovery_status = @import("../native/recovery_status.zig");
     for (cases) |case| {
         const action = recovery_status.classify(case.status, case.blocker, null, snapshot);
-        try std.testing.expectEqual(case.pending, recovery_status.continues(action, case.attempt));
+        try std.testing.expectEqual(case.moves, action != .stay);
     }
     const replacements = try driver.recoverTurns(a, 8);
     try std.testing.expectEqual(1, replacements.len);
     try expectTurnProgress(a, &driver, old, "queued", false);
     try finish(&fixture, replacements[0]);
-    try expectTurnProgress(a, &driver, old, "completed", false);
+    try expectTurnProgress(a, &driver, old, "completed", true);
 }

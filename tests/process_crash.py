@@ -16,9 +16,7 @@ PHASES = (
     "replacement_admitted",
     "read_dispatched",
     "read_captured",
-    "delivery_admitted",
-    "delivery_completed",
-    "delivery_consumed",
+    "genesis_admitted",
     "turn_admitted",
     "model_dispatched",
     "model_captured",
@@ -126,8 +124,7 @@ def main():
                     raise RuntimeError(f"{phase}: {error}\n{detail}") from error
             calls = [event for event in original if "acquired" in event]
             expected = 1 if phase in (
-                "read_dispatched", "read_captured", "delivery_consumed", "model_dispatched",
-                "model_captured"
+                "read_dispatched", "read_captured", "model_dispatched", "model_captured"
             ) else 0
             if len(calls) != expected:
                 raise RuntimeError(f"{phase}: injection missed the external call boundary")

@@ -128,7 +128,6 @@ fn fact(snapshot: retained.OwnedSnapshot) t.Settlement {
         .owner_snapshot = .{ .bytes = snapshot.bytes },
         .kind = .phase,
         .accounting = snapshot.value.accounting,
-        .delivery = null,
     };
 }
 

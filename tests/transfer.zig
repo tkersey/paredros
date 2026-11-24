@@ -13,6 +13,9 @@ const Application = struct {
 };
 const Fixture = @import("native_fixture.zig").Fixture(app.Types, Application);
 const continuity_control = @import("../native/continuity_control.zig");
+const fake = @import("github_fake.zig");
+const messages = @import("../native/messages.zig");
+const GithubFixture = @import("native_fixture.zig").Fixture(app.Types, fake.Application);
 const origin: t.Origin = .{ .local = .{ .uid = 501 } };
 
 const Clock = struct {
@@ -38,7 +41,7 @@ fn config() configuration.Config {
     };
 }
 
-fn source(f: *Fixture) transfer.Source {
+fn source(f: anytype) transfer.Source {
     return .{
         .namespace = f.service.?.namespace.identity,
         .build = @splat(2),
@@ -49,7 +52,7 @@ fn source(f: *Fixture) transfer.Source {
     };
 }
 
-fn finish(f: *Fixture, task: t.Id) !void {
+fn finish(f: anytype, task: t.Id) !void {
     const a = f.arena.allocator();
     var bytes = (try f.service.?.applicationValue(a, task, .input)).?;
     defer bytes.deinit();
@@ -61,7 +64,7 @@ fn finish(f: *Fixture, task: t.Id) !void {
     try std.testing.expectEqualDeep(task, try f.execute(operation, input.value));
 }
 
-fn completeAdmissions(f: *Fixture, driver: *Driver) !void {
+fn completeAdmissions(f: anytype, driver: *Driver) !void {
     var index = try driver.rebuild(f.arena.allocator());
     defer index.deinit();
     for (index.records) |record| {
@@ -82,7 +85,7 @@ fn writeBundle(
     });
 }
 
-fn importBundle(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !transfer.ImportProgress {
+fn importBundle(f: anytype, driver: *Driver, bundle: transfer.Bundle) !transfer.ImportProgress {
     const a = f.arena.allocator();
     const identity = continuity.hash(try c.encodeOwned(transfer.Bundle, a, bundle));
     const name = try std.fmt.allocPrint(a, "{s}.paredros", .{
@@ -94,7 +97,7 @@ fn importBundle(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !transfer
     return fileImport(f, driver, config(), operation, file);
 }
 
-fn importDone(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
+fn importDone(f: anytype, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
     const budget = bundle.members.items.len + bundle.lineages.items.len + 3;
     for (0..budget) |_| {
@@ -120,7 +123,8 @@ fn importAll(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !t.Id {
 fn verifyImported(f: *Fixture, driver: *Driver, target: t.Id) !void {
     const a = f.arena.allocator();
     var before = try driver.rebuild(a);
-    try std.testing.expect(before.obligation(target).?.recovery_hold);
+    try std.testing.expect(before.obligation(target).?.controls_pending);
+    try std.testing.expect(!before.obligation(target).?.ordinaryDispatch());
     try std.testing.expect(!try transfer.pendingControlsAdmitted(a, &before, target));
     try std.testing.expect(!transfer.importPending(&before));
     before.deinit();
@@ -142,8 +146,8 @@ fn verifyImported(f: *Fixture, driver: *Driver, target: t.Id) !void {
     try std.testing.expect(after.records[obligation.directives[0]].input.directive.body == .pause);
     const resumed = after.records[obligation.directives[1]].input.directive;
     try std.testing.expect(resumed.body == .@"resume");
-    try std.testing.expect(after.head(obligation).recovery_hold);
-    try std.testing.expect(!obligation.ordinaryDispatch());
+    try std.testing.expectEqual(.active, after.head(obligation).mode);
+    try std.testing.expect(obligation.ordinaryDispatch());
     try std.testing.expectEqual(.active, after.head(obligation).desired_mode);
 }
 
@@ -176,7 +180,7 @@ fn verifyCorruption(a: std.mem.Allocator, bundle: transfer.Bundle) !void {
     );
 }
 
-test "native continuity import maps pending controls once and resume retains recovery hold" {
+test "native continuity import maps pending controls once and resumes the prior mode" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -338,10 +342,6 @@ test "native continuity global turns preserve frozen context" {
     try destination.attach(to.arena.allocator());
     defer destination.detach();
     try importDone(&to, &destination, bundle.value);
-    const waiting = try transfer.admitPendingTurns(&destination, a, origin);
-    try std.testing.expect(waiting.admitted == null);
-    try std.testing.expectEqual(1, waiting.remaining);
-    try releaseImport(&to, &destination);
     const mapped = try transfer.admitPendingTurns(&destination, a, origin);
     try std.testing.expectEqual(0, mapped.remaining);
     try verifyFrozenTurn(&to, &destination, frozen, mapped.admitted.?);
@@ -354,21 +354,8 @@ test "native continuity global turns preserve frozen context" {
     try importDone(&to, &destination, bundle.value);
 }
 
-const restore = @import("../native/restore.zig");
+const transfer_marker = @import("../native/transfer_marker.zig");
 const eligibility = @import("../native/eligibility.zig");
-
-fn releaseImport(f: *Fixture, driver: *Driver) !void {
-    const a = f.arena.allocator();
-    const boundary = try restore.begin(driver, a, "import-ownership", origin);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    try std.testing.expect(index.import_hold and index.recovery_hold);
-    const reference: t.InputReference = .{
-        .task = boundary,
-        .digest = index.record(boundary).?.input_digest,
-    };
-    _ = try restore.release(driver, a, "import-release", origin, reference, true);
-}
 
 fn permitted(driver: *Driver, a: std.mem.Allocator, task: t.Id, capability: []const u8) !bool {
     var index = try driver.rebuild(a);
@@ -381,18 +368,7 @@ fn permitted(driver: *Driver, a: std.mem.Allocator, task: t.Id, capability: []co
     });
 }
 
-fn heldAsk(f: *Fixture, driver: *Driver) !t.Id {
-    const a = f.arena.allocator();
-    const task = try driver.turn(a, "held-event", origin, .{
-        .text = .{ .bytes = "Asked before the exclusive ownership release." },
-    });
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    try std.testing.expect(index.import_hold and !index.recovery_hold);
-    return task;
-}
-
-test "native continuity imported output waits for the exclusive ownership release" {
+test "native continuity imported turns and new asks run as soon as import completes" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -421,15 +397,12 @@ test "native continuity imported output waits for the exclusive ownership releas
     try destination.attach(to.arena.allocator());
     defer destination.detach();
     try importDone(&to, &destination, bundle.value);
-    try expectImportHold(a, &destination, true);
     const model = @import("../app/model_contract.zig").P.identity;
-    const asked = try heldAsk(&to, &destination);
-    try std.testing.expect(!try permitted(&destination, a, asked, model));
-    try std.testing.expect(!try destination.importedTurns(a));
-    try finish(&to, asked);
-    try releaseImport(&to, &destination);
-    try expectImportHold(a, &destination, false);
+    const asked = try destination.turn(a, "after-import", origin, .{
+        .text = .{ .bytes = "Asked right after import." },
+    });
     try std.testing.expect(try permitted(&destination, a, asked, model));
+    try finish(&to, asked);
     try std.testing.expect(try destination.importedTurns(a));
     const imported = try importedTurn(a, &destination);
     try std.testing.expect(try permitted(&destination, a, imported, model));
@@ -459,6 +432,7 @@ fn refusedCommand(
     driver: *Driver,
     operation: []const u8,
     command: @FieldType(control.Request, "command"),
+    expected: []const u8,
 ) !void {
     const bytes = try control.encode(a, .{
         .version = 1,
@@ -468,27 +442,14 @@ fn refusedCommand(
     const reply = try control.dispatch(a, driver, config(), 501, bytes);
     const value = (try @import("protean_native").json.parse(a, reply, .{})).value.object;
     try std.testing.expectEqualStrings("rejected", value.get("status").?.string);
-    try std.testing.expectEqualStrings("ContinuityImportHeld", value.get("error").?.string);
+    try std.testing.expectEqualStrings(expected, value.get("error").?.string);
 }
 
-fn refusedOutputIngress(a: std.mem.Allocator, driver: *Driver) !void {
-    const before = try recordCount(a, driver);
-    try refusedCommand(a, driver, "held-ask", .{ .ask = .{
-        .text = .{ .bytes = "status?" },
-        .target = null,
-    } });
-    try refusedCommand(a, driver, "held-monitor", .{ .monitor_add = .{
-        .wording = .{ .bytes = "watch" },
-        .interval_ms = null,
-    } });
-    try std.testing.expectEqual(before, try recordCount(a, driver));
-}
-
-fn heldExperiment(f: *Fixture, driver: *Driver) !t.Id {
+fn liveExperiment(f: *Fixture) !t.Id {
     const a = f.arena.allocator();
-    const admitted = try f.service.?.submit(a, "held-live-experiment", .{ .experiment = .{
+    const admitted = try f.service.?.submit(a, "live-experiment", .{ .experiment = .{
         .envelope = .{
-            .operation = .{ .bytes = "held-live-experiment" },
+            .operation = .{ .bytes = "live-experiment" },
             .stable_request = @splat(29),
             .origin = origin,
         },
@@ -498,13 +459,10 @@ fn heldExperiment(f: *Fixture, driver: *Driver) !t.Id {
         .evidence = .{ .items = &.{} },
         .live_model = true,
     } });
-    const model = @import("../app/model_contract.zig").P.identity;
-    try std.testing.expect(!try permitted(driver, a, admitted.receipt.task, model));
-    try std.testing.expect(try permitted(driver, a, admitted.receipt.task, experiment_codec));
     return admitted.receipt.task;
 }
 
-test "native continuity refuses boundaries until materialized and output ingress until released" {
+test "native continuity refuses ingress and transfer until import materializes" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -537,22 +495,18 @@ test "native continuity refuses boundaries until materialized and output ingress
     const before = try recordCount(a, &destination);
     try std.testing.expectError(
         error.ContinuityImportPending,
-        restore.begin(&destination, a, "boundary-during-import", origin),
+        transfer_marker.admit(&destination, a, "transfer-during-import", origin, @splat(3)),
     );
+    try refusedCommand(a, &destination, "pending-ask", .{ .ask = .{
+        .text = .{ .bytes = "status?" },
+        .target = null,
+    } }, "ContinuityImportPending");
     try std.testing.expectEqual(before, try recordCount(a, &destination));
     try importDone(&to, &destination, bundle.value);
-    try refusedOutputIngress(a, &destination);
-    const experiment = try heldExperiment(&to, &destination);
-    try releaseImport(&to, &destination);
-    try expectImportHold(a, &destination, false);
+    const experiment = try liveExperiment(&to);
     const model = @import("../app/model_contract.zig").P.identity;
     try std.testing.expect(try permitted(&destination, a, experiment, model));
-}
-
-fn expectImportHold(a: std.mem.Allocator, driver: *Driver, expected: bool) !void {
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    try std.testing.expectEqual(expected, index.import_hold);
+    try std.testing.expect(try permitted(&destination, a, experiment, experiment_codec));
 }
 
 fn secondGenesis() t.Genesis {
@@ -700,7 +654,8 @@ fn handoffFile(from: *Fixture, backup: *Backup, clock: *u8) ![]const u8 {
     const a = from.arena.allocator();
     const genesis = contracts.genesis();
     _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
-    var original = try hopDriver(from, clock);
+    var original = hopDriver(from, clock);
+    try original.attach(from.arena.allocator());
     var bundle = try transfer.capture(&original, a, source(from), .snapshot);
     defer bundle.deinit();
     try writeBundle(a, backup.temporary.dir, "handoff.paredros", bundle.value);
@@ -721,7 +676,8 @@ test "native continuity control import commits one manifest for one bundle" {
     defer backup.temporary.cleanup();
     const file = try handoffFile(&from, &backup, &clock);
     try to.init();
-    var destination = try hopDriver(&to, &clock);
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(to.arena.allocator());
     defer destination.detach();
     const manifest = try controlImport(&to, &destination, file);
     var index = try destination.rebuild(a);
@@ -801,7 +757,8 @@ test "native continuity import repeats after a configured route rename" {
     defer backup.temporary.cleanup();
     const file = try handoffFile(&from, &backup, &clock);
     try to.init();
-    var destination = try hopDriver(&to, &clock);
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(to.arena.allocator());
     defer destination.detach();
     const manifest = try controlImport(&to, &destination, file);
     var renamed = config();
@@ -826,7 +783,8 @@ test "native continuity import refuses a relative path sent to the daemon" {
     defer f.deinit();
     try f.init();
     var clock: u8 = 0;
-    var driver = try hopDriver(&f, &clock);
+    var driver = hopDriver(&f, &clock);
+    try driver.attach(f.arena.allocator());
     defer driver.detach();
     try std.testing.expectError(error.RelativeTransferPath, continuity_control.importBundle(
         &driver,
@@ -890,7 +848,8 @@ test "native continuity export finishes without a genesis this build can never r
     f.profile.bytes = "edited-native-test-profile";
     try f.open();
     var clock: u8 = 0;
-    var driver = try hopDriver(&f, &clock);
+    var driver = hopDriver(&f, &clock);
+    try driver.attach(f.arena.allocator());
     defer driver.detach();
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
@@ -919,7 +878,8 @@ test "native continuity export waits for an admitted genesis that has not run" {
     const genesis = contracts.genesis();
     _ = try f.service.?.submit(a, genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
-    var driver = try hopDriver(&f, &clock);
+    var driver = hopDriver(&f, &clock);
+    try driver.attach(f.arena.allocator());
     defer driver.detach();
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
@@ -991,7 +951,7 @@ test "native continuity export refuses an occupied name before fencing the sourc
     }
     var index = try driver.rebuild(a);
     defer index.deinit();
-    try std.testing.expect(index.recovery_purpose == null);
+    try std.testing.expect(!index.transferred());
     try std.testing.expectEqual(1, index.records.len);
     try std.testing.expectEqual(.active, index.head(index.obligation(target).?).mode);
 }
@@ -1071,7 +1031,6 @@ fn verifyCarried(driver: *Driver, a: std.mem.Allocator, bundle: transfer.Bundle)
 fn importTurnChain(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
     try importDone(f, driver, bundle);
-    try releaseImport(f, driver);
     const mapped = try transfer.admitPendingTurns(driver, a, origin);
     try finish(f, mapped.admitted.?);
 }
@@ -1290,7 +1249,7 @@ test "native continuity export refuses while an import is incomplete" {
     }
     var index = try destination.rebuild(a);
     defer index.deinit();
-    try std.testing.expect(index.recovery_purpose == null);
+    try std.testing.expect(!index.transferred());
     try std.testing.expectError(error.FileNotFound, backup.temporary.dir.statFile(
         std.testing.io,
         "early.paredros",
@@ -1299,7 +1258,7 @@ test "native continuity export refuses while an import is incomplete" {
 }
 
 fn fileImport(
-    f: *Fixture,
+    f: anytype,
     driver: *Driver,
     settings: configuration.Config,
     operation: []const u8,
@@ -1410,93 +1369,6 @@ test "native continuity import validates bindings after manifest admission" {
     defer index.deinit();
     try std.testing.expectEqual(0, index.continuity_import.?.members);
     try std.testing.expectEqual(0, index.obligations.len);
-}
-
-const delivery_target = @import("../native/delivery_target.zig");
-
-fn pendingGenesis(f: *Fixture, driver: *Driver) !t.Id {
-    const a = f.arena.allocator();
-    for (0..64) |_| {
-        var index = try driver.rebuild(a);
-        defer index.deinit();
-        if (index.continuity_import.?.phase == .genesis_pending) break;
-        _ = try driver.importStep(a);
-        try completeAdmissions(f, driver);
-    } else return error.ImportDidNotAdvance;
-    try std.testing.expect(try driver.importStep(a));
-    for (0..4096) |_| {
-        var index = try driver.rebuild(std.testing.allocator);
-        defer index.deinit();
-        var pending: ?t.Id = null;
-        var completed: usize = 0;
-        for (index.records) |record| {
-            if (record.input != .genesis) continue;
-            if (record.result == null) pending = record.task else completed += 1;
-        }
-        if (completed == 2) return error.BothGenesesCompleted;
-        if (completed == 1) return pending orelse error.MissingPendingGenesis;
-        switch (try f.service.?.pump(a)) {
-            .work => |work| {
-                try f.service.?.notSent(a, work);
-                return error.UnexpectedExternalWork;
-            },
-            .idle, .waiting, .progressed => {},
-        }
-    }
-    return error.GenesisDidNotComplete;
-}
-
-test "native continuity delivery target ignores lineages whose genesis is pending" {
-    var from: Fixture = .{};
-    defer from.deinit();
-    try from.init();
-    var to: Fixture = .{};
-    defer to.deinit();
-    const a = from.arena.allocator();
-    const first = contracts.genesis();
-    const second = secondGenesis();
-    const targets = [_]t.Id{
-        try from.execute(first.envelope.operation.bytes, .{ .genesis = first }),
-        try from.execute(second.envelope.operation.bytes, .{ .genesis = second }),
-    };
-    var clock: u8 = 0;
-    var original: Driver = .{
-        .service = &from.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-    };
-    try original.attach(a);
-    for (targets) |target| try std.testing.expectEqual(1, (try original.deliveries(a, target)).len);
-    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
-    defer bundle.deinit();
-    original.detach();
-    try from.close();
-    try to.init();
-    var destination: Driver = .{
-        .service = &to.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-        .bindings = configuration.bindings(config()),
-    };
-    try destination.attach(to.arena.allocator());
-    defer destination.detach();
-    var admitted = try importBundle(&to, &destination, bundle.value);
-    admitted.deinit(a);
-    try completeAdmissions(&to, &destination);
-    const pending = try pendingGenesis(&to, &destination);
-    var index = try destination.rebuild(a);
-    defer index.deinit();
-    try std.testing.expectEqual(1, index.imports.len);
-    try std.testing.expectEqual(1, index.obligations.len);
-    const lineage = index.record(pending).?.input.genesis.lineage;
-    var checked: usize = 0;
-    for (bundle.value.members.items) |item| {
-        if (item.data.kind != .delivery or !std.meta.eql(item.data.lineage, lineage)) continue;
-        var delivery = try continuity.decode(.delivery, a, item.data);
-        defer delivery.deinit();
-        _ = delivery_target.resolve(&index, delivery.value.input);
-        checked += 1;
-    }
-    try std.testing.expect(checked != 0);
-    _ = try destination.nextStep(a, index.obligations[0].task);
 }
 
 fn exportAs(
@@ -1706,7 +1578,7 @@ fn controlSource(f: *Fixture, clock: *u8) !transfer.OwnedBundle {
     return transfer.capture(&original, a, source(f), .snapshot);
 }
 
-test "native continuity control monitor add retried under the import hold returns the import" {
+test "native continuity control monitor add retried after import returns or conflicts" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -1726,26 +1598,23 @@ test "native continuity control monitor add retried under the import hold return
     try destination.attach(a);
     defer destination.detach();
     const imported = try importAll(&to, &destination, bundle.value);
-    try expectImportHold(a, &destination, true);
     const before = try recordCount(a, &destination);
     try std.testing.expectEqualDeep(imported, try controlTask(a, &destination, "monitor-retry"));
-    try controlRefused(a, &destination, "monitor-retry", "watch more", "ContinuityImportHeld");
-    try controlRefused(a, &destination, "monitor-fresh", "watch", "ContinuityImportHeld");
+    try controlRefused(a, &destination, "monitor-retry", "watch more", "OperationConflict");
     try std.testing.expectEqual(before, try recordCount(a, &destination));
     _ = try destination.directive(a, "monitor-reused", origin, imported, .{ .pause = {} });
     try controlRefused(a, &destination, "monitor-reused", "watch", "OperationConflict");
     try std.testing.expectEqualDeep(imported, try controlTask(a, &destination, "monitor-retry"));
-    try expectImportHold(a, &destination, true);
+    const fresh = try controlTask(a, &destination, "monitor-fresh");
+    try std.testing.expect(!std.meta.eql(imported, fresh));
 }
 
-fn hopDriver(f: *Fixture, clock: *u8) !Driver {
-    var driver: Driver = .{
+fn hopDriver(f: *Fixture, clock: *u8) Driver {
+    return .{
         .service = &f.service.?,
         .clock = .{ .context = clock, .now = Clock.now },
         .bindings = configuration.bindings(config()),
     };
-    try driver.attach(f.arena.allocator());
-    return driver;
 }
 
 fn admittedTurn(a: std.mem.Allocator, driver: *Driver) !t.Turn {
@@ -1772,7 +1641,8 @@ test "native continuity third hop maps an earlier hop's unfinished targeted turn
     const genesis = contracts.genesis();
     const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
-    var original = try hopDriver(&from, &clock);
+    var original = hopDriver(&from, &clock);
+    try original.attach(from.arena.allocator());
     _ = try original.turn(a, "targeted-unfinished-turn", origin, .{
         .text = .{ .bytes = "What changed on this obligation?" },
         .target = target,
@@ -1782,17 +1652,18 @@ test "native continuity third hop maps an earlier hop's unfinished targeted turn
     original.detach();
     try from.close();
     try to.init();
-    var middle = try hopDriver(&to, &clock);
+    var middle = hopDriver(&to, &clock);
+    try middle.attach(to.arena.allocator());
     try importDone(&to, &middle, first.value);
     var second = try transfer.capture(&middle, a, source(&to), .snapshot);
     defer second.deinit();
     middle.detach();
     try to.close();
     try third.init();
-    var last = try hopDriver(&third, &clock);
+    var last = hopDriver(&third, &clock);
+    try last.attach(third.arena.allocator());
     defer last.detach();
     const imported = try importAll(&third, &last, second.value);
-    try releaseImport(&third, &last);
     try std.testing.expect(try last.importedTurns(a));
     try std.testing.expectEqualDeep(imported, (try admittedTurn(a, &last)).target.?);
     try std.testing.expect(!try last.importedTurns(a));
@@ -1810,7 +1681,8 @@ test "native continuity snapshot during partial control mapping keeps source ord
     const genesis = contracts.genesis();
     const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
-    var original = try hopDriver(&from, &clock);
+    var original = hopDriver(&from, &clock);
+    try original.attach(from.arena.allocator());
     _ = try original.directive(a, "partial-pause", origin, target, .{ .pause = {} });
     _ = try original.directive(a, "partial-resume", origin, target, .{ .@"resume" = {} });
     var first = try transfer.capture(&original, a, source(&from), .snapshot);
@@ -1818,7 +1690,8 @@ test "native continuity snapshot during partial control mapping keeps source ord
     original.detach();
     try from.close();
     try to.init();
-    var middle = try hopDriver(&to, &clock);
+    var middle = hopDriver(&to, &clock);
+    try middle.attach(to.arena.allocator());
     const carried = try importAll(&to, &middle, first.value);
     const mapped = try transfer.admitPendingControls(&middle, a, carried, origin);
     try std.testing.expectEqual(1, mapped.remaining);
@@ -1832,7 +1705,8 @@ test "native continuity snapshot during partial control mapping keeps source ord
     middle.detach();
     try to.close();
     try third.init();
-    var last = try hopDriver(&third, &clock);
+    var last = hopDriver(&third, &clock);
+    try last.attach(third.arena.allocator());
     defer last.detach();
     try verifyImported(&third, &last, try importAll(&third, &last, second.value));
 }
@@ -1855,7 +1729,8 @@ test "native continuity import skips cancelled lineages and binds identity rathe
     _ = try from.execute(live.envelope.operation.bytes, .{ .genesis = live });
     const cancelled = try from.execute(stale.envelope.operation.bytes, .{ .genesis = stale });
     var clock: u8 = 0;
-    var original = try hopDriver(&from, &clock);
+    var original = hopDriver(&from, &clock);
+    try original.attach(from.arena.allocator());
     _ = try original.directive(a, "stale-cancel", origin, cancelled, .{ .cancel = {} });
     try finish(&from, (try original.nextStep(a, cancelled)).?);
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
@@ -1873,7 +1748,8 @@ test "native continuity import skips cancelled lineages and binds identity rathe
     original.detach();
     try from.close();
     try to.init();
-    var destination = try hopDriver(&to, &clock);
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(to.arena.allocator());
     defer destination.detach();
     try importDone(&to, &destination, bundle.value);
     var index = try destination.rebuild(a);
@@ -1883,4 +1759,65 @@ test "native continuity import skips cancelled lineages and binds identity rathe
     for (&modes, index.obligations) |*mode, *obligation| mode.* = index.head(obligation).mode;
     try std.testing.expect(modes[0] == .cancelled or modes[1] == .cancelled);
     try std.testing.expect(modes[0] != .cancelled or modes[1] != .cancelled);
+}
+
+fn githubDriver(f: *GithubFixture, clock: *fake.Clock) Driver {
+    return .{
+        .service = &f.service.?,
+        .clock = .{ .context = clock, .now = fake.Clock.now },
+        .bindings = configuration.bindings(config()),
+    };
+}
+
+test "native continuity import renders a digest over untold imported batches" {
+    var repository: fake.Source = .{ .ahead = true };
+    var from: GithubFixture = .{};
+    defer from.deinit();
+    from.profile.environment = &repository;
+    try from.initWithGrants(&.{@import("../app/github_contract.zig").identity});
+    var to: GithubFixture = .{};
+    defer to.deinit();
+    to.profile.environment = &repository;
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: fake.Clock = .{};
+    var original = githubDriver(&from, &clock);
+    try original.attach(a);
+    try fake.drive(&from, (try original.nextStep(a, target)).?);
+    repository.tip = 2;
+    clock.now_ms = 1_000_000;
+    try fake.drive(&from, (try original.nextStep(a, target)).?);
+    var exported = try original.rebuild(a);
+    const owed = exported.head(exported.obligation(target).?);
+    try std.testing.expectEqual(1, owed.observed.sequence);
+    try std.testing.expectEqual(0, owed.told.sequence);
+    exported.deinit();
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    try to.initWithGrants(&.{@import("../app/github_contract.zig").identity});
+    var destination = githubDriver(&to, &clock);
+    try destination.attach(a);
+    defer destination.detach();
+    try importDone(&to, &destination, bundle.value);
+    const local = blk: {
+        var index = try destination.rebuild(a);
+        defer index.deinit();
+        break :blk index.obligations[0].task;
+    };
+    try fake.settle(&to, &destination, local);
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    const head = index.head(index.obligation(local).?);
+    try std.testing.expectEqual(1, head.told.sequence);
+    try std.testing.expectEqual(1, head.observed.sequence);
+    const page = try messages.page(a, &index, local, null, 64, null);
+    const published = page.messages.items[page.messages.items.len - 1];
+    try std.testing.expectEqual(.digest, published.purpose);
+    try std.testing.expectEqual(0, published.prior.?.sequence);
+    try std.testing.expectEqual(1, published.through.?.sequence);
+    try std.testing.expectEqualDeep(@as(?t.Oid, fake.oid(2)), published.through.?.tip);
+    try std.testing.expectEqual(1, published.links.items.len);
 }

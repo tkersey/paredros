@@ -82,15 +82,6 @@ pub fn emit(
     const b = try c.author.body(function);
     const input = try b.parameter("input");
     const head = try b.field(input, "head");
-    try a.require(
-        c,
-        b,
-        try b.equal(
-            try b.variantTag(try b.field(head, "digest")),
-            try b.variantTag(try c.literal(?t.DigestIntent, null)),
-        ),
-        "render_digest_pending",
-    );
     const told = try b.field(head, "told");
     const prefix = try b.call(helpers.select, .{ .state = try b.product(
         try c.schema(Selection),
@@ -939,13 +930,13 @@ fn renderPrefix(
 ) !a.Value(t.Head) {
     const gap = try b.branch();
     const complete = try b.branch();
-    const gap_delivery = try delivery(
+    const gap_published = try publish(
         c,
         gap,
         input,
         prefix,
         try gapText(c, gap, input, prefix),
-        try c.literal(@FieldType(t.LogicalPayload, "comparison"), null),
+        try c.literal(?t.Comparison, null),
     );
     const rendered = try renderBody(c, complete, helpers, completion, input, prefix);
     const summary = try complete.field(rendered, "body");
@@ -960,15 +951,15 @@ fn renderPrefix(
         try a.failure(c, "render_text_capacity"),
     );
     const comparison = try complete.variant(
-        try c.schema(@FieldType(t.LogicalPayload, "comparison")),
+        try c.schema(?t.Comparison),
         "some",
         try complete.field(result, "comparison"),
     );
-    const complete_delivery = try delivery(c, complete, updated, prefix, text, comparison);
+    const complete_published = try publish(c, complete, updated, prefix, text, comparison);
     return b.conditional(
         try b.field(prefix, "gap"),
-        try gap.ret(gap_delivery),
-        try complete.ret(complete_delivery),
+        try gap.ret(gap_published),
+        try complete.ret(complete_published),
     );
 }
 
@@ -1019,59 +1010,47 @@ fn gapText(
     );
 }
 
-fn delivery(
+fn publish(
     c: protean.Context,
     b: anytype,
     input: a.Value(step.RenderInput),
     prefix: a.Value(Prefix),
     text: a.Value(t.Text),
-    comparison: a.Value(@FieldType(t.LogicalPayload, "comparison")),
+    comparison: a.Value(?t.Comparison),
 ) !a.Value(t.Head) {
     const head = try b.field(input, "head");
-    const admitted = try b.field(input, "step");
     const specification = try b.field(head, "specification");
-    const intent = try b.product(try c.schema(t.DeliveryIntent), .{
-        .key = try b.product(try c.schema(t.DeliveryKey), .{
-            .lineage = try b.field(head, "lineage"),
-            .purpose = try c.literal(@FieldType(t.DeliveryKey, "purpose"), .digest),
-            .identity = try b.field(try b.field(admitted, "envelope"), "stable_request"),
-            .generation = try b.constant(u32, 0),
-        }),
-        .payload = try b.product(try c.schema(t.LogicalPayload), .{
-            .schema_version = try b.constant(u32, 1),
-            .obligation = try b.variant(
-                try c.schema(?t.Id),
-                "some",
-                try b.field(admitted, "obligation"),
-            ),
-            .specification_revision = try b.field(specification, "revision"),
-            .prior_sequence = try b.field(try b.field(head, "told"), "sequence"),
-            .through_sequence = try b.field(prefix, "through"),
-            .frozen_text = text,
-            .prompt = try c.literal(?t.Digest, null),
-            .supersedes = try c.literal(?t.DeliveryKey, null),
-            .coverage = try b.variant(try c.schema(?t.Frontier), "some", try b.product(
-                try c.schema(t.Frontier),
-                .{
-                    .sequence = try b.field(prefix, "through"),
-                    .epoch = try b.field(prefix, "epoch"),
-                    .tip = try b.variant(try c.schema(?t.Oid), "some", try b.field(prefix, "tip")),
-                },
-            )),
-            .issue = try b.constant(u32, 0),
-            .buttons = try c.literal(@FieldType(t.LogicalPayload, "buttons"), .{ .items = &.{} }),
-            .comparison = comparison,
-        }),
+    const through = try b.product(try c.schema(t.Frontier), .{
+        .sequence = try b.field(prefix, "through"),
+        .epoch = try b.field(prefix, "epoch"),
+        .tip = try b.variant(try c.schema(?t.Oid), "some", try b.field(prefix, "tip")),
     });
+    const Purpose = @FieldType(t.Notification, "purpose");
+    const covered = try b.product(try c.schema(@FieldType(Purpose, "digest")), .{
+        .prior = try b.field(head, "told"),
+        .through = through,
+    });
+    const message = try b.product(try c.schema(t.Notification), .{
+        .specification_revision = try b.field(specification, "revision"),
+        .text = text,
+        .comparison = comparison,
+        .purpose = try b.variant(try c.schema(Purpose), "digest", covered),
+    });
+    const overflow = try a.failure(c, "render_pacing_overflow");
+    const interval = try b.convertInteger(
+        try c.schema(i64),
+        try b.field(try b.field(specification, "policies"), "notification_interval_ms"),
+        .{ .overflow = overflow },
+    );
     return b.update(head, .{
-        .digest = try b.variant(try c.schema(?t.DigestIntent), "some", try b.product(
-            try c.schema(t.DigestIntent),
-            .{
-                .delivery = intent,
-                .hold = try c.literal(t.DeliveryHold, .none),
-                .not_before_ms = try b.field(head, "clock_ms"),
-            },
-        )),
+        .message = try b.variant(try c.schema(?t.Notification), "some", message),
+        .told = through,
+        .render_not_before_ms = try b.checked(
+            .add,
+            try b.field(head, "clock_ms"),
+            interval,
+            .{ .overflow = overflow },
+        ),
         .render_failure_streak = try b.constant(u32, 0),
     });
 }

@@ -7,7 +7,6 @@ const compatibility = @import("compatibility.zig");
 const control = @import("control.zig");
 const cli = @import("cli.zig");
 const socket = @import("control_socket.zig");
-const restore = @import("restore.zig");
 const continuity = @import("continuity.zig");
 const continuity_control = @import("continuity_control.zig");
 const Driver = @import("driver.zig").Driver(t);
@@ -58,10 +57,9 @@ pub fn run(init: std.process.Init, assets: native.discovery.Assets) !u8 {
     var config = try configuration.load(init.gpa, init.io, path, socket.currentUid());
     defer config.deinit();
     if (same(command, "serve")) {
-        const recover = args.command.len == 2 and same(args.command[1], "--recover");
-        if (args.command.len != 1 and !recover) return error.InvalidArguments;
+        if (args.command.len != 1) return error.InvalidArguments;
         const config_path = try cli.callerPath(arena.allocator(), init.io, path);
-        return serve(init, assets, config.value, config_path, recover);
+        return serve(init, assets, config.value, config_path);
     }
     if (same(command, "namespace")) {
         if (args.command.len != 2 or !same(args.command[1], "check")) return error.InvalidArguments;
@@ -235,11 +233,22 @@ fn awaitTurn(init: std.process.Init, connection: *socket.Client, admission: []co
         const elapsed = @as(i128, std.Io.Clock.awake.now(init.io).toMilliseconds()) - started;
         if (elapsed >= 300_000) {
             try output(init.io, response);
-            return 75;
+            return pendingReply(init, task);
         }
         try std.Io.sleep(init.io, .fromMilliseconds(200), .awake);
     }
     try output(init.io, admission);
+    return pendingReply(init, task);
+}
+
+fn pendingReply(init: std.process.Init, task: []const u8) !u8 {
+    const message = try std.fmt.allocPrint(
+        init.gpa,
+        "paredros: the reply is still pending; read it later with `task show {s}`\n",
+        .{task},
+    );
+    defer init.gpa.free(message);
+    try std.Io.File.stderr().writeStreamingAll(init.io, message);
     return 75;
 }
 
@@ -248,19 +257,8 @@ fn turnCode(a: std.mem.Allocator, bytes: []const u8) !?u8 {
     var parsed = try native.json.parse(a, bytes, .{ .bytes = control.frame_bytes_max });
     defer parsed.deinit();
     const data = native.json.get(parsed.value, "data") orelse return error.InvalidResponse;
-    if (native.json.get(data, "retry_pending")) |pending| {
-        if (pending != .bool) return error.InvalidResponse;
-        if (pending.bool) return null;
-    }
-    const status = try native.json.text(native.json.get(data, "task_status") orelse
-        return error.InvalidResponse);
-    const value = std.meta.stringToEnum(native.tasks.Status, status) orelse
-        return error.InvalidResponse;
-    return switch (value) {
-        .completed => 0,
-        .queued, .running, .cancelling => null,
-        .waiting_input, .parked, .blocked, .unknown, .failed, .cancelled => 1,
-    };
+    const result = native.json.get(data, "result") orelse return error.InvalidResponse;
+    return if (result == .null) null else 0;
 }
 
 fn relay(init: std.process.Init, connection: *socket.Client) !u8 {
@@ -458,7 +456,6 @@ fn serve(
     assets: native.discovery.Assets,
     config: configuration.Config,
     config_path: []const u8,
-    recover: bool,
 ) !u8 {
     const a = init.gpa;
     var io = init.io;
@@ -506,14 +503,13 @@ fn serve(
         .context = &runtime_context,
         .call = dispatch,
         .observation = .{
-            .on_start = !recover and config.mode == .offline,
+            .on_start = config.mode == .offline,
             .enabled = acceptingControls,
             .read_only = control.observingFrame,
             .call = dispatchAttached,
         },
     }, .{ .stop_grace_ms = 45_000 });
     defer releaseDaemon(a, io, &daemon);
-    if (recover) try beginRecovery(a, io, &driver, config.current_uid);
     return loop(a, io, &daemon);
 }
 
@@ -544,16 +540,6 @@ fn continuityEnvironment(
 
 fn acceptingControls() bool {
     return stop_requests.load(.acquire) == 0;
-}
-
-fn beginRecovery(a: std.mem.Allocator, io: std.Io, driver: *Driver, uid: u32) !void {
-    var random: [16]u8 = undefined;
-    try io.randomSecure(&random);
-    const operation = try std.fmt.allocPrint(a, "restore:{s}", .{
-        std.fmt.bytesToHex(random, .lower),
-    });
-    defer a.free(operation);
-    _ = try restore.begin(driver, a, operation, .{ .local = .{ .uid = uid } });
 }
 
 const Signals = struct {
