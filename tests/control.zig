@@ -1088,6 +1088,7 @@ test "control malformed and unsupported intervals are refused without admission"
     const hex_id = std.fmt.bytesToHex(target, .lower);
     const longest = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max});
     const excess = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max + 1});
+    const overflow = "{\"notification_interval_ms\":31622400001}";
     const Refusal = struct { args: []const []const u8, error_name: []const u8 };
     for ([_]Refusal{
         .{
@@ -1102,6 +1103,10 @@ test "control malformed and unsupported intervals are refused without admission"
         .{
             .args = &.{ "monitor", "amend", &hex_id, "0", "--interval-ms", "0" },
             .error_name = "InvalidInterval",
+        },
+        .{
+            .args = &.{ "monitor", "amend", &hex_id, "0", "--policies-json", overflow },
+            .error_name = "PolicyOutOfBounds",
         },
         .{
             .args = &.{ "proposal", "confirm", tokens[0] },

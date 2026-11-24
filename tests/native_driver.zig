@@ -128,6 +128,57 @@ test "native driver replaces a fenced live step with a receipt bound fold" {
     try std.testing.expectEqual(0, after.head(after.obligation(target).?).accounting.known_calls);
 }
 
+test "native driver fences one unusable obligation and keeps advancing the others" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const initial = fixture_values.genesis();
+    const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    var other = fixture_values.genesis();
+    other.envelope.operation = .{ .bytes = "local-genesis-other" };
+    other.lineage = @splat(9);
+    const healthy = try fixture.execute(other.envelope.operation.bytes, .{ .genesis = other });
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    defer driver.faults.deinit();
+    _ = (try driver.nextStep(a, target)).?;
+    _ = try driver.directive(a, "pause-unusable", .{ .local = .{ .uid = 501 } }, target, .{
+        .pause = {},
+    });
+    const replacement = (try driver.nextStep(a, target)).?;
+    try cancelTurn(&fixture, replacement, "cancel-fold");
+    const faulted = try driver.advance(a, target, .step);
+    try std.testing.expectEqualStrings("UnusableFoldAttempt", faulted.faulted);
+    var index = try driver.rebuild(a);
+    try std.testing.expectEqualStrings("UnusableFoldAttempt", index.obligation(target).?.fault.?);
+    try std.testing.expect(!index.obligation(target).?.ordinaryDispatch());
+    try std.testing.expectEqual(null, index.obligation(healthy).?.fault);
+    index.deinit();
+    try std.testing.expectEqual(.idle, try driver.advance(a, target, .step));
+    try std.testing.expectEqual(.progressed, try driver.advance(a, healthy, .step));
+}
+
+test "native driver recovers a captured step before a pause fence replaces it" {
+    const decide = @import("../native/recovery_status.zig").decide;
+    try std.testing.expectEqualDeep(
+        @as(@TypeOf(decide(.{ .stay = {} }, false, false)), .{ .resume_captured = {} }),
+        decide(.{ .resume_captured = {} }, true, false),
+    );
+    try std.testing.expectEqual(.control, decide(.{ .stay = {} }, true, false).replace);
+    try std.testing.expectEqual(.control, decide(.{ .resume_parked = {} }, true, false).replace);
+    try std.testing.expect(decide(.{ .stay = {} }, true, true) == .none);
+    try std.testing.expect(decide(.{ .replace = .failed }, false, true) == .unusable);
+    try std.testing.expect(decide(.{ .replace = .control }, true, true) == .unusable);
+    try std.testing.expectEqual(.unknown, decide(.{ .replace = .unknown }, true, true).replace);
+    try std.testing.expectEqual(.rejected, decide(.{ .replace = .rejected }, false, false).replace);
+}
+
 test "native driver freezes turn context on first admission and rejects changed replay" {
     var fixture: Fixture = .{};
     defer fixture.deinit();

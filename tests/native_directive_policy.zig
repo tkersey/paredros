@@ -17,11 +17,11 @@ fn head() t.Head {
     value.attempt = 2;
     value.specification.revision = 6;
     value.clock_ms = 1000;
-    value.next_due_ms = 5000;
+    value.schedule.next_due_ms = 5000;
     value.observed = .{ .sequence = 18, .epoch = 2, .tip = @splat('a') };
     value.told = .{ .sequence = 9, .epoch = 1, .tip = @splat('b') };
-    value.source_not_before_ms = 1700;
-    value.render_not_before_ms = 1800;
+    value.schedule.source_not_before_ms = 1700;
+    value.schedule.render_not_before_ms = 1800;
     value.accounting = .{
         .known_calls = 11,
         .known_input_tokens = 90,
@@ -115,7 +115,7 @@ test "native directive policy composes modes coalesced checks and refuses final 
     var expected = selected(head(), again);
     expected.mode = .paused;
     expected.desired_mode = .paused;
-    expected.next_due_ms = expected.clock_ms;
+    expected.schedule.next_due_ms = expected.clock_ms;
     try std.testing.expectEqualDeep(expected, paused.head);
     for (0..3) |i| try expectApplied(paused, i);
     var stopped = head();
@@ -181,6 +181,7 @@ test "native directive policy delegates amendments adoption and reversion with s
     expected.specification.revision = 9;
     expected.specification.interval_ms = 2000;
     expected.specification.wording = amendment().wording.?;
+    expected.schedule.next_due_ms = 2100;
     try std.testing.expectEqualDeep(expected, value.head);
     for (0..3) |i| try expectApplied(value, i);
     try expectRejected(value, 3, "stale_revision");
@@ -228,7 +229,7 @@ test "native directive policy records source gaps preserving earlier owed record
         .provider_date = null,
         .commit_count = 0,
     };
-    expected.next_due_ms = previous.clock_ms;
+    expected.schedule.next_due_ms = previous.clock_ms;
     try std.testing.expectEqualDeep(expected, value.head);
     try std.testing.expectEqualDeep(gap, value.gap.?);
     try expectApplied(value, 0);

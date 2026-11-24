@@ -1,11 +1,14 @@
+const std = @import("std");
 const protean = @import("protean");
 const t = @import("application_types");
 const a = @import("author.zig");
 const notification = @import("notification.zig");
+const specification_bounds = @import("specification.zig");
 
 pub const Function = a.Function(struct { input: t.Genesis }, t.Head);
 
 pub fn emit(c: protean.Context) !Function {
+    const validate = try specification_bounds.emit(c);
     const function = try c.author.function("paredros genesis", .{
         .input = try c.schema(t.Genesis),
     }, try c.schema(t.Head), &.{});
@@ -16,10 +19,11 @@ pub fn emit(c: protean.Context) !Function {
         try b.field(try b.field(input, "envelope"), "version"),
         try b.constant(u32, 1),
     ), "unsupported_input_version");
-    try a.require(c, b, try b.less(
-        try b.constant(u64, 0),
-        try b.field(specification, "interval_ms"),
-    ), "invalid_interval");
+    try a.require(c, b, try specification_bounds.valid(
+        c,
+        b,
+        try b.call(validate, .{ .specification = specification }),
+    ), "invalid_specification");
     const imported = try b.field(input, "imported");
     const fresh = try b.caseOf(imported, "none");
     const restored = try b.caseOf(imported, "some");
@@ -62,15 +66,20 @@ fn freshHead(c: protean.Context, b: anytype, input: a.Value(t.Genesis)) !a.Value
         .question = try c.literal(?t.Question, null),
         .method = try c.literal(t.Method, .{ .ordinary = {} }),
         .method_disposition = try c.literal(?t.MethodDisposition, null),
-        .next_due_ms = try b.field(input, "clock_ms"),
+        .schedule = try b.product(try c.schema(t.Schedule), .{
+            .next_due_ms = try b.field(input, "clock_ms"),
+            .source_not_before_ms = try b.field(input, "clock_ms"),
+            .render_not_before_ms = try b.field(input, "clock_ms"),
+        }),
+        .provider_not_before_ms = try b.constant(i64, std.math.minInt(i64)),
         .clock_ms = try b.field(input, "clock_ms"),
         .skipped_slots = try b.constant(u64, 0),
+        .clock_regressions = try b.constant(u64, 0),
+        .last_clock_regression = try c.literal(?t.ClockRegression, null),
         .phase = try c.literal(t.Phase, .fold),
         .previous_check_overran = try b.constant(bool, false),
         .check_failure_streak = try b.constant(u32, 0),
         .render_failure_streak = try b.constant(u32, 0),
-        .source_not_before_ms = try b.field(input, "clock_ms"),
-        .render_not_before_ms = try b.field(input, "clock_ms"),
         .accounting = try c.literal(t.Accounting, .{}),
     });
 }
@@ -109,7 +118,9 @@ fn importedHead(
         .mode = prior,
         .message = try notification.pending(c, b, previous),
         .clock_ms = try b.field(input, "clock_ms"),
-        .next_due_ms = try b.field(input, "clock_ms"),
+        .schedule = try b.update(try b.field(previous, "schedule"), .{
+            .next_due_ms = try b.field(input, "clock_ms"),
+        }),
     });
 }
 

@@ -56,7 +56,7 @@ test "native source publication retains baseline complete batches and unchanged 
     try std.testing.expectEqual(@as(?t.Oid, @splat('a')), baseline.head.observed.tip);
     try std.testing.expectEqualDeep(baseline.head.observed, baseline.head.told);
     try std.testing.expectEqual(@as(?t.Batch, null), baseline.batch);
-    try std.testing.expectEqual(900_100, baseline.head.next_due_ms);
+    try std.testing.expectEqual(900_100, baseline.head.schedule.next_due_ms);
     try fixture.close();
     try fixture.open();
     var acquired = result(.complete, @splat('a'), @splat('b'));

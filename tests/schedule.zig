@@ -23,7 +23,7 @@ test "schedule coalesces missed slots without shifting the anchor" {
     try std.testing.expectEqual(successor.next_due_ms, manual.next_due_ms);
 }
 
-test "clock regression recomputes schedule while provider backoff preserves duration" {
+test "clock regression rebases the schedule by its remaining duration" {
     const state: schedule.State = .{
         .anchor_ms = 100,
         .interval_ms = 900_000,
@@ -34,15 +34,8 @@ test "clock regression recomputes schedule while provider backoff preserves dura
     try std.testing.expect(regressed.clock_regressed);
     try std.testing.expect(!regressed.due);
     try std.testing.expectEqual(2_700_100, regressed.next_due_ms);
-    const retry: schedule.ProviderBackoff = .{
-        .admitted_wait_ms = 60_000,
-        .started_monotonic_ms = 50_000,
-    };
-    try std.testing.expectEqual(59_000, retry.remaining(51_000));
-    try std.testing.expectEqual(60_000, retry.remaining(40_000));
-    const restarted = schedule.ProviderBackoff.afterRestart(60_000, 2_000);
-    try std.testing.expectEqual(60_000, restarted.remaining(2_000));
-    try std.testing.expectEqual(0, restarted.remaining(62_000));
+    try std.testing.expectEqual(1_800_100, try schedule.rebased(3_000_000, 3_600_100, 1_800_100));
+    try std.testing.expectEqual(1_860_100, try schedule.rebased(3_660_100, 3_600_100, 1_800_100));
 }
 
 test "anchor arithmetic is strict and checked across signed timestamp boundaries" {

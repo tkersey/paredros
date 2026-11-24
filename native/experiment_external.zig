@@ -355,7 +355,7 @@ fn preserved(a: std.mem.Allocator, before: t.Head, after: t.Head) !bool {
     projected.message = before.message;
     projected.told = before.told;
     projected.render_failure_streak = before.render_failure_streak;
-    projected.render_not_before_ms = before.render_not_before_ms;
+    projected.schedule.render_not_before_ms = before.schedule.render_not_before_ms;
     return std.meta.eql(try digest(a, t.Head, before), try digest(a, t.Head, projected));
 }
 

@@ -42,7 +42,7 @@ pub fn emit(c: protean.Context) !Function {
         .clock_ms = try b.field(previous, "clock_ms"),
     });
     const head = try b.update(previous, .{
-        .next_due_ms = due,
+        .schedule = try b.update(try b.field(previous, "schedule"), .{ .next_due_ms = due }),
         .phase = try c.literal(t.Phase, .check),
         .previous_check_overran = try b.less(due, try b.field(observed_time, "acquired_ms")),
     });

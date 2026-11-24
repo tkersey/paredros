@@ -90,7 +90,7 @@ fn sample(f: *Fixture, driver: *Driver, session: *native.Session(t), target: t.I
     try std.testing.expectEqual(0, head.observed.sequence);
     try std.testing.expectEqual(0, head.last_observation.?.commit_count);
     try std.testing.expectEqual(0, head.check_failure_streak);
-    clock_ms = head.next_due_ms;
+    clock_ms = head.schedule.next_due_ms;
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(std.testing.io, &buffer);
     try std.json.Stringify.value(.{

@@ -42,6 +42,7 @@ pub const ExportProgress = struct {
     digest: ?t.Digest = null,
     name: t.Name,
 };
+pub const ExportOutcome = union(enum) { progress: ExportProgress, stranded: []const t.Id };
 
 pub fn exportBundle(
     driver: anytype,
@@ -51,7 +52,7 @@ pub fn exportBundle(
     operation: []const u8,
     origin: t.Origin,
     request: Export,
-) !ExportProgress {
+) !ExportOutcome {
     const directory = config.backup_directory orelse return error.MissingBackupDirectory;
     const stable = try admission.stableDigest(a, .{
         .request = request,
@@ -71,8 +72,12 @@ pub fn exportBundle(
         .operation = .{ .bytes = selected },
         .name = request.name,
     };
-    if (!request.snapshot and !try finalize(driver, a, &index, selected, origin, stable))
-        return progress;
+    if (!request.snapshot) {
+        const stranded = try transfer.strandedGeneses(driver.service, a, &index);
+        if (stranded.len != 0) return .{ .stranded = stranded };
+        if (!try finalize(driver, a, &index, selected, origin, stable))
+            return .{ .progress = progress };
+    }
     progress.cut = try exportCut(driver, a, &index, environment.source, .{
         .operation = selected,
         .kind = .continuity_cut,
@@ -83,7 +88,7 @@ pub fn exportBundle(
     var committed = try driver.rebuild(a);
     defer committed.deinit();
     progress.phase = .cut_pending;
-    if (committed.record(progress.cut.?).?.result == null) return progress;
+    if (committed.record(progress.cut.?).?.result == null) return .{ .progress = progress };
     progress.digest = try transfer.writeCommitted(
         a,
         environment.io,
@@ -93,7 +98,7 @@ pub fn exportBundle(
         progress.cut.?,
     );
     progress.phase = .written;
-    return progress;
+    return .{ .progress = progress };
 }
 
 fn exportOperation(

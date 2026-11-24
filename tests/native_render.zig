@@ -136,7 +136,7 @@ fn head(last: u64) t.Head {
     value.observed = .{ .sequence = last, .epoch = 2, .tip = oid(@intCast(last)) };
     value.told = .{ .sequence = 0, .epoch = 2, .tip = oid(0) };
     value.clock_ms = 2000;
-    value.next_due_ms = 5000;
+    value.schedule.next_due_ms = 5000;
     value.render_failure_streak = 2;
     value.accounting = .{ .known_calls = 3, .possible_charged_calls = 1 };
     return value;
@@ -251,12 +251,12 @@ fn assertFrame(previous: t.Head, result: t.Head, last: Fact) !t.Notification {
     unchanged.message = previous.message;
     unchanged.told = previous.told;
     unchanged.render_failure_streak = previous.render_failure_streak;
-    unchanged.render_not_before_ms = previous.render_not_before_ms;
+    unchanged.schedule.render_not_before_ms = previous.schedule.render_not_before_ms;
     try std.testing.expectEqualDeep(previous, unchanged);
     try std.testing.expectEqual(0, result.render_failure_streak);
     try std.testing.expectEqualDeep(through, result.told);
     const interval: i64 = @intCast(previous.specification.policies.notification_interval_ms);
-    try std.testing.expectEqual(previous.clock_ms + interval, result.render_not_before_ms);
+    try std.testing.expectEqual(previous.clock_ms + interval, result.schedule.render_not_before_ms);
     try std.testing.expectEqual(
         previous.specification.revision,
         published.specification_revision,

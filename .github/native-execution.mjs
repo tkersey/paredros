@@ -2,7 +2,7 @@ const group = (count, ...filters) => ({count, filters});
 
 const suites = {
   authority: {
-    driver: group(18, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
+    driver: group(20, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
     proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
       'control proposal consumer confirms each proposal once'),
     controls: group(74, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control reads messages', 'control protocol freezes',
@@ -11,7 +11,7 @@ const suites = {
   },
   providers: 31,
   'transitions-first': 11,
-  'transitions-second': 15,
+  'transitions-second': 17,
   'transitions-third': 12,
   rendering: {
     frames: group(4, 'native_rendering_test.', 'native render frame retains truthful',
@@ -19,7 +19,7 @@ const suites = {
     escaping: group(2, 'native render frame budgets hostile escaping', 'native render frame neutralizes'),
     proposal: group(1, 'native conversation retains maximal exact proposal body'),
     multibyte: group(1, 'native conversation retains full multibyte'),
-    publication: group(13, 'native render frame keeps Unicode', 'native render frame empty evidence',
+    publication: group(14, 'native render frame keeps Unicode', 'native render frame empty evidence',
       'native conversation describes exact hostile Unicode', 'native conversation describes neutralized',
       'tests.native_check_publish.', 'tests.native_step.'),
     bytes: group(4, 'native ordinary render chooses an exact', 'native ordinary render bounds its exact',
@@ -42,8 +42,8 @@ const suites = {
       'native_methods_test.', 'tests.native_method.', 'tests.method_catalog.', 'tests.method.',
       'tests.experiment.', 'tests.native_genesis.', 'tests.contracts.'),
   },
-  'continuity-first': 29,
-  'continuity-second': 10,
+  'continuity-first': 30,
+  'continuity-second': 11,
   'continuity-third': 9,
   product: 5,
   crash: 8,

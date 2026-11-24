@@ -47,6 +47,7 @@ const ClipInput = struct {
     output: cts.Utf8,
 };
 const Clip = a.Function(struct { state: ClipInput }, ClipResult);
+pub const Neutral = a.Function(struct { text: t.Text }, t.Text);
 const Contains = a.Function(struct { commits: Commits, oid: t.Oid, index: u64 }, bool);
 const List = a.Function(struct { commits: Commits, index: u64, frame: Frame }, Frame);
 const Notes = a.Function(struct {
@@ -102,6 +103,22 @@ fn clipped(
         .used = try b.constant(u64, 0),
         .output = try literal(c, ""),
     }) });
+}
+
+pub fn neutral(c: protean.Context) !Neutral {
+    const clip = try clipFunction(c);
+    const function = try c.author.function("neutralize untrusted text", .{
+        .text = try c.schema(t.Text),
+    }, try c.schema(t.Text), &.{});
+    const b = try c.author.body(function);
+    const result = try clipped(c, b, clip, try b.parameter("text"), std.math.maxInt(u64));
+    try c.author.define(function, try b.ret(try b.blobConcat(
+        try c.schema(t.Text),
+        try c.literal(t.Text, .{ .bytes = "" }),
+        try b.field(result, "text"),
+        try failure(c),
+    )));
+    return function;
 }
 
 fn clipFunction(c: protean.Context) !Clip {

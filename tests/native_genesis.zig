@@ -49,15 +49,20 @@ pub fn expectedFresh(input: t.Genesis) t.Head {
         .message = activation,
         .question = null,
         .method = .{ .ordinary = {} },
-        .next_due_ms = input.clock_ms,
+        .schedule = .{
+            .next_due_ms = input.clock_ms,
+            .source_not_before_ms = input.clock_ms,
+            .render_not_before_ms = input.clock_ms,
+        },
+        .provider_not_before_ms = std.math.minInt(i64),
         .clock_ms = input.clock_ms,
         .skipped_slots = 0,
+        .clock_regressions = 0,
+        .last_clock_regression = null,
         .phase = .fold,
         .previous_check_overran = false,
         .check_failure_streak = 0,
         .render_failure_streak = 0,
-        .source_not_before_ms = input.clock_ms,
-        .render_not_before_ms = input.clock_ms,
         .accounting = .{},
     };
 }
@@ -80,7 +85,10 @@ test "native genesis retains exact fresh head and rejects invalid inputs across 
     try fixture.rejected("bad-version", invalid, "unsupported_input_version");
     invalid = input;
     invalid.specification.interval_ms = 0;
-    try fixture.rejected("bad-interval", invalid, "invalid_interval");
+    try fixture.rejected("bad-interval", invalid, "invalid_specification");
+    invalid = input;
+    invalid.specification.policies.phase_attempts = 21;
+    try fixture.rejected("bad-policy", invalid, "invalid_specification");
     invalid = input;
     invalid.specification.revision = 1;
     try fixture.rejected("bad-revision", invalid, "invalid_initial_revision");
@@ -161,7 +169,7 @@ test "native genesis import resumes the prior mode and emits a pending prompt ag
         expected.consumed = .{ .items = &.{} };
         expected.mode = case.mode;
         expected.clock_ms = input.clock_ms;
-        expected.next_due_ms = input.clock_ms;
+        expected.schedule.next_due_ms = input.clock_ms;
         expected.message = if (case.asked) .{
             .specification_revision = question.specification_revision,
             .text = question.prompt,

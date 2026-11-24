@@ -10,11 +10,37 @@ const eligibility = @import("eligibility.zig");
 const recovery = @import("recovery.zig");
 const commands = @import("commands.zig");
 const configuration = @import("configuration.zig");
+const bounds = @import("../app/bounds.zig");
 
 pub const Clock = struct {
     context: *anyopaque,
     now: *const fn (*anyopaque) anyerror!i64,
 };
+pub const Fatal = error{
+    StorageUnavailable,
+    CorruptState,
+    OutOfMemory,
+    DriverDetached,
+    ClockOutOfRange,
+};
+pub const Part = enum { controls, step };
+pub const Advance = union(enum) { idle: void, progressed: void, faulted: []const u8 };
+pub const Faults = struct {
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    reasons: std.AutoHashMapUnmanaged(t.Id, []const u8) = .empty,
+
+    pub fn deinit(self: *Faults) void {
+        self.reasons.deinit(self.allocator);
+        self.* = .{ .allocator = self.allocator };
+    }
+};
+
+pub fn split(err: anyerror) Fatal![]const u8 {
+    inline for (@typeInfo(Fatal).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return @field(Fatal, name);
+    }
+    return @errorName(err);
+}
 
 pub fn Driver(comptime Types: type) type {
     return struct {
@@ -25,6 +51,7 @@ pub fn Driver(comptime Types: type) type {
         bindings: ?configuration.Bindings = null,
         page_limit: u32 = 128,
         attached: bool = false,
+        faults: Faults = .{},
         after_rebuild: ?struct {
             context: *anyopaque,
             observe: *const fn (*anyopaque, std.mem.Allocator, *const idx.Index) anyerror!void,
@@ -55,6 +82,10 @@ pub fn Driver(comptime Types: type) type {
         pub fn rebuild(self: *Self, a: std.mem.Allocator) !idx.Index {
             var index = try catalog.rebuild(self.service, a, self.page_limit);
             errdefer index.deinit();
+            for (index.obligations) |*obligation| {
+                if (obligation.fault == null)
+                    obligation.fault = self.faults.reasons.get(obligation.task);
+            }
             if (self.after_rebuild) |observer| {
                 self.after_rebuild = null;
                 try observer.observe(observer.context, a, &index);
@@ -207,8 +238,7 @@ pub fn Driver(comptime Types: type) type {
                 const head = index.head(obligation);
                 if (head.mode == .cancelled or head.mode == .transferred)
                     return error.FinalObligation;
-                if (self.body == .amend) if (self.body.amend.interval_ms) |interval_ms|
-                    try admission.interval(interval_ms);
+                if (self.body == .amend) try admission.amendment(self.body.amend);
                 if (self.body == .adopt)
                     try @import("method_catalog.zig").adoption(a, &index, self.body.adopt.method);
                 var ordinal = head.folded_directive_ordinal;
@@ -233,6 +263,20 @@ pub fn Driver(comptime Types: type) type {
             }
         };
 
+        pub fn advance(self: *Self, a: std.mem.Allocator, target: t.Id, part: Part) Fatal!Advance {
+            if (!self.attached) return error.DriverDetached;
+            if (self.faults.reasons.contains(target)) return .{ .idle = {} };
+            const changed = switch (part) {
+                .controls => self.importedControls(a, target),
+                .step => if (self.nextStep(a, target)) |task| task != null else |err| err,
+            } catch |err| {
+                const reason = try split(err);
+                try self.faults.reasons.put(self.faults.allocator, target, reason);
+                return .{ .faulted = reason };
+            };
+            return if (changed) .{ .progressed = {} } else .{ .idle = {} };
+        }
+
         pub fn nextStep(self: *Self, a: std.mem.Allocator, target: t.Id) !?t.Id {
             if (!self.attached) return error.DriverDetached;
             var index = try self.rebuild(a);
@@ -245,6 +289,7 @@ pub fn Driver(comptime Types: type) type {
             );
             if (!transferred_controls) return null;
             const clock_ms = try self.clock.now(self.clock.context);
+            if (!bounds.instant(clock_ms)) return error.ClockOutOfRange;
             if (obligation.eligible != null) return recovery.advance(
                 self.service,
                 a,
@@ -283,6 +328,9 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
         if (materialize.unsettled(obligation, record)) return true;
     }
     if (!obligation.ordinaryDispatch()) return false;
-    if (clock_ms >= head.next_due_ms and clock_ms >= head.source_not_before_ms) return true;
-    return head.observed.sequence > head.told.sequence and clock_ms >= head.render_not_before_ms;
+    const schedule = head.schedule;
+    if (clock_ms >= schedule.next_due_ms and clock_ms >= schedule.source_not_before_ms and
+        clock_ms >= head.provider_not_before_ms) return true;
+    return head.observed.sequence > head.told.sequence and
+        clock_ms >= schedule.render_not_before_ms;
 }

@@ -40,7 +40,8 @@ pub const Model = struct {
     response_bytes: u32 = 2 * 1024 * 1024,
     timeout_ms: u32 = 30_000,
 };
-pub const interval_ms_max = @import("admission.zig").interval_ms_max;
+const admission = @import("admission.zig");
+pub const interval_ms_max = admission.interval_ms_max;
 pub const Config = struct {
     version: u32,
     current_uid: u32,
@@ -65,6 +66,17 @@ pub const Bindings = struct {
 };
 pub const tenant = "local";
 
+pub fn template(config: Config) t.Specification {
+    return .{
+        .revision = 0,
+        .repository = config.repository.value(),
+        .interval_ms = config.interval_ms,
+        .anchor_ms = 0,
+        .wording = .{ .bytes = "" },
+        .policies = config.policies,
+    };
+}
+
 pub fn bindings(config: Config) Bindings {
     return .{ .repository = config.repository.value() };
 }
@@ -88,8 +100,11 @@ fn validate(value: Config, current_uid: u32) !void {
     if (value.backup_directory) |path| try absolute(path);
     if (std.mem.eql(u8, value.namespace_path, value.control_socket_path))
         return error.InvalidConfiguration;
-    if (value.interval_ms == 0) return error.InvalidConfiguration;
-    if (value.interval_ms > interval_ms_max) return error.IntervalMsExceedsMaximum;
+    admission.specification(template(value)) catch |err| return switch (err) {
+        error.IntervalTooLong => error.IntervalMsExceedsMaximum,
+        error.InvalidInterval, error.InvalidAnchor => error.InvalidConfiguration,
+        error.PolicyOutOfBounds => error.PolicyOutOfBounds,
+    };
     const repository_names = [_][]const u8{
         value.repository.account, value.repository.owner, value.repository.name,
     };

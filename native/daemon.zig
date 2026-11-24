@@ -99,6 +99,7 @@ pub fn Daemon(comptime Types: type) type {
             if (self.session.busy()) return error.Busy;
             try self.session.deinit();
             self.driver.detach();
+            self.driver.faults.deinit();
             self.* = undefined;
         }
 
@@ -225,14 +226,12 @@ pub fn Daemon(comptime Types: type) type {
                     return false;
                 },
                 .import_controls => |target| {
-                    const changed = try self.driver.importedControls(a, target);
                     self.scheduling = .{ .step = target };
-                    return changed;
+                    return try self.driver.advance(a, target, .controls) != .idle;
                 },
                 .step => |target| {
-                    const changed = try self.driver.nextStep(a, target) != null;
                     self.scheduling = .retained;
-                    return changed;
+                    return try self.driver.advance(a, target, .step) != .idle;
                 },
             }
         }

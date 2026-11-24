@@ -82,15 +82,15 @@ fn head() t.Head {
         .prompt = .{ .bytes = "pending question" },
     };
     result.method = method();
-    result.next_due_ms = 1300;
+    result.schedule.next_due_ms = 1300;
     result.clock_ms = 950;
     result.skipped_slots = 4;
     result.phase = .render;
     result.previous_check_overran = true;
     result.check_failure_streak = 2;
     result.render_failure_streak = 3;
-    result.source_not_before_ms = 1400;
-    result.render_not_before_ms = 1500;
+    result.schedule.source_not_before_ms = 1400;
+    result.schedule.render_not_before_ms = 1500;
     result.accounting = .{
         .known_calls = 8,
         .known_input_tokens = 1200,
@@ -150,6 +150,7 @@ test "native revisions amend selected fields and preserve responsibility" {
         if (mask & 1 != 0) {
             change.interval_ms = 1;
             expected.specification.interval_ms = 1;
+            expected.schedule.next_due_ms = 951;
         }
         if (mask & 2 != 0) {
             change.wording = .{ .bytes = "" };
@@ -176,6 +177,66 @@ test "native revisions amend selected fields and preserve responsibility" {
     invalid = amendment();
     invalid.expected_revision = 5;
     try rejected(&fixture, "stale-amendment", previous, .{ .amend = invalid }, "stale_revision");
+}
+
+test "native revisions reject out-of-bound amendments instead of storing them" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const previous = head();
+    var invalid = amendment();
+    invalid.policies = .{ .notification_interval_ms = std.math.maxInt(u64) };
+    try rejected(
+        &fixture,
+        "notification-overflow",
+        previous,
+        .{ .amend = invalid },
+        "invalid_policy_notification_interval_ms",
+    );
+    invalid.policies = .{ .phase_attempts = 49 };
+    try rejected(
+        &fixture,
+        "phase-overflow",
+        previous,
+        .{ .amend = invalid },
+        "invalid_policy_phase_attempts",
+    );
+    invalid.policies = .{ .context_bytes = 255 };
+    try rejected(
+        &fixture,
+        "context-underflow",
+        previous,
+        .{ .amend = invalid },
+        "invalid_policy_context_bytes",
+    );
+    invalid = amendment();
+    invalid.interval_ms = 366 * 24 * 60 * 60 * 1000 + 1;
+    try rejected(&fixture, "long-interval", previous, .{ .amend = invalid }, "invalid_interval");
+}
+
+test "native revisions recompute a pending due check from the anchor when the interval changes" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    var change = amendment();
+    change.interval_ms = 100;
+    var expected = head();
+    expected.specification.revision += 1;
+    expected.specification.interval_ms = 100;
+    expected.schedule.next_due_ms = 1000;
+    try applied(&fixture, "shorter", head(), .{ .amend = change }, expected);
+    var due = head();
+    due.schedule.next_due_ms = 900;
+    expected = due;
+    expected.specification.revision += 1;
+    expected.specification.interval_ms = 100;
+    try applied(&fixture, "already-due", due, .{ .amend = change }, expected);
+    change.interval_ms = null;
+    change.wording = .{ .bytes = "same interval" };
+    expected = head();
+    expected.specification.revision += 1;
+    expected.specification.wording = change.wording.?;
+    try applied(&fixture, "unchanged-interval", head(), .{ .amend = change }, expected);
 }
 
 test "native revisions adoption and reversion preserve history cursors deliveries and accounting" {

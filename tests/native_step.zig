@@ -131,10 +131,10 @@ test "native bounded step prioritizes source except for backlog fairness and pro
     const alternate = try fixture.output(try fixture.execute("fair-render", next));
     try std.testing.expectEqual(.render, alternate.head.phase);
     try std.testing.expectEqual(0, alternate.head.render_failure_streak);
-    try std.testing.expectEqual(head.next_due_ms, alternate.head.next_due_ms);
+    try std.testing.expectEqual(head.schedule.next_due_ms, alternate.head.schedule.next_due_ms);
     next = input(head);
     next.batches = .{ .items = &.{batch} };
-    next.previous.source_not_before_ms = 1000;
+    next.previous.schedule.source_not_before_ms = 1000;
     const deferred = try fixture.output(try fixture.execute("backoff-render", next));
     try std.testing.expectEqual(.render, deferred.head.phase);
     next.fold_only = true;
@@ -150,8 +150,8 @@ test "native bounded step drops the published message and renders a due untold p
     var head = genesis.expectedFresh(fixtures.genesis());
     head.observed = .{ .sequence = 2, .epoch = 0, .tip = @splat('c') };
     head.told = .{ .sequence = 1, .epoch = 0, .tip = @splat('b') };
-    head.next_due_ms = 1_000_000;
-    head.render_not_before_ms = 200;
+    head.schedule.next_due_ms = 1_000_000;
+    head.schedule.render_not_before_ms = 200;
     var second = backlog(head);
     second.value.sequence = 2;
     second.value.base = @splat('b');
@@ -170,7 +170,7 @@ test "native bounded step drops the published message and renders a due untold p
     try std.testing.expect(drained.head.message == null);
 }
 
-test "native bounded step corrects skipped slots and regression while preserving backoff" {
+test "native bounded step counts skipped slots and rebases every schedule instant on regression" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
@@ -180,16 +180,61 @@ test "native bounded step corrects skipped slots and regression while preserving
     next.clock_ms = 2_700_100;
     const catchup = try fixture.output(try fixture.execute("catch-up", next));
     try std.testing.expectEqual(3, catchup.head.skipped_slots);
-    try std.testing.expectEqual(3_600_100, catchup.head.next_due_ms);
+    try std.testing.expectEqual(3_600_100, catchup.head.schedule.next_due_ms);
     head = catchup.head;
-    head.source_not_before_ms = 4_000_000;
+    head.schedule.source_not_before_ms = 4_000_000;
+    head.schedule.render_not_before_ms = 2_760_100;
+    head.provider_not_before_ms = 5_000_000;
     next = input(head);
     next.clock_ms = 100;
     const regressed = try fixture.output(try fixture.execute("regressed", next));
-    try std.testing.expectEqual(900_100, regressed.head.next_due_ms);
-    try std.testing.expectEqual(head.source_not_before_ms, regressed.head.source_not_before_ms);
+    try std.testing.expectEqualDeep(t.Schedule{
+        .next_due_ms = 900_100,
+        .source_not_before_ms = 1_300_000,
+        .render_not_before_ms = 60_100,
+    }, regressed.head.schedule);
+    try std.testing.expectEqual(5_000_000, regressed.head.provider_not_before_ms);
     try std.testing.expectEqual(head.skipped_slots, regressed.head.skipped_slots);
+    try std.testing.expectEqual(1, regressed.head.clock_regressions);
+    try std.testing.expectEqualDeep(
+        @as(?t.ClockRegression, .{ .previous_clock_ms = 2_700_100, .clock_ms = 100 }),
+        regressed.head.last_clock_regression,
+    );
     try std.testing.expectEqual(100, regressed.head.clock_ms);
+    next = input(regressed.head);
+    next.clock_ms = 200;
+    const steady = try fixture.output(try fixture.execute("steady", next));
+    try std.testing.expectEqualDeep(regressed.head.schedule, steady.head.schedule);
+    try std.testing.expectEqual(1, steady.head.clock_regressions);
+}
+
+test "native bounded step keeps skipped slots when a failed check is replaced" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    var head = genesis.expectedFresh(fixtures.genesis());
+    head.observed.tip = @splat('a');
+    var next = input(head);
+    next.clock_ms = 2_700_100;
+    next.attempt = 1;
+    next.fold_only = true;
+    next.supersession = .{
+        .input = .{ .task = @splat(8), .digest = @splat(9) },
+        .attempt = 0,
+        .phase = .check,
+        .cause = .failed,
+        .cancellation = .{
+            .operation = .{ .bytes = "replace" },
+            .task = @splat(8),
+            .bytes = .{ .bytes = "receipt" },
+        },
+    };
+    const failed = try fixture.output(try fixture.execute("failed-check", next));
+    try std.testing.expectEqual(3, failed.head.skipped_slots);
+    try std.testing.expectEqual(1, failed.head.check_failure_streak);
+    next.supersession.?.cause = .control;
+    const controlled = try fixture.output(try fixture.execute("controlled-check", next));
+    try std.testing.expectEqual(0, controlled.head.skipped_slots);
 }
 
 test "native bounded step refuses skipped sequence and unexplained replacement attempts" {

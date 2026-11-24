@@ -4,6 +4,10 @@ const t = @import("application_types");
 const retained = @import("retained.zig");
 const native = @import("protean_native");
 const import_view = @import("continuity_import.zig");
+const admission = @import("admission.zig");
+const experiments = @import("experiments.zig");
+pub const Catalog = @import("continuity_catalog.zig").Catalog;
+pub const visit = @import("continuity_catalog.zig").visit;
 
 pub const ImportView = import_view.View;
 pub const ImportPhase = import_view.Phase;
@@ -226,24 +230,31 @@ pub fn validate(a: std.mem.Allocator, bundle: Bundle) !void {
     }
     var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     defer seen.deinit(a);
+    var listed: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
+    defer listed.deinit(a);
     for (bundle.members.items) |item| {
         if (!std.meta.eql(try digest(a, t.ContinuityData, item.data), item.identity))
             return error.ContinuityDigestMismatch;
         if (seen.contains(item.identity)) return error.DuplicateContinuityMember;
-        for (item.data.dependencies.items, 0..) |dependency, i| {
+        listed.clearRetainingCapacity();
+        for (item.data.dependencies.items) |dependency| {
             if (!seen.contains(dependency)) return error.MissingContinuityDependency;
-            for (item.data.dependencies.items[0..i]) |old|
-                if (std.meta.eql(old, dependency)) return error.DuplicateContinuityDependency;
+            if ((try listed.getOrPut(a, dependency)).found_existing)
+                return error.DuplicateContinuityDependency;
         }
         try validateData(a, item.data);
         try seen.put(a, item.identity, {});
     }
-    try validateLineages(a, bundle);
-    try validateCut(a, bundle);
-    try @import("continuity_turn.zig").validateBundle(a, bundle);
+    var catalog = try Catalog.init(a, bundle);
+    defer catalog.deinit();
+    try catalog.closed(a);
+    try validateLineages(a, &catalog);
+    try validateCut(a, &catalog);
+    try @import("continuity_turn.zig").validateBundle(a, &catalog);
 }
 
-fn validateCut(a: std.mem.Allocator, bundle: Bundle) !void {
+fn validateCut(a: std.mem.Allocator, catalog: *const Catalog) !void {
+    const bundle = catalog.bundle;
     var facts: std.AutoHashMapUnmanaged(t.Id, CutRow) = .empty;
     defer facts.deinit(a);
     for (bundle.members.items) |item| {
@@ -263,8 +274,8 @@ fn validateCut(a: std.mem.Allocator, bundle: Bundle) !void {
         };
     }
     try validateCoverage(a, bundle, &facts);
-    try validateResponsibilities(a, bundle);
-    try validateProducers(a, bundle);
+    try validateResponsibilities(a, catalog);
+    try validateProducers(a, catalog);
 }
 
 fn validateCoverage(
@@ -302,7 +313,8 @@ fn validateCoverage(
     if (carried.count() != carriers.count()) return error.IncompleteContinuityCut;
 }
 
-fn validateResponsibilities(a: std.mem.Allocator, bundle: Bundle) !void {
+fn validateResponsibilities(a: std.mem.Allocator, catalog: *const Catalog) !void {
+    const bundle = catalog.bundle;
     for (bundle.members.items) |item| {
         if (item.data.kind != .settlement or
             !std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
@@ -313,8 +325,8 @@ fn validateResponsibilities(a: std.mem.Allocator, bundle: Bundle) !void {
         var input = try c.decodeOwned(t.Input, a, source.value.input.bytes.bytes);
         defer input.deinit();
         switch (input.value) {
-            .directive => |value| try retainedInput(a, bundle, item, .directive, value),
-            .turn => |value| try retainedInput(a, bundle, item, .turn, value),
+            .directive => |value| try retainedInput(a, catalog, item, .directive, value),
+            .turn => |value| try retainedInput(a, catalog, item, .turn, value),
             else => {},
         }
     }
@@ -322,34 +334,32 @@ fn validateResponsibilities(a: std.mem.Allocator, bundle: Bundle) !void {
 
 fn retainedInput(
     a: std.mem.Allocator,
-    bundle: Bundle,
+    catalog: *const Catalog,
     source: Member,
     comptime kind: t.ContinuityKind,
     expected: anytype,
 ) !void {
-    var count: usize = 0;
-    for (bundle.members.items) |item| {
-        if (item.data.kind != kind or
-            !std.meta.eql(item.data.source.namespace, source.data.source.namespace) or
-            !std.meta.eql(item.data.source.task, source.data.source.task) or
-            item.data.source.revision != source.data.source.revision) continue;
-        var value = try decode(kind, a, item.data);
-        defer value.deinit();
-        const admitted = if (kind == .directive) value.value else value.value.input;
-        if (!try equal(a, @TypeOf(expected), expected, admitted))
-            return error.ContinuityResponsibilityMismatch;
-        count += 1;
-    }
-    if (count != 1) return error.MissingContinuityResponsibility;
+    const found = catalog.sourced.get(.{ .kind = kind, .source = .{
+        .namespace = source.data.source.namespace,
+        .task = source.data.source.task,
+        .revision = source.data.source.revision,
+    } }) orelse return error.MissingContinuityResponsibility;
+    if (found.count != 1) return error.MissingContinuityResponsibility;
+    var value = try decode(kind, a, catalog.bundle.members.items[found.position].data);
+    defer value.deinit();
+    const admitted = if (kind == .directive) value.value else value.value.input;
+    if (!try equal(a, @TypeOf(expected), expected, admitted))
+        return error.ContinuityResponsibilityMismatch;
 }
 
-fn validateLineages(a: std.mem.Allocator, bundle: Bundle) !void {
+fn validateLineages(a: std.mem.Allocator, catalog: *const Catalog) !void {
+    const bundle = catalog.bundle;
     var roots: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     defer roots.deinit(a);
     for (bundle.lineages.items) |root| {
         const entry = try roots.getOrPut(a, root.identity);
         if (entry.found_existing) return error.DuplicateContinuityLineage;
-        const selected = member(bundle, root.head) orelse return error.MissingContinuityHead;
+        const selected = catalog.member(root.head) orelse return error.MissingContinuityHead;
         if (!std.meta.eql(selected.current, root.source_head) or
             !std.meta.eql(selected.data.lineage, root.identity))
             return error.ContinuityLineageMismatch;
@@ -357,7 +367,8 @@ fn validateLineages(a: std.mem.Allocator, bundle: Bundle) !void {
         defer head.deinit();
         if (bundle.mode == .transfer and head.value.mode != .transferred and
             head.value.mode != .cancelled) return error.SourceNotTransferred;
-        try validatePending(a, bundle, root, head.value);
+        try admission.specification(head.value.specification);
+        try validatePending(a, catalog, root, head.value);
     }
     for (bundle.members.items) |item| {
         if (!std.meta.eql(item.data.lineage, @as(t.Digest, @splat(0))) and
@@ -624,7 +635,13 @@ fn samePayload(
         return error.ContinuityPayloadMismatch;
 }
 
-fn producedPayload(a: std.mem.Allocator, item: Member, input: t.Input, output: ?t.Output) !void {
+fn producedPayload(
+    a: std.mem.Allocator,
+    item: Member,
+    input: t.Input,
+    output: ?t.Output,
+    snapshot: retained.Snapshot,
+) !void {
     if (input == .continuity_member) {
         if (!try equal(a, t.ContinuityData, input.continuity_member.data, item.data))
             return error.ContinuityPayloadMismatch;
@@ -662,7 +679,7 @@ fn producedPayload(a: std.mem.Allocator, item: Member, input: t.Input, output: ?
                 return error.ContinuityProducerMismatch;
             try samePayload(a, item, .method_report, .{
                 .input = input.experiment,
-                .result = output.?.experiment,
+                .result = experiments.accounted(output.?.experiment, snapshot.accounting),
             });
         },
         .method_source, .context => return error.UnsupportedContinuityProducer,
@@ -670,7 +687,8 @@ fn producedPayload(a: std.mem.Allocator, item: Member, input: t.Input, output: ?
     }
 }
 
-fn validateProducers(a: std.mem.Allocator, bundle: Bundle) !void {
+fn validateProducers(a: std.mem.Allocator, catalog: *const Catalog) !void {
+    const bundle = catalog.bundle;
     for (bundle.members.items) |source| {
         if (source.data.kind != .settlement or
             !std.meta.eql(source.data.source.namespace, bundle.source.namespace)) continue;
@@ -682,39 +700,37 @@ fn validateProducers(a: std.mem.Allocator, bundle: Bundle) !void {
         const output = try sourceOutput(scratch, fact.value.result);
         if (output) |value| if (!std.mem.eql(u8, @tagName(input.value), @tagName(value)))
             return error.ContinuityProducerMismatch;
-        for (bundle.members.items) |item| {
-            if (!std.meta.eql(item.current.task, source.data.source.task) or
-                (item.data.kind == .settlement and
-                    std.meta.eql(item.data.source.namespace, bundle.source.namespace))) continue;
+        for (catalog.producedBy(source.data.source.task)) |position| {
+            const item = bundle.members.items[position];
+            if (item.data.kind == .settlement and
+                std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
             if (input.value != .continuity_member and
                 (!std.meta.eql(item.data.source.namespace, bundle.source.namespace) or
                     !std.meta.eql(item.data.source.task, item.current.task) or
                     item.data.source.revision != fact.value.snapshot.revision or
                     !std.meta.eql(item.data.source.digest, item.current.digest)))
                 return error.ContinuityProvenanceMismatch;
-            try producedPayload(scratch, item, input.value, output);
+            try producedPayload(scratch, item, input.value, output, fact.value.snapshot);
         }
     }
 }
 
-fn currentInput(a: std.mem.Allocator, bundle: Bundle, task: t.Id) !t.Input {
-    for (bundle.members.items) |item| {
-        if (item.data.kind != .settlement or
-            !std.meta.eql(item.data.source.namespace, bundle.source.namespace) or
-            !std.meta.eql(item.data.source.task, task)) continue;
-        const fact = try decode(.settlement, a, item.data);
-        return (try c.decodeOwned(t.Input, a, fact.value.input.bytes.bytes)).value;
-    }
-    return error.MissingContinuityFact;
+fn currentInput(a: std.mem.Allocator, catalog: *const Catalog, task: t.Id) !t.Input {
+    const position = catalog.task_facts.get(.{
+        .namespace = catalog.bundle.source.namespace,
+        .task = task,
+    }) orelse return error.MissingContinuityFact;
+    const fact = try decode(.settlement, a, catalog.bundle.members.items[position].data);
+    return (try c.decodeOwned(t.Input, a, fact.value.input.bytes.bytes)).value;
 }
 
 const Inherited = struct { start: usize = 0, end: usize = 0 };
 
-fn foreignBlock(bundle: Bundle, keys: []const t.Digest) !Inherited {
+fn foreignBlock(catalog: *const Catalog, keys: []const t.Digest) !Inherited {
     var block: ?Inherited = null;
     for (keys, 0..) |key, i| {
-        const item = member(bundle, key) orelse return error.MissingContinuityControl;
-        if (std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
+        const item = catalog.member(key) orelse return error.MissingContinuityControl;
+        if (std.meta.eql(item.data.source.namespace, catalog.bundle.source.namespace)) continue;
         if (block) |*found| {
             if (found.end != i) return error.ContinuityControlOrderMismatch;
             found.end = i + 1;
@@ -723,60 +739,51 @@ fn foreignBlock(bundle: Bundle, keys: []const t.Digest) !Inherited {
     return block orelse .{};
 }
 
-fn inheritedPending(a: std.mem.Allocator, bundle: Bundle, root: Lineage) !Inherited {
-    const input = try currentInput(a, bundle, root.obligation);
+fn inheritedPending(a: std.mem.Allocator, catalog: *const Catalog, root: Lineage) !Inherited {
+    const input = try currentInput(a, catalog, root.obligation);
     if (input != .genesis) return error.ContinuityLineageMismatch;
     const keys = root.pending_controls.items;
-    const block = try foreignBlock(bundle, keys);
+    const block = try foreignBlock(catalog, keys);
     if (block.start == block.end) return block;
     const imported = input.genesis.imported orelse return error.ContinuityControlOrderMismatch;
     const metadata = imported.continuity orelse return error.UnprovenContinuityImport;
     for (keys[block.start..block.end]) |key| {
-        if (try locallyAdmitted(a, bundle, metadata.bundle, key))
-            return error.ContinuityControlOrderMismatch;
+        const operation = try directiveOperation(a, metadata.bundle, key);
+        if (catalog.operations.contains(operation)) return error.ContinuityControlOrderMismatch;
     }
     return block;
 }
 
-fn locallyAdmitted(a: std.mem.Allocator, bundle: Bundle, imported: t.Digest, key: t.Digest) !bool {
-    const operation = try directiveOperation(a, imported, key);
-    for (bundle.members.items) |item| {
-        if (item.data.kind != .directive or
-            !std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
-        const control = try decode(.directive, a, item.data);
-        if (std.mem.eql(u8, control.value.envelope.operation.bytes, operation)) return true;
-    }
-    return false;
-}
-
-fn validatePending(a: std.mem.Allocator, bundle: Bundle, root: Lineage, head: t.Head) !void {
+fn validatePending(
+    a: std.mem.Allocator,
+    catalog: *const Catalog,
+    root: Lineage,
+    head: t.Head,
+) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const inherited = try inheritedPending(scratch, bundle, root);
+    const inherited = try inheritedPending(scratch, catalog, root);
     var ordinal = head.folded_directive_ordinal;
+    var keys: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     for (root.pending_controls.items, 0..) |key, i| {
-        const item = member(bundle, key) orelse return error.MissingContinuityControl;
+        const item = catalog.member(key) orelse return error.MissingContinuityControl;
         if (!std.meta.eql(item.data.lineage, root.identity))
             return error.ContinuityLineageMismatch;
-        for (root.pending_controls.items[0..i]) |old|
-            if (std.meta.eql(old, key)) return error.DuplicateContinuityControl;
+        if ((try keys.getOrPut(scratch, key)).found_existing)
+            return error.DuplicateContinuityControl;
         const control = try decode(.directive, scratch, item.data);
         if (i >= inherited.start and i < inherited.end) continue;
         ordinal = try std.math.add(u64, ordinal, 1);
         if (!std.meta.eql(control.value.obligation, root.obligation) or
             control.value.ordinal != ordinal or
-            !std.meta.eql(item.data.source.namespace, bundle.source.namespace))
+            !std.meta.eql(item.data.source.namespace, catalog.bundle.source.namespace))
             return error.ContinuityControlOrderMismatch;
     }
     var count: usize = inherited.end - inherited.start;
-    for (bundle.members.items) |item| {
-        if (item.data.kind != .directive or
-            !std.meta.eql(item.data.source.namespace, bundle.source.namespace)) continue;
-        const control = try decode(.directive, scratch, item.data);
-        if (std.meta.eql(control.value.obligation, root.obligation) and
-            control.value.ordinal > head.folded_directive_ordinal) count += 1;
-    }
+    if (catalog.ordinals.get(root.obligation)) |ordinals| for (ordinals.items) |value| {
+        if (value > head.folded_directive_ordinal) count += 1;
+    };
     if (count != root.pending_controls.items.len) return error.MissingContinuityControl;
 }
 

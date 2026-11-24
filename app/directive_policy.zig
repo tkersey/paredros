@@ -70,10 +70,11 @@ fn applyBody(
     const adopt = try b.caseOf(body, "adopt");
     const revert = try b.caseOf(body, "revert");
     const answer = try b.caseOf(body, "answer");
-    const due = try check.body().update(
-        head,
-        .{ .next_due_ms = try check.body().field(head, "clock_ms") },
-    );
+    const cb = check.body();
+    const due = try cb.update(head, .{ .schedule = try cb.update(
+        try cb.field(head, "schedule"),
+        .{ .next_due_ms = try cb.field(head, "clock_ms") },
+    ) });
     const amended = try revise(c, amend.body(), h.revision, head, "amend", amend.payload());
     const adopted = try revise(c, adopt.body(), h.revision, head, "adopt", adopt.payload());
     const reverted = try revise(c, revert.body(), h.revision, head, "revert", revert.payload());
@@ -312,7 +313,7 @@ fn publishGap(
         .observed = frontier,
         .question = try c.literal(?t.Question, null),
         .last_observation = try b.variant(try c.schema(?t.Observation), "some", observation),
-        .next_due_ms = clock,
+        .schedule = try b.update(try b.field(head, "schedule"), .{ .next_due_ms = clock }),
     });
     return b.update(try accept(c, b, next), .{
         .gap = try b.variant(try c.schema(?t.Batch), "some", gap),

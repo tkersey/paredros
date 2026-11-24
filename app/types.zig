@@ -54,7 +54,6 @@ pub const Policies = struct {
     method_faults: u32 = 3,
     render_input_bytes: u64 = 64 * 1024,
     context_bytes: u64 = 64 * 1024,
-    history_page_limit: u32 = 100,
 };
 pub const Specification = struct {
     revision: u64,
@@ -141,6 +140,12 @@ pub const MethodDisposition = struct {
     model_consumed: bool,
     reverted: bool,
 };
+pub const Schedule = struct {
+    next_due_ms: i64,
+    source_not_before_ms: i64,
+    render_not_before_ms: i64,
+};
+pub const ClockRegression = struct { previous_clock_ms: i64, clock_ms: i64 };
 pub const Head = struct {
     version: u32 = 1,
     obligation: GenesisIdentity,
@@ -162,15 +167,16 @@ pub const Head = struct {
     question: ?Question,
     method: Method,
     method_disposition: ?MethodDisposition = null,
-    next_due_ms: i64,
+    schedule: Schedule,
+    provider_not_before_ms: i64,
     clock_ms: i64,
     skipped_slots: u64,
+    clock_regressions: u64,
+    last_clock_regression: ?ClockRegression,
     phase: Phase,
     previous_check_overran: bool,
     check_failure_streak: u32,
     render_failure_streak: u32,
-    source_not_before_ms: i64,
-    render_not_before_ms: i64,
     accounting: Accounting,
 };
 pub const Amendment = struct {

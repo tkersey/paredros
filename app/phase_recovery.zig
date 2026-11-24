@@ -5,6 +5,7 @@ const a = @import("author.zig");
 const temporal = @import("temporal.zig");
 const check = @import("check.zig");
 const github = @import("github_contract.zig");
+const bounds = @import("bounds.zig");
 
 pub const Input = struct { head: t.Head, supersession: ?t.Supersession };
 pub const Function = a.Function(struct { input: Input }, t.Head);
@@ -125,11 +126,11 @@ fn deferFold(
     next: temporal.Function,
 ) !a.Value(t.Head) {
     const deadline = try slot(c, b, head, next);
-    return b.update(head, .{
-        .next_due_ms = try maximum(b, try b.field(head, "next_due_ms"), deadline),
-        .source_not_before_ms = try maximum(b, try b.field(head, "source_not_before_ms"), deadline),
-        .render_not_before_ms = try maximum(b, try b.field(head, "render_not_before_ms"), deadline),
-    });
+    const schedule = try b.field(head, "schedule");
+    var instants: temporal.Instants = undefined;
+    inline for (@typeInfo(t.Schedule).@"struct".field_names) |name|
+        @field(instants, name) = try maximum(b, try b.field(schedule, name), deadline);
+    return b.update(head, .{ .schedule = try b.product(try c.schema(t.Schedule), instants) });
 }
 
 fn attributed(
@@ -143,9 +144,10 @@ fn attributed(
     const count_field = if (phase == .check) "check_failure_streak" else "render_failure_streak";
     const deadline_field = if (phase == .check) "source_not_before_ms" else "render_not_before_ms";
     const head = try b.field(input, "head");
+    const schedule = try b.field(head, "schedule");
     const now = try b.field(head, "clock_ms");
     const old = try b.field(head, count_field);
-    const previous = try b.field(head, deadline_field);
+    const previous = try b.field(schedule, deadline_field);
     const policies = try b.field(try b.field(head, "specification"), "policies");
     const bound = try b.field(policies, "phase_attempts");
     const count = try nextCount(c, b, old, bound, now, previous);
@@ -163,20 +165,26 @@ fn attributed(
         try scheduled.ret(try slot(c, scheduled, head, next)),
         try retrying.ret(immediate),
     );
-    const constrained = try maximum(b, previous, try b.field(input, "provider_not_before_ms"));
-    const deadline = try maximum(b, instant, constrained);
-    const changed = if (phase == .check)
-        try b.update(
-            head,
-            .{
-                .check_failure_streak = count,
-                .source_not_before_ms = deadline,
-                .next_due_ms = deadline,
-            },
-        )
-    else
-        try b.update(head, .{ .render_failure_streak = count, .render_not_before_ms = deadline });
-    return changed;
+    const deadline = try maximum(b, instant, previous);
+    const provider = try b.field(input, "provider_not_before_ms");
+    if (phase == .render) return b.update(head, .{
+        .render_failure_streak = count,
+        .schedule = try b.update(schedule, .{
+            .render_not_before_ms = try maximum(b, deadline, provider),
+        }),
+    });
+    return b.update(head, .{
+        .check_failure_streak = count,
+        .schedule = try b.update(schedule, .{
+            .source_not_before_ms = deadline,
+            .next_due_ms = deadline,
+        }),
+        .provider_not_before_ms = try maximum(
+            b,
+            try b.field(head, "provider_not_before_ms"),
+            provider,
+        ),
+    });
 }
 
 fn nextCount(
@@ -210,7 +218,12 @@ fn retryInstant(
     count: a.Value(u32),
     delay: Delay,
 ) !a.Value(i64) {
-    try a.require(c, b, try b.less(count, try b.constant(u32, 49)), "phase_backoff_overflow");
+    try a.require(
+        c,
+        b,
+        try b.less(count, try b.constant(u32, bounds.phase_attempts_max)),
+        "phase_backoff_overflow",
+    );
     const overflow = try a.failure(c, "phase_backoff_overflow");
     const duration = try b.call(delay, .{
         .remaining = try b.checked(
@@ -219,7 +232,7 @@ fn retryInstant(
             try b.constant(u32, 1),
             .{ .overflow = overflow },
         ),
-        .delay_ms = try b.constant(i64, 60_000),
+        .delay_ms = try b.constant(i64, bounds.phase_retry_ms),
     });
     return b.checked(.add, now, duration, .{ .overflow = overflow });
 }
@@ -288,7 +301,7 @@ pub fn rejection(c: protean.Context) !Rejection {
     const deadline = try b.call(provider, .{ .input = try b.product(try c.schema(ProviderInput), .{
         .evidence = try b.field(input, "evidence"),
         .clock_ms = try b.field(head, "clock_ms"),
-        .deadline_ms = try b.field(head, "source_not_before_ms"),
+        .deadline_ms = try b.field(head, "provider_not_before_ms"),
         .index = try b.constant(u64, 0),
         .rate_limited = try b.equal(
             try b.enumTag(reason),

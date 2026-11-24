@@ -305,15 +305,13 @@ fn admitCommand(
             operation_id,
             origin,
             value,
-            template(config),
+            configuration.template(config),
         ),
-        .directive => |value| return driver.directive(
-            a,
-            operation_id,
-            origin,
-            value.target,
-            value.body.widen(),
-        ),
+        .directive => |value| {
+            if (value.body == .cancel and try commands.unrunGenesis(driver, a, value.target))
+                return commands.abandon(driver, a, operation_id, origin, value.target);
+            return driver.directive(a, operation_id, origin, value.target, value.body.widen());
+        },
         .ask => |value| return driver.turn(
             a,
             operation_id,
@@ -321,7 +319,7 @@ fn admitCommand(
             .{
                 .text = value.text,
                 .target = value.target,
-                .genesis_template = template(config),
+                .genesis_template = configuration.template(config),
             },
         ),
         .experiment_run => |value| return experiments.admit(
@@ -354,7 +352,7 @@ fn continuityCommand(
     const context = environment orelse return error.ContinuityEnvironmentUnavailable;
     switch (command) {
         .transfer_export => |value| {
-            const result = try continuity_control.exportBundle(
+            const outcome = try continuity_control.exportBundle(
                 driver,
                 a,
                 config,
@@ -363,6 +361,20 @@ fn continuityCommand(
                 origin,
                 value,
             );
+            const result = switch (outcome) {
+                .progress => |progress| progress,
+                .stranded => |tasks| {
+                    var refused = try rejected(a, error.StrandedGenesis);
+                    var data = native.json.object();
+                    try native.json.put(a, &data, "stranded", try wire.toJson(
+                        c.Vector(t.Id, null),
+                        a,
+                        .{ .items = tasks },
+                    ));
+                    try native.json.put(a, &refused, "data", data);
+                    return refused;
+                },
+            };
             return reply(
                 a,
                 if (result.phase == .written) "observed" else "admitted",
@@ -421,17 +433,6 @@ fn proposal(
 ) !native.json.Value {
     const confirmation = try commands.resolveProposal(index, selector);
     return wire.toJson(t.Proposal, a, try commands.proposal(index, confirmation));
-}
-
-fn template(config: configuration.Config) t.Specification {
-    return .{
-        .revision = 0,
-        .repository = config.repository.value(),
-        .interval_ms = config.interval_ms,
-        .anchor_ms = 0,
-        .wording = .{ .bytes = "" },
-        .policies = config.policies,
-    };
 }
 
 fn admitted(a: std.mem.Allocator, task_id: t.Id) !native.json.Value {
@@ -616,6 +617,10 @@ fn monitorHead(
     var result = native.json.object();
     try native.json.put(a, &result, "id", try wire.toJson(t.Id, a, obligation.task));
     try native.json.put(a, &result, "head", try wire.toJson(t.Head, a, head));
+    try native.json.put(a, &result, "fault", if (obligation.fault) |reason|
+        native.json.string(reason)
+    else
+        .null);
     try native.json.put(
         a,
         &result,

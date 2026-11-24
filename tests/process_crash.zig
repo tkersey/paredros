@@ -284,7 +284,7 @@ fn verifyRead(f: *Fixture, driver: *Driver) !void {
     if (captured) try std.testing.expectEqual(0, acquisitions);
     if (!captured) {
         try std.testing.expect(after.record(witness.subject).?.superseded);
-        now_ms = after.head(obligation).source_not_before_ms;
+        now_ms = after.head(obligation).schedule.source_not_before_ms;
         const next = (try driver.nextStep(a, witness.target)).?;
         try drive(f, &session, next);
         try std.testing.expectEqual(1, acquisitions);

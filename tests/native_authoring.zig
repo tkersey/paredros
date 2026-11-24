@@ -274,15 +274,15 @@ fn populatedHead() t.Head {
         .state = .{ .bytes = "retained state" },
         .consecutive_faults = 2,
     } };
-    head.next_due_ms = 1300;
+    head.schedule.next_due_ms = 1300;
     head.clock_ms = 950;
     head.skipped_slots = 4;
     head.phase = .render;
     head.previous_check_overran = true;
     head.check_failure_streak = 2;
     head.render_failure_streak = 3;
-    head.source_not_before_ms = 1400;
-    head.render_not_before_ms = 1500;
+    head.schedule.source_not_before_ms = 1400;
+    head.schedule.render_not_before_ms = 1500;
     head.accounting = .{
         .known_calls = 8,
         .known_input_tokens = 1200,

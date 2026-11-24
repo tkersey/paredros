@@ -113,6 +113,25 @@ pub fn authenticate(driver: anytype, origin: t.Origin) !void {
     if (!driver.attached or origin == .derived) return error.UnauthenticatedRequest;
 }
 
+pub fn unrunGenesis(driver: anytype, a: std.mem.Allocator, target: t.Id) !bool {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const record = index.record(target) orelse return false;
+    return record.input == .genesis and record.result == null;
+}
+
+pub fn abandon(
+    driver: anytype,
+    a: std.mem.Allocator,
+    operation: []const u8,
+    origin: t.Origin,
+    target: t.Id,
+) !t.Id {
+    try authenticate(driver, origin);
+    _ = try driver.service.requestCancel(a, operation, target, "operator cancelled unrun monitor");
+    return target;
+}
+
 pub fn genesis(
     driver: anytype,
     a: std.mem.Allocator,
@@ -182,12 +201,12 @@ fn admitGenesis(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
-            try admission.interval(self.specification.interval_ms);
             try ingress_policy.validate(self.index);
             const envelope = genesisEnvelope(requested);
             const clock_ms = try self.driver.clock.now(self.driver.clock.context);
             var frozen = self.specification;
             if (self.anchor_now) frozen.anchor_ms = clock_ms;
+            try admission.specification(frozen);
             return .{ .genesis = .{
                 .envelope = envelope,
                 .lineage = try admission.stableDigest(allocator, envelope),

@@ -6,6 +6,7 @@ const retained = @import("retained.zig");
 const compatibility = @import("compatibility.zig");
 const continuity = @import("continuity.zig");
 const configuration = @import("configuration.zig");
+const experiments = @import("experiments.zig");
 
 pub const Bundle = continuity.Bundle;
 pub const Source = continuity.Source;
@@ -75,6 +76,7 @@ const Builder = struct {
     source: Source,
     members: std.ArrayList(continuity.Member) = .empty,
     seen: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
+    directives: std.AutoHashMapUnmanaged(t.Id, usize) = .empty,
 
     fn add(
         self: *Builder,
@@ -125,12 +127,44 @@ const Builder = struct {
             return identity;
         }
         entry.value_ptr.* = self.members.items.len;
+        if (data.kind == .directive)
+            try self.directives.put(self.allocator, current.task, self.members.items.len);
         try self.members.append(self.allocator, .{
             .identity = identity,
             .current = current,
             .data = data,
         });
         return identity;
+    }
+
+    fn link(self: *Builder, mode: Mode) !void {
+        var catalog = try continuity.Catalog.init(self.allocator, .{
+            .source = self.source,
+            .mode = mode,
+            .cut = .{ .items = &.{} },
+            .cut_digest = @splat(0),
+            .lineages = .{ .items = &.{} },
+            .members = .{ .items = self.members.items },
+            .archive_boundary = .{ .bytes = "" },
+        });
+        defer catalog.deinit();
+        for (self.members.items) |*item| {
+            if (item.data.kind == .head or
+                !std.meta.eql(item.data.source.namespace, self.source.namespace)) continue;
+            var linked: Linked = .{ .catalog = &catalog, .allocator = self.allocator };
+            switch (item.data.kind) {
+                inline else => |kind| {
+                    const decoded = try continuity.decode(kind, self.allocator, item.data);
+                    try continuity.visit(continuity.Payload(kind), decoded.value, &linked);
+                },
+            }
+            if (linked.dependencies.items.len == 0) continue;
+            const old = item.identity;
+            item.data.dependencies = .{ .items = linked.dependencies.items };
+            item.identity = try continuity.digest(self.allocator, t.ContinuityData, item.data);
+            const position = self.seen.fetchRemove(old).?.value;
+            try self.seen.put(self.allocator, item.identity, position);
+        }
     }
 
     fn appendRecord(self: *Builder, index: *const idx.Index, value: idx.Record) !void {
@@ -176,14 +210,26 @@ const Builder = struct {
                         batch,
                     );
             },
-            .experiment => |input| if (value.result) |output| {
+            .experiment => |input| if (try experiments.settled(value)) |result| {
                 _ = try self.add(.method_report, global(), value, try rowReference(value, true), .{
                     .input = input,
-                    .result = output.experiment,
+                    .result = result,
                 });
             },
             .genesis, .continuity_member, .continuity_cut, .transfer => {},
         }
+    }
+};
+
+const Linked = struct {
+    catalog: *const continuity.Catalog,
+    allocator: std.mem.Allocator,
+    dependencies: std.ArrayList(t.Digest) = .empty,
+
+    pub fn reference(self: *Linked, kind: t.ContinuityKind, value: t.Reference) !void {
+        const identity = try self.catalog.resolve(kind, value);
+        for (self.dependencies.items) |prior| if (std.meta.eql(prior, identity)) return;
+        try self.dependencies.append(self.allocator, identity);
     }
 };
 
@@ -250,27 +296,37 @@ fn addRoots(
 }
 
 fn ordered(a: std.mem.Allocator, members: []const continuity.Member) ![]const continuity.Member {
-    var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
-    var result: std.ArrayList(continuity.Member) = .empty;
-    defer seen.deinit(a);
-    errdefer result.deinit(a);
-    for (0..members.len) |_| {
-        var progress = false;
-        for (members) |item| {
-            if (seen.contains(item.identity)) continue;
-            var ready = true;
-            for (item.data.dependencies.items) |dependency| if (!seen.contains(dependency)) {
-                ready = false;
-                break;
-            };
-            if (!ready) continue;
-            try result.append(a, item);
-            try seen.put(a, item.identity, {});
-            progress = true;
-        }
-        if (result.items.len == members.len) return result.toOwnedSlice(a);
-        if (!progress) return error.CyclicContinuityDependency;
+    var positions: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty;
+    defer positions.deinit(a);
+    for (members, 0..) |item, position| try positions.put(a, item.identity, position);
+    const waiting = try a.alloc(usize, members.len);
+    defer a.free(waiting);
+    const dependents = try a.alloc(std.ArrayList(usize), members.len);
+    defer {
+        for (dependents) |*list| list.deinit(a);
+        a.free(dependents);
     }
+    @memset(dependents, .empty);
+    for (members, waiting, 0..) |item, *count, position| {
+        count.* = item.data.dependencies.items.len;
+        for (item.data.dependencies.items) |dependency| {
+            const source = positions.get(dependency) orelse
+                return error.MissingContinuityDependency;
+            try dependents[source].append(a, position);
+        }
+    }
+    var result: std.ArrayList(continuity.Member) = .empty;
+    errdefer result.deinit(a);
+    for (waiting, 0..) |count, position| if (count == 0) try result.append(a, members[position]);
+    var cursor: usize = 0;
+    while (cursor < result.items.len) : (cursor += 1) {
+        const position = positions.get(result.items[cursor].identity).?;
+        for (dependents[position].items) |next| {
+            waiting[next] -= 1;
+            if (waiting[next] == 0) try result.append(a, members[next]);
+        }
+    }
+    if (result.items.len != members.len) return error.CyclicContinuityDependency;
     return result.toOwnedSlice(a);
 }
 
@@ -286,6 +342,7 @@ pub fn prepare(
     const scratch = arena.allocator();
     var builder: Builder = .{ .allocator = scratch, .source = source };
     for (index.records) |record| try builder.appendRecord(index, record);
+    try builder.link(mode);
     const roots = try addRoots(&builder, index, mode);
     const cut: @FieldType(Bundle, "cut") = .{ .items = try cutRows(scratch, index) };
     const bundle: Bundle = .{
@@ -720,15 +777,9 @@ fn localControls(
         const record = index.records[position];
         const ordinal = record.input.directive.ordinal;
         if (ordinal <= after or ordinal > through) continue;
-        var found = false;
-        for (builder.members.items) |item| {
-            if (item.data.kind == .directive and std.meta.eql(item.current.task, record.task)) {
-                try keys.append(builder.allocator, item.identity);
-                found = true;
-                break;
-            }
-        }
-        if (!found) return error.MissingContinuityControl;
+        const member = builder.directives.get(record.task) orelse
+            return error.MissingContinuityControl;
+        try keys.append(builder.allocator, builder.members.items[member].identity);
     }
 }
 
@@ -806,17 +857,36 @@ pub fn importPending(index: anytype) bool {
 pub fn genesisPending(service: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
     for (index.records) |record| {
         if (record.input != .genesis or record.result != null) continue;
-        if (try genesisRunnable(service, a, record.task)) return true;
+        if (try genesisDisposition(service, a, record.task) == .runnable) return true;
     }
     return false;
 }
 
-fn genesisRunnable(service: anytype, a: std.mem.Allocator, task: t.Id) !bool {
+pub fn strandedGeneses(
+    service: anytype,
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+) ![]const t.Id {
+    var result: std.ArrayList(t.Id) = .empty;
+    errdefer result.deinit(a);
+    for (index.records) |record| {
+        if (record.input != .genesis or record.result != null) continue;
+        if (try genesisDisposition(service, a, record.task) == .stranded)
+            try result.append(a, record.task);
+    }
+    return result.toOwnedSlice(a);
+}
+
+const GenesisDisposition = enum { runnable, stranded, settled };
+
+fn genesisDisposition(service: anytype, a: std.mem.Allocator, task: t.Id) !GenesisDisposition {
     var saved = try service.task(a, task);
     defer saved.deinit();
     const value = saved.value;
+    const unrun: GenesisDisposition = if (value.cancellation == null) .stranded else .settled;
     switch (try service.status(a, value)) {
-        .completed, .failed, .cancelled, .blocked, .unknown => return false,
+        .completed, .failed, .cancelled => return .settled,
+        .blocked, .unknown => return unrun,
         .queued, .running, .waiting_input, .parked, .cancelling => {},
     }
     var arena = std.heap.ArenaAllocator.init(a);
@@ -840,7 +910,7 @@ fn genesisRunnable(service: anytype, a: std.mem.Allocator, task: t.Id) !bool {
         .runtime_identity = value.runtime_identity,
         .has_controller = value.controller != null,
     });
-    return disposition == .exact_continuation;
+    return if (disposition == .exact_continuation) .runnable else unrun;
 }
 
 pub fn validateExportDestination(io: std.Io, directory: []const u8, name: []const u8) !void {

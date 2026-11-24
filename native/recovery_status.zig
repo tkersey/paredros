@@ -11,6 +11,13 @@ pub const Action = union(enum) {
     replace: @FieldType(t.Supersession, "cause"),
 };
 pub const Resume = enum { unchanged, resumed, incompatible };
+pub const Decision = union(enum) {
+    none: void,
+    resume_captured: void,
+    resume_parked: void,
+    replace: @FieldType(t.Supersession, "cause"),
+    unusable: void,
+};
 pub const Turn = struct {
     status: native.tasks.Status,
     action: Action,
@@ -53,6 +60,22 @@ pub fn classify(
         .parked => .{ .resume_parked = {} },
         .blocked => blocked(blocker, current_occurrence, snapshot),
         else => .{ .stay = {} },
+    };
+}
+
+pub fn decide(action: Action, fenced: bool, fold_only: bool) Decision {
+    switch (action) {
+        .resume_captured => return .{ .resume_captured = {} },
+        .replace => |cause| if (fold_only and (cause == .failed or cause == .control))
+            return .{ .unusable = {} },
+        .stay, .resume_parked => {},
+    }
+    if (fenced and !fold_only) return .{ .replace = .control };
+    return switch (action) {
+        .stay => .{ .none = {} },
+        .resume_parked => .{ .resume_parked = {} },
+        .replace => |cause| .{ .replace = cause },
+        .resume_captured => unreachable,
     };
 }
 

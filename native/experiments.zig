@@ -189,9 +189,13 @@ pub fn settled(record: idx.Record) !?t.ExperimentResult {
     const snapshot = record.owner_snapshot orelse return error.MissingOwnerSnapshot;
     const output = record.result orelse return null;
     if (output != .experiment) return null;
-    var result = output.experiment;
-    result.accounting = snapshot.accounting;
-    return result;
+    return accounted(output.experiment, snapshot.accounting);
+}
+
+pub fn accounted(result: t.ExperimentResult, accounting: t.Accounting) t.ExperimentResult {
+    var value = result;
+    value.accounting = accounting;
+    return value;
 }
 
 pub fn measurements(accounting: t.Accounting) e.Measurements {

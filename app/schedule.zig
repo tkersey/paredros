@@ -39,28 +39,19 @@ pub fn observe(
         .due = manual_check or scheduled,
         .skipped_slots = skipped,
         .clock_regressed = regressed,
-        .next_due_ms = if (regressed or scheduled)
+        .next_due_ms = if (regressed)
+            try rebased(state.next_due_ms, state.last_clock_ms, now_ms)
+        else if (scheduled)
             try firstAfter(state.anchor_ms, state.interval_ms, now_ms)
         else
             state.next_due_ms,
     };
 }
 
-pub const ProviderBackoff = struct {
-    admitted_wait_ms: u64,
-    started_monotonic_ms: i64,
-
-    pub fn remaining(self: ProviderBackoff, now_monotonic_ms: i64) u64 {
-        const elapsed = @as(i128, now_monotonic_ms) - self.started_monotonic_ms;
-        if (elapsed <= 0) return self.admitted_wait_ms;
-        if (elapsed >= self.admitted_wait_ms) return 0;
-        return self.admitted_wait_ms - @as(u64, @intCast(elapsed));
-    }
-
-    pub fn afterRestart(admitted_wait_ms: u64, now_monotonic_ms: i64) ProviderBackoff {
-        return .{ .admitted_wait_ms = admitted_wait_ms, .started_monotonic_ms = now_monotonic_ms };
-    }
-};
+pub fn rebased(instant_ms: i64, previous_clock_ms: i64, now_ms: i64) !i64 {
+    const remaining: i128 = @max(0, @as(i128, instant_ms) - previous_clock_ms);
+    return std.math.cast(i64, now_ms + remaining) orelse error.ScheduleOverflow;
+}
 
 pub const Phase = enum { fold, check, render };
 pub const PhaseInputs = struct {

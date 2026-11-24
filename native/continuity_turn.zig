@@ -4,72 +4,68 @@ const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
+const Catalog = continuity.Catalog;
+const Replaced = std.AutoHashMapUnmanaged(t.Digest, void);
 
 pub fn sourceFact(
     a: std.mem.Allocator,
-    bundle: continuity.Bundle,
+    catalog: *const Catalog,
     item: continuity.Member,
 ) !continuity.SourceFact {
-    for (bundle.members.items) |source| {
-        if (source.data.kind != .settlement or
-            !std.meta.eql(source.data.source.namespace, item.data.source.namespace) or
-            !std.meta.eql(source.data.source.task, item.data.source.task) or
-            source.data.source.revision != item.data.source.revision) continue;
-        return (try continuity.decode(.settlement, a, source.data)).value;
-    }
-    return error.MissingContinuityFact;
+    const position = catalog.facts.get(.{
+        .namespace = item.data.source.namespace,
+        .task = item.data.source.task,
+        .revision = item.data.source.revision,
+    }) orelse return error.MissingContinuityFact;
+    const data = catalog.bundle.members.items[position].data;
+    return (try continuity.decode(.settlement, a, data)).value;
 }
 
 fn historicalMember(
     a: std.mem.Allocator,
-    bundle: continuity.Bundle,
+    catalog: *const Catalog,
     imported: t.TurnContinuity,
 ) !continuity.Member {
-    for (bundle.members.items) |source| {
-        if (source.data.kind != .turn or
-            !std.meta.eql(source.data.source.namespace, imported.source_namespace) or
-            !std.meta.eql(source.data.source.task, imported.original.task) or
-            source.data.source.revision != imported.original.revision) continue;
-        const fact = try sourceFact(a, bundle, source);
-        if (!std.meta.eql(
-            try continuity.digest(a, retained.Snapshot, fact.snapshot),
-            imported.original.digest,
-        )) return error.InvalidContinuityAncestry;
-        return source;
-    }
-    return error.MissingContinuityAncestry;
+    const found = catalog.sourced.get(.{ .kind = .turn, .source = .{
+        .namespace = imported.source_namespace,
+        .task = imported.original.task,
+        .revision = imported.original.revision,
+    } }) orelse return error.MissingContinuityAncestry;
+    const source = catalog.bundle.members.items[found.position];
+    const fact = try sourceFact(a, catalog, source);
+    if (!std.meta.eql(
+        try continuity.digest(a, retained.Snapshot, fact.snapshot),
+        imported.original.digest,
+    )) return error.InvalidContinuityAncestry;
+    return source;
 }
 
 fn previousTurn(
     a: std.mem.Allocator,
-    bundle: continuity.Bundle,
+    catalog: *const Catalog,
     item: continuity.Member,
 ) !?continuity.Member {
     const value = try continuity.decode(.turn, a, item.data);
     if (value.value.input.replacement) |replacement| {
-        for (bundle.members.items) |candidate| {
-            if (candidate.data.kind == .turn and
-                std.meta.eql(candidate.data.source.namespace, item.data.source.namespace) and
-                std.meta.eql(candidate.data.source.task, replacement.input.task) and
-                std.meta.eql(
-                    candidate.data.source.digest,
-                    replacement.input.digest,
-                )) return candidate;
-        }
-        return error.MissingContinuityAncestry;
+        const position = catalog.turns.get(.{
+            .namespace = item.data.source.namespace,
+            .task = replacement.input.task,
+            .digest = replacement.input.digest,
+        }) orelse return error.MissingContinuityAncestry;
+        return catalog.bundle.members.items[position];
     }
     const imported = value.value.input.continuity orelse return null;
-    return try historicalMember(a, bundle, imported);
+    return try historicalMember(a, catalog, imported);
 }
 
 fn originalEnvelope(
     a: std.mem.Allocator,
-    bundle: continuity.Bundle,
+    catalog: *const Catalog,
     item: continuity.Member,
 ) !t.Envelope {
     var current = item;
-    for (0..bundle.members.items.len) |_| {
-        const previous = try previousTurn(a, bundle, current) orelse {
+    for (0..catalog.bundle.members.items.len) |_| {
+        const previous = try previousTurn(a, catalog, current) orelse {
             const value = try continuity.decode(.turn, a, current.data);
             return value.value.input.envelope;
         };
@@ -78,36 +74,32 @@ fn originalEnvelope(
     return error.CyclicContinuityAncestry;
 }
 
-fn superseded(a: std.mem.Allocator, bundle: continuity.Bundle, item: continuity.Member) !bool {
-    for (bundle.members.items) |candidate| {
-        if (candidate.data.kind != .turn) continue;
-        if (try previousTurn(a, bundle, candidate)) |previous|
-            if (std.meta.eql(previous.identity, item.identity)) return true;
-    }
-    return false;
-}
-
-pub fn validateBundle(a: std.mem.Allocator, bundle: continuity.Bundle) !void {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    for (bundle.members.items) |item| {
+pub fn replacedTurns(a: std.mem.Allocator, catalog: *const Catalog) !Replaced {
+    var replaced: Replaced = .empty;
+    for (catalog.bundle.members.items) |item| {
         if (item.data.kind != .turn) continue;
-        _ = try originalEnvelope(arena.allocator(), bundle, item);
-    }
-    for (try pendingTurns(arena.allocator(), bundle)) |item| {
-        try validateTarget(arena.allocator(), bundle, item);
-    }
-}
-
-pub fn pendingTurns(a: std.mem.Allocator, bundle: continuity.Bundle) ![]continuity.Member {
-    var replaced: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
-    for (bundle.members.items) |item| {
-        if (item.data.kind != .turn) continue;
-        const previous = try previousTurn(a, bundle, item) orelse continue;
+        const previous = try previousTurn(a, catalog, item) orelse continue;
         try replaced.put(a, previous.identity, {});
     }
+    return replaced;
+}
+
+pub fn validateBundle(a: std.mem.Allocator, catalog: *const Catalog) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for (catalog.bundle.members.items) |item| {
+        if (item.data.kind != .turn) continue;
+        _ = try originalEnvelope(arena.allocator(), catalog, item);
+    }
+    for (try pendingTurns(arena.allocator(), catalog)) |item| {
+        try validateTarget(arena.allocator(), catalog, item);
+    }
+}
+
+pub fn pendingTurns(a: std.mem.Allocator, catalog: *const Catalog) ![]continuity.Member {
+    const replaced = try replacedTurns(a, catalog);
     var result: std.ArrayList(continuity.Member) = .empty;
-    for (bundle.members.items) |item| {
+    for (catalog.bundle.members.items) |item| {
         if (item.data.kind != .turn or replaced.contains(item.identity)) continue;
         const value = try continuity.decode(.turn, a, item.data);
         if (value.value.result == null) try result.append(a, item);
@@ -115,22 +107,18 @@ pub fn pendingTurns(a: std.mem.Allocator, bundle: continuity.Bundle) ![]continui
     return result.toOwnedSlice(a);
 }
 
-fn validateTarget(a: std.mem.Allocator, bundle: continuity.Bundle, item: continuity.Member) !void {
+fn validateTarget(a: std.mem.Allocator, catalog: *const Catalog, item: continuity.Member) !void {
     const value = try continuity.decode(.turn, a, item.data);
     const target = value.value.input.target orelse return;
-    if (continuity.lineage(bundle, item.data.lineage) == null)
-        return error.MissingContinuityTarget;
-    for (bundle.members.items) |source| {
-        if (source.data.kind != .settlement or
-            !std.meta.eql(source.data.source.namespace, item.data.source.namespace) or
-            !std.meta.eql(source.data.source.task, target)) continue;
-        const fact = try continuity.decode(.settlement, a, source.data);
-        const input = try continuity.sourceInput(a, fact.value.input);
-        if (input != .genesis or !std.meta.eql(input.genesis.lineage, item.data.lineage))
-            return error.InvalidContinuityTarget;
-        return;
-    }
-    return error.MissingContinuityTarget;
+    if (catalog.lineage(item.data.lineage) == null) return error.MissingContinuityTarget;
+    const position = catalog.task_facts.get(.{
+        .namespace = item.data.source.namespace,
+        .task = target,
+    }) orelse return error.MissingContinuityTarget;
+    const fact = try continuity.decode(.settlement, a, catalog.bundle.members.items[position].data);
+    const input = try continuity.sourceInput(a, fact.value.input);
+    if (input != .genesis or !std.meta.eql(input.genesis.lineage, item.data.lineage))
+        return error.InvalidContinuityTarget;
 }
 
 fn operation(a: std.mem.Allocator, bundle: t.Digest, identity: t.Digest) ![]u8 {
@@ -166,6 +154,7 @@ fn mappedInput(
     a: std.mem.Allocator,
     index: *const idx.Index,
     portable: continuity.Portable,
+    catalog: *const Catalog,
     item: continuity.Member,
     model: ?t.ModelBinding,
     ordinal: u64,
@@ -174,7 +163,7 @@ fn mappedInput(
     if (decoded.value.result != null) return error.CompletedContinuityTurn;
     const local = try continuity.binding(portable.metadata.members.items, item.identity);
     const current = index.record(local.task) orelse return error.MissingContinuityMember;
-    const fact = try sourceFact(a, portable.bundle, item);
+    const fact = try sourceFact(a, catalog, item);
     var result = decoded.value.input;
     result.envelope.operation = .{ .bytes = try operation(
         a,
@@ -210,15 +199,15 @@ fn mappedInput(
 pub fn validateMapped(a: std.mem.Allocator, index: *const idx.Index, turn: t.Turn) !void {
     const ancestry = turn.continuity orelse return error.MissingContinuityAncestry;
     const found = try continuity.portableMember(index, ancestry.member, .turn);
-    if (try superseded(
-        a,
-        found.portable.bundle,
-        found.member,
-    )) return error.SupersededContinuityTurn;
+    var catalog = try Catalog.init(a, found.portable.bundle);
+    defer catalog.deinit();
+    if ((try replacedTurns(a, &catalog)).contains(found.member.identity))
+        return error.SupersededContinuityTurn;
     const expected = try mappedInput(
         a,
         index,
         found.portable,
+        &catalog,
         found.member,
         turn.model,
         turn.ordinal,
@@ -227,26 +216,36 @@ pub fn validateMapped(a: std.mem.Allocator, index: *const idx.Index, turn: t.Tur
 }
 
 pub const Progress = struct { admitted: ?t.Id = null, remaining: u64 = 0, historical: u64 = 0 };
-const Pending = struct { portable: continuity.Portable, member: continuity.Member, ordinal: u64 };
+const Pending = struct {
+    portable: continuity.Portable,
+    catalog: *const Catalog,
+    member: continuity.Member,
+    ordinal: u64,
+};
 
 fn pending(a: std.mem.Allocator, index: *const idx.Index, progress: *Progress) ![]Pending {
     var result: std.ArrayList(Pending) = .empty;
     var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     for (index.portable) |portable| {
+        const catalog = try a.create(Catalog);
+        catalog.* = try Catalog.init(a, portable.bundle);
+        const replaced = try replacedTurns(a, catalog);
         for (portable.bundle.members.items) |item| {
             if (item.data.kind != .turn or seen.contains(item.identity)) continue;
             try seen.put(a, item.identity, {});
             const value = try continuity.decode(.turn, a, item.data);
-            if (value.value.result != null or try superseded(a, portable.bundle, item)) {
+            if (value.value.result != null or replaced.contains(item.identity)) {
                 progress.historical += 1;
                 continue;
             }
             const name = try operation(a, portable.metadata.bundle, item.identity);
             if (byOperation(index, name) != null) continue;
-            try result.append(
-                a,
-                .{ .portable = portable, .member = item, .ordinal = value.value.input.ordinal },
-            );
+            try result.append(a, .{
+                .portable = portable,
+                .catalog = catalog,
+                .member = item,
+                .ordinal = value.value.input.ordinal,
+            });
         }
     }
     std.mem.sort(Pending, result.items, {}, struct {
@@ -275,6 +274,7 @@ pub fn admit(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !Progress 
         scratch,
         &index,
         first.portable,
+        first.catalog,
         first.member,
         driver.model,
         try nextOrdinal(&index),

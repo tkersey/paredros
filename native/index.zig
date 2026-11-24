@@ -48,9 +48,10 @@ pub const Obligation = struct {
     effective_mode: t.Mode,
     controls_pending: bool,
     settlements: std.AutoHashMapUnmanaged(t.Id, t.Settlement) = .empty,
+    fault: ?[]const u8 = null,
 
     pub fn ordinaryDispatch(self: Obligation) bool {
-        return self.effective_mode == .active and !self.controls_pending;
+        return self.effective_mode == .active and !self.controls_pending and self.fault == null;
     }
 };
 pub const Index = struct {

@@ -195,6 +195,8 @@ fn importedTurns(a: std.mem.Allocator, index: *const idx.Index) ![]ImportedTurn 
     var result: std.ArrayList(ImportedTurn) = .empty;
     var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
     for (index.portable) |imported| {
+        const catalog = try a.create(continuity.Catalog);
+        catalog.* = try continuity.Catalog.init(a, imported.bundle);
         for (imported.bundle.members.items) |member| {
             if (member.data.kind != .turn or seen.contains(member.identity)) continue;
             try seen.put(a, member.identity, {});
@@ -206,7 +208,7 @@ fn importedTurns(a: std.mem.Allocator, index: *const idx.Index) ![]ImportedTurn 
                 .value = value.value,
                 .source_snapshot = (try @import("continuity_turn.zig").sourceFact(
                     a,
-                    imported.bundle,
+                    catalog,
                     member,
                 )).snapshot,
             });

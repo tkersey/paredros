@@ -1045,12 +1045,14 @@ fn publish(
     return b.update(head, .{
         .message = try b.variant(try c.schema(?t.Notification), "some", message),
         .told = through,
-        .render_not_before_ms = try b.checked(
-            .add,
-            try b.field(head, "clock_ms"),
-            interval,
-            .{ .overflow = overflow },
-        ),
+        .schedule = try b.update(try b.field(head, "schedule"), .{
+            .render_not_before_ms = try b.checked(
+                .add,
+                try b.field(head, "clock_ms"),
+                interval,
+                .{ .overflow = overflow },
+            ),
+        }),
         .render_failure_streak = try b.constant(u32, 0),
     });
 }

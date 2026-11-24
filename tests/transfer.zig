@@ -727,7 +727,7 @@ fn transferWritten(
 ) !transfer.OwnedBundle {
     const a = f.arena.allocator();
     for (0..16) |_| {
-        const progress = try continuity_control.exportBundle(
+        const progress = (try continuity_control.exportBundle(
             driver,
             a,
             settings,
@@ -735,7 +735,7 @@ fn transferWritten(
             "pending-transfer",
             origin,
             .{ .name = .{ .bytes = "handoff.paredros" } },
-        );
+        )).progress;
         var index = try driver.rebuild(a);
         defer index.deinit();
         if (progress.phase == .written) return transfer.committedBundle(a, &index, progress.cut.?);
@@ -820,7 +820,7 @@ fn strandedExport(
         .source = source(f),
     };
     for (0..16) |_| {
-        const progress = try continuity_control.exportBundle(
+        const progress = (try continuity_control.exportBundle(
             driver,
             f.arena.allocator(),
             settings,
@@ -828,14 +828,14 @@ fn strandedExport(
             request.name.bytes,
             origin,
             request,
-        );
+        )).progress;
         if (progress.phase == .written) return progress;
         try finishExcept(f, driver, stranded);
     }
     return error.ExportDidNotComplete;
 }
 
-test "native continuity export finishes without a genesis this build can never run" {
+test "native continuity transfer refuses a genesis this build can never run until it is cancelled" {
     var f: Fixture = .{};
     defer f.deinit();
     try f.init();
@@ -861,6 +861,20 @@ test "native continuity export finishes without a genesis this build can never r
         .name = .{ .bytes = "stranded.paredros" },
         .snapshot = true,
     });
+    const refused = try continuity_control.exportBundle(
+        &driver,
+        a,
+        settings,
+        .{ .io = std.testing.io, .source = source(&f) },
+        "handoff.paredros",
+        origin,
+        .{ .name = .{ .bytes = "handoff.paredros" } },
+    );
+    try std.testing.expectEqualSlices(t.Id, &.{stranded}, refused.stranded);
+    var fenced = try driver.rebuild(a);
+    try std.testing.expect(fenced.transfer_marker == null);
+    fenced.deinit();
+    _ = try @import("../native/commands.zig").abandon(&driver, a, "abandon", origin, stranded);
     const handoff = try strandedExport(&f, &driver, settings, stranded, .{
         .name = .{ .bytes = "handoff.paredros" },
     });
@@ -994,7 +1008,7 @@ fn exportWritten(
         .source = source(f),
     };
     for (0..16) |_| {
-        const progress = try continuity_control.exportBundle(
+        const progress = (try continuity_control.exportBundle(
             driver,
             a,
             settings,
@@ -1002,7 +1016,7 @@ fn exportWritten(
             operation,
             origin,
             .{ .name = .{ .bytes = name }, .snapshot = true },
-        );
+        )).progress;
         if (progress.phase == .written) return progress;
         try completeAdmissions(f, driver);
     }
@@ -1443,7 +1457,7 @@ fn exportAs(
     operation: []const u8,
     request: continuity_control.Export,
 ) !continuity_control.ExportProgress {
-    return continuity_control.exportBundle(
+    return (try continuity_control.exportBundle(
         driver,
         f.arena.allocator(),
         settings,
@@ -1451,7 +1465,7 @@ fn exportAs(
         operation,
         origin,
         request,
-    );
+    )).progress;
 }
 
 test "native continuity export retries resume the pending cut for one name" {
@@ -1898,4 +1912,92 @@ test "native continuity import renders a digest over untold imported batches" {
     try std.testing.expectEqual(1, published.through.?.sequence);
     try std.testing.expectEqualDeep(@as(?t.Oid, fake.oid(2)), published.through.?.tip);
     try std.testing.expectEqual(1, published.links.items.len);
+}
+
+fn reheaded(
+    a: std.mem.Allocator,
+    bundle: transfer.Bundle,
+    comptime edit: fn (*t.Head, *t.ContinuityData, t.Reference) void,
+    reference: t.Reference,
+) !transfer.Bundle {
+    const changed = (try c.decodeOwned(
+        transfer.Bundle,
+        a,
+        try c.encodeOwned(transfer.Bundle, a, bundle),
+    )).value;
+    const root = &@constCast(changed.lineages.items)[0];
+    for (@constCast(changed.members.items)) |*item| {
+        if (!std.meta.eql(item.identity, root.head)) continue;
+        var head = (try continuity.decode(.head, a, item.data)).value;
+        edit(&head, &item.data, reference);
+        item.data.payload.bytes = try c.encodeOwned(t.Head, a, head);
+        item.identity = try continuity.digest(a, t.ContinuityData, item.data);
+        root.head = item.identity;
+    }
+    return changed;
+}
+
+fn unlistBatch(head: *t.Head, data: *t.ContinuityData, batch: t.Reference) void {
+    head.last_observation.?.batch = .{ .retained = batch };
+    data.dependencies.items = &.{};
+}
+
+fn foreignReport(head: *t.Head, _: *t.ContinuityData, _: t.Reference) void {
+    head.method_disposition = .{
+        .source = .{ .task = @splat(0xee), .digest = @splat(0xef) },
+        .source_digest = @splat(1),
+        .reason = .{ .bytes = "missing" },
+        .consecutive_faults = 1,
+        .model_consumed = false,
+        .reverted = true,
+    };
+}
+
+test "native continuity closure rejects unresolved or unlisted references before import admission" {
+    var repository: fake.Source = .{ .ahead = true };
+    var from: GithubFixture = .{};
+    defer from.deinit();
+    from.profile.environment = &repository;
+    try from.initWithGrants(&.{@import("../app/github_contract.zig").identity});
+    var to: GithubFixture = .{};
+    defer to.deinit();
+    to.profile.environment = &repository;
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: fake.Clock = .{};
+    var original = githubDriver(&from, &clock);
+    try original.attach(a);
+    try fake.drive(&from, (try original.nextStep(a, target)).?);
+    repository.tip = 2;
+    clock.now_ms = 1_000_000;
+    try fake.drive(&from, (try original.nextStep(a, target)).?);
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    original.detach();
+    try from.close();
+    const batch = for (bundle.value.members.items) |item| {
+        if (item.data.kind == .batch) break item.current;
+    } else return error.MissingContinuityBatch;
+    const unlisted = try reheaded(a, bundle.value, unlistBatch, batch);
+    try std.testing.expectError(
+        error.UnlistedContinuityReference,
+        continuity.validate(a, unlisted),
+    );
+    const dangling = try reheaded(a, bundle.value, foreignReport, batch);
+    try std.testing.expectError(
+        error.MissingContinuityReference,
+        continuity.validate(a, dangling),
+    );
+    try to.initWithGrants(&.{@import("../app/github_contract.zig").identity});
+    var destination = githubDriver(&to, &clock);
+    try destination.attach(a);
+    defer destination.detach();
+    try std.testing.expectError(
+        error.MissingContinuityReference,
+        importBundle(&to, &destination, dangling),
+    );
+    var index = try destination.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(0, index.records.len);
 }

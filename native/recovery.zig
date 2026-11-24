@@ -26,31 +26,33 @@ pub fn advance(
         saved.value.current_occurrence,
         record.owner_snapshot orelse return error.MissingOwnerSnapshot,
     );
-    const cause: ?@FieldType(t.Supersession, "cause") =
-        if (!obligation.ordinaryDispatch() and !record.input.step.fold_only)
-            .control
-        else if (action == .replace)
-            action.replace
-        else
-            null;
-    if (record.input.step.fold_only and (status == .failed or status == .cancelled))
-        return error.UnusableFoldAttempt;
-    if (cause) |reason| return try replace(
-        service,
-        a,
-        record,
-        obligation.task,
-        clock_ms,
-        model,
-        page_limit,
-        reason,
+    const decision = recovery_status.decide(
+        action,
+        !obligation.ordinaryDispatch(),
+        record.input.step.fold_only,
     );
+    const selected: recovery_status.Action = switch (decision) {
+        .none => return null,
+        .unusable => return error.UnusableFoldAttempt,
+        .replace => |reason| return try replace(
+            service,
+            a,
+            record,
+            obligation.task,
+            clock_ms,
+            model,
+            page_limit,
+            reason,
+        ),
+        .resume_captured => .{ .resume_captured = {} },
+        .resume_parked => .{ .resume_parked = {} },
+    };
     const resumed = try recovery_status.resumeSelected(
         service,
         a,
         record.task,
         saved.value.revision,
-        action,
+        selected,
         saved.value.current_occurrence,
     );
     if (resumed == .incompatible)

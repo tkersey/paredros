@@ -96,6 +96,26 @@ test "configuration closed schema validates uid version and bindings" {
     );
 }
 
+test "configuration refuses policies outside the bounds every authored use is total within" {
+    var changed = fixture();
+    changed.policies.notification_interval_ms = std.math.maxInt(u64);
+    const overflow = try encoded(changed);
+    defer a.free(overflow);
+    try std.testing.expectError(error.PolicyOutOfBounds, configuration.parse(a, overflow, 42));
+    changed = fixture();
+    changed.policies.phase_attempts = 49;
+    const backoff = try encoded(changed);
+    defer a.free(backoff);
+    try std.testing.expectError(error.PolicyOutOfBounds, configuration.parse(a, backoff, 42));
+    changed = fixture();
+    changed.policies.phase_attempts = 20;
+    changed.policies.context_bytes = 248 * 1024;
+    const bounded = try encoded(changed);
+    defer a.free(bounded);
+    var accepted = try configuration.parse(a, bounded, 42);
+    accepted.deinit();
+}
+
 fn withModel() configuration.Config {
     var config = fixture();
     config.model = .{

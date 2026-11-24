@@ -157,15 +157,55 @@ refused from callers with `SystemDirective`. An admission response means the
 operation is durable. It does not mean that a step has folded it or published a
 resulting message yet.
 
-A new monitor interval (`--interval-ms`, an amendment, or a confirmed proposal)
-must be between 1 ms and 366 days (31622400000 ms); a longer one is refused with
-`IntervalTooLong`. A configuration whose `interval_ms` exceeds that bound fails
-to load with `IntervalMsExceedsMaximum`.
+Every specification a head can hold passes one bound check, so the schedule,
+backoff, pacing and byte arithmetic of every step is total. A monitor interval
+(`--interval-ms`, an amendment, or a confirmed proposal) must be between 1 ms and
+366 days (31622400000 ms); a longer one is refused with `IntervalTooLong`. The
+policies are bounded as follows, and a value outside them is refused with
+`PolicyOutOfBounds`:
+
+| Policy | Bound |
+|---|---|
+| `notification_interval_ms`, `clock_regression_tolerance_ms` | 0 to 31622400000 |
+| `phase_attempts` | 1 to 20 |
+| `method_faults` | 1 to 1000 |
+| `render_input_bytes` | 256 to 1048576 |
+| `context_bytes` | 256 to 253952 |
+
+The check runs when a monitor is added, when an amendment folds (an out-of-bound
+amendment is rejected with the reason `invalid_interval` or
+`invalid_policy_NAME` and the head keeps its specification), when a bundle is
+imported, and when the configuration loads. A configuration whose `interval_ms`
+exceeds the bound fails to load with `IntervalMsExceedsMaximum`; one with an
+out-of-bound policy fails with `PolicyOutOfBounds`. An amendment that changes the
+interval moves a check that is not yet due to the first slot after the step's
+clock observation on the original anchor; a check that is already due stays due.
 
 Every identifier, digest and cursor in a reply uses the form its command accepts:
 task IDs and digests are lowercase hex, proposal identities are
 `REQUEST_DIGEST:ATTEMPT:ORDINAL`, and ordinals are decimal. Copy `data.next` from
 `status` into `status --after` until it is null.
+
+If one obligation cannot advance (for example its fold-only replacement failed),
+the daemon records the failure as that obligation's `fault`, shown by `status`
+and `monitor show`, and stops scheduling and dispatching only that obligation.
+Every other obligation and every control continue. Only namespace-wide failures
+(storage unavailable, a corrupt store, exhausted memory, or a wall clock outside
+years 1970 to 9999) stop `serve`. A fault is held by the running daemon; a restart
+retries the obligation and records the fault again if it recurs.
+
+A head records `clock_regressions` and the last regression it observed
+(`last_clock_regression`). When a step observes the wall clock more than
+`clock_regression_tolerance_ms` behind the previous head, every schedule instant
+(`schedule.next_due_ms`, `schedule.source_not_before_ms` and
+`schedule.render_not_before_ms`) keeps its remaining duration from the corrected
+clock. A provider deadline from `Retry-After` or a rate-limit reset
+(`provider_not_before_ms`) is never shortened. `skipped_slots` counts coalesced
+slots, including those observed by a check that failed and was replaced.
+
+Under a pause, a step that already captured its provider response finishes from
+that capture instead of being cancelled and repeated after resume; any step that
+would need new provider I/O is replaced by a fold-only step.
 
 `status` reports the running daemon's application version and executable SHA-256
 under `data.daemon`. `data.namespace_bytes` sums the logical lengths of the live
@@ -248,7 +288,10 @@ any directory; `monitor show` also reports the open question. Once the question
 closes, its prompt stays in the history without a command. `proposal show` and
 `proposal confirm` handle proposals.
 
-`ask` waits for and prints the conversation reply. Every turn ends with a reply:
+`ask` waits for and prints the conversation reply. A model reply is untrusted
+text: like commit messages in a digest, every control, bidirectional-override
+or other non-printable scalar in it, including line breaks, is replaced with a
+space before the reply is recorded. Every turn ends with a reply:
 the daemon resumes or replaces an unfinished attempt, retries a failed model call
 once with the frozen context, and then completes a final authored failure reply.
 `task show` of a turn follows its replacements and reports the recorded result
@@ -290,8 +333,11 @@ refuses a filename that already exists before it takes a cut or fences the sourc
 existing files are never overwritten. While an admitted `monitor add` has not run,
 snapshot export refuses with `ContinuityGenesisPending` and transfer export keeps
 finalizing. A monitor this build can never run (its task is blocked, or pinned to
-another program, profile, or runtime) does not hold export: it stays unrun in the
-source and is not carried.
+another program, profile, or runtime) is not carried by a bundle, so transfer
+export refuses with `StrandedGenesis` before fencing the source and lists those
+monitors under `data.stranded`. `monitor cancel ID` on such a monitor records the
+operator's cancellation; after that, transfer export proceeds without it. A
+snapshot export leaves it unrun in the source.
 
 Each snapshot export run takes a new cut, except that a run for a NAME whose cut
 is still pending resumes that cut. A namespace has one transfer: after the first
@@ -300,6 +346,15 @@ writes its committed cut under the requested NAME. Every export response reports
 `data.operation`, the operation that owns the cut. When a command exits 75 before
 the file is written, it prints that operation; rerun the same export command with
 `--operation OPERATION` to finish writing exactly that cut.
+
+Export and import check that the bundle is closed before reporting success or
+admitting anything: every head, control and turn reference to a batch or method
+report must name exactly one member of that kind listed in its dependencies.
+Otherwise the bundle is refused (`MissingContinuityReference`,
+`AmbiguousContinuityReference` or `UnlistedContinuityReference`). Validation
+indexes members by digest and runs in time linear in the bundle size. An
+exported method report carries the known and possible charges recorded for its
+experiment.
 
 Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's

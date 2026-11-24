@@ -106,16 +106,17 @@ pub const ScheduleInput = struct {
     previous_clock_ms: i64,
     clock_ms: i64,
     next_due_ms: i64,
-    anchor_ms: i64,
     interval_ms: u64,
     tolerance_ms: u64,
 };
-pub const ScheduleResult = struct { next_due_ms: i64, skipped_slots: u64, regressed: bool };
+pub const ScheduleResult = struct { skipped_slots: u64, regressed: bool };
 pub const Schedule = a.Function(struct { input: ScheduleInput }, ScheduleResult);
+pub const RebaseInput = struct { schedule: t.Schedule, previous_clock_ms: i64, clock_ms: i64 };
+pub const Rebase = a.Function(struct { input: RebaseInput }, t.Schedule);
+pub const Instants = std.enums.EnumFieldStruct(std.meta.FieldEnum(t.Schedule), a.Value(i64), null);
 
 pub fn schedule(c: protean.Context) !Schedule {
     const shift = try shiftFunction(c);
-    const next = try emit(c);
     const function = try c.author.function("observe anchored schedule without an ambient clock", .{
         .input = try c.schema(ScheduleInput),
     }, try c.schema(ScheduleResult), &.{});
@@ -135,24 +136,6 @@ pub fn schedule(c: protean.Context) !Schedule {
         try b.less(now, previous),
         try earlier.ret(try earlier.less(try earlier.field(input, "tolerance_ms"), delta)),
         try later.ret(try later.constant(bool, false)),
-    );
-    const corrected = try b.branch();
-    const ordinary = try b.branch();
-    const corrected_due = try corrected.call(
-        next,
-        .{ .input = try corrected.product(
-            try c.schema(Input),
-            .{
-                .clock_ms = try corrected.field(input, "clock_ms"),
-                .anchor_ms = try corrected.field(input, "anchor_ms"),
-                .interval_ms = interval,
-            },
-        ) },
-    );
-    const new_due = try b.conditional(
-        regressed,
-        try corrected.ret(corrected_due),
-        try ordinary.ret(try ordinary.field(input, "next_due_ms")),
     );
     const missed = try b.branch();
     const waiting = try b.branch();
@@ -174,9 +157,31 @@ pub fn schedule(c: protean.Context) !Schedule {
         try waiting.ret(try waiting.constant(u64, 0)),
     );
     try c.author.define(function, try b.ret(try b.product(try c.schema(ScheduleResult), .{
-        .next_due_ms = new_due,
         .skipped_slots = count,
         .regressed = regressed,
     })));
+    return function;
+}
+
+pub fn rebase(c: protean.Context) !Rebase {
+    const function = try c.author.function("rebase schedule instants onto a corrected clock", .{
+        .input = try c.schema(RebaseInput),
+    }, try c.schema(t.Schedule), &.{});
+    const b = try c.author.body(function);
+    const input = try b.parameter("input");
+    const current = try b.field(input, "schedule");
+    const previous = try b.field(input, "previous_clock_ms");
+    const now = try b.field(input, "clock_ms");
+    const overflow = try a.failure(c, "schedule_rebase_overflow");
+    const zero = try b.constant(i64, 0);
+    var instants: Instants = undefined;
+    inline for (@typeInfo(t.Schedule).@"struct".field_names) |name| {
+        const remaining = try b.checked(.subtract, try b.field(current, name), previous, .{
+            .overflow = overflow,
+        });
+        const kept = try b.select(try b.less(remaining, zero), zero, remaining);
+        @field(instants, name) = try b.checked(.add, now, kept, .{ .overflow = overflow });
+    }
+    try c.author.define(function, try b.ret(try b.product(try c.schema(t.Schedule), instants)));
     return function;
 }

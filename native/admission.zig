@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("protean_contracts");
 const t = @import("application_types");
+const bounds = @import("../app/bounds.zig");
 
 pub const Request = struct {
     operation: []const u8,
@@ -10,11 +11,26 @@ pub const Request = struct {
     digest: t.Digest,
 };
 
-pub const interval_ms_max: u64 = 366 * 24 * 60 * 60 * 1000;
+pub const interval_ms_max = bounds.interval_ms_max;
 
-pub fn interval(interval_ms: u64) !void {
+pub fn interval(interval_ms: u64) error{ InvalidInterval, IntervalTooLong }!void {
     if (interval_ms == 0) return error.InvalidInterval;
     if (interval_ms > interval_ms_max) return error.IntervalTooLong;
+}
+
+pub fn specification(value: t.Specification) !void {
+    switch (bounds.violation(value) orelse return) {
+        .interval => try interval(value.interval_ms),
+        .anchor => return error.InvalidAnchor,
+        .policy => return error.PolicyOutOfBounds,
+    }
+    unreachable;
+}
+
+pub fn amendment(value: t.Amendment) !void {
+    if (value.interval_ms) |interval_ms| try interval(interval_ms);
+    if (value.policies) |policies| if (!bounds.policiesWithin(policies))
+        return error.PolicyOutOfBounds;
 }
 
 pub fn recorded(service: anytype, a: std.mem.Allocator, operation: []const u8) !bool {

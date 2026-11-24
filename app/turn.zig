@@ -5,15 +5,20 @@ const a = @import("author.zig");
 const m = @import("model_contract.zig");
 const model = @import("model.zig");
 const description = @import("proposal_text.zig");
+const frame = @import("render_frame.zig");
 
 pub const Function = a.Function(struct { input: t.Turn }, t.TurnResult);
 const Conversation = @FieldType(m.Candidate, "conversation");
 const Proposals = @FieldType(t.TurnResult, "proposals");
 const State = struct { turn: t.Turn, conversation: Conversation, index: u64, proposals: Proposals };
 const Loop = a.Function(struct { state: State }, t.TurnResult);
+const Tools = struct { describe: description.Function, neutral: frame.Neutral };
 
 pub fn emit(c: protean.Context, completion: model.Function, effects: anytype) !Function {
-    const loop = try proposals(c, try description.emit(c));
+    const loop = try proposals(c, .{
+        .describe = try description.emit(c),
+        .neutral = try frame.neutral(c),
+    });
     const function = try c.author.function("one frozen conversation turn", .{
         .input = try c.schema(t.Turn),
     }, try c.schema(t.TurnResult), effects);
@@ -123,7 +128,7 @@ fn acquire(
     });
 }
 
-fn proposals(c: protean.Context, describe: description.Function) !Loop {
+fn proposals(c: protean.Context, tools: Tools) !Loop {
     const function = try c.author.function("describe frozen proposals", .{
         .state = try c.schema(State),
     }, try c.schema(t.TurnResult), &.{});
@@ -145,12 +150,12 @@ fn proposals(c: protean.Context, describe: description.Function) !Loop {
         }),
         .proposals = try more.append(
             try more.field(state, "proposals"),
-            try proposal(c, more, describe, state, candidate),
+            try proposal(c, more, tools.describe, state, candidate),
             .{ .capacity = try a.failure(c, "proposal_limit") },
         ),
     });
     const final = try done.product(try c.schema(t.TurnResult), .{
-        .reply = try done.field(conversation, "reply"),
+        .reply = try done.call(tools.neutral, .{ .text = try done.field(conversation, "reply") }),
         .proposals = try done.field(state, "proposals"),
     });
     try c.author.define(function, try b.ret(try b.conditional(

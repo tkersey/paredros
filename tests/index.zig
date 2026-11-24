@@ -26,15 +26,20 @@ pub fn head() t.Head {
         .message = null,
         .question = null,
         .method = .{ .ordinary = {} },
-        .next_due_ms = 100,
+        .schedule = .{
+            .next_due_ms = 100,
+            .source_not_before_ms = 100,
+            .render_not_before_ms = 100,
+        },
+        .provider_not_before_ms = std.math.minInt(i64),
         .clock_ms = 100,
         .skipped_slots = 0,
+        .clock_regressions = 0,
+        .last_clock_regression = null,
         .phase = .fold,
         .previous_check_overran = false,
         .check_failure_streak = 0,
         .render_failure_streak = 0,
-        .source_not_before_ms = 100,
-        .render_not_before_ms = 100,
         .accounting = .{},
     };
 }
