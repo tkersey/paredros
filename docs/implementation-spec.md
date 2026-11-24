@@ -1,10 +1,35 @@
 # PAREDROS — implementation specification
 
-**Version:** 2.1 (skeptical review of 2.0; supersedes 2.0; §21 records the decisions and evidence)\
-**Date:** 2026-11-15\
+**Version:** 2.2 (amends 2.1 for the local first release; §0 is normative and overrides conflicting text below; §21 records the 2.1 decisions and evidence)\
+**Date:** 2026-11-24 (2.1: 2026-11-15)\
 **Status:** Proposed implementation contract; no implementation is claimed by this document.\
 **Product:** A personal assistant that carries continuing responsibilities through conversation, interruption, changing evidence, upgrades, and improvements to its own methods.\
 **Architecture decision:** A separate Zig application using Protean as a library, its existing native execution machinery, and its coherently selected Horos/Kosmos dependencies. For the first release, each responsibility is a chain of bounded Protean tasks with explicit application admission and dispatch laws.
+
+## 0. Amendment 2.2 — the local first release
+
+The owner removed Slack from the first release (2026-11-23). PAREDROS therefore performs **no external write**: GitHub and the model are read through bounded tasks, and every output is a local record read through the CLI. The 2.1 delivery apparatus existed to manage the uncertainty of an external write; with no external write it has no subject. This section states the resulting laws. Where text elsewhere in this document conflicts with it, this section governs.
+
+### 0.1 Laws of local output
+
+| # | Law |
+|---|---|
+| L1 | A **message** (activation, digest, or question prompt) is part of the head transition that decides it, published atomically with that head: genesis emits the activation; the render step that renders a digest emits it **and advances the told frontier to its coverage in the same head**; the step that raises a question emits its prompt. Directive dispositions are reported by the CLI and in status, not as messages. The told frontier advances only in the transition that emits the covering digest, so "told" and "a retained message covers it" are the same fact. |
+| L2 | There are no delivery tasks, delivery keys, generations, issues, outcomes (rejected/indeterminate/unknown/unconfirmed), holds, releases, prompt reissues, audits, receipts, reconciliation markers, frontier audits, or duplicate-tolerance policies. The `release` directive, the `delivery` commands and `serve --recover` do not exist. |
+| L3 | `paredros messages ID` is a pure projection of the obligation's selected head chain: one entry per head that carries a message, positioned by head sequence, stable once listed. A pending question's entry shows the exact `question answer` command. |
+| L4 | Pause, cancel, and transfer fence new check and render dispatch as in §7.3. A render dispatched before a restrictive directive linearized may still publish its digest; no render is dispatched after. Nothing else is fenced because nothing else is prepared. |
+| L5 | Rollback or snapshot restore needs no output hold: the namespace's messages roll back with it, and a second namespace producing local records duplicates no external effect. Operating one lineage in one place remains the operator's responsibility; no hold or exclusive-ownership declaration is recorded. |
+| L6 | Transfer export folds a system-originated `transfer` directive into final `transferred` heads, establishes a cut, and exports a closed bundle (§14.3). Import validates and re-admits the bundle and starts each obligation in its prior mode; a pending question survives as head data and its prompt is emitted again by the import genesis. Messages before the cut stay in the source namespace (the archive boundary). |
+| L7 | Read surfaces (`status`, `task show`, `messages`, `ask`) report recorded facts, never predictions of a later daemon decision. Every turn lineage ends with a reply: the original attempt, one model retry with the frozen context, then a final pure authored failure reply (§5.4). `ask` prints the lineage's reply or says it is still pending. |
+| L8 | Every caller ingress uses the §6.3 order: look up the operation identity; an identical repeat returns its original disposition and a different one conflicts; only an absent operation is validated and admitted. Caller ingress cannot express a system-only directive (`transfer`). |
+| L9 | Every identifier, digest, or cursor printed by one command and accepted by another has one textual form used for both. Absolute paths are used as given; relative paths are joined to the caller's working directory without collapsing `..`. |
+
+### 0.2 Superseded 2.1 text
+
+- §3.1 items 2 and 5, §3.2 rows for the conversation surface, activation read-back, unconfirmed digest and output route, and §3.3's Slack thread item: conversation is `paredros ask`; proposals are confirmed with `paredros proposal confirm`; there is no protected write.
+- §5.4's whole-write-history delivery retry paragraph, §6.2–§6.5 Slack ingress, interaction and button identities (the CLI paths remain), §7.3's prepared-delivery fencing, §7.4 steps 5–6, §9 and §10 in full, §13's `serve --recover` and `delivery` rows, §14.3–§14.4 output holds, exclusive-handoff and rollback audit text, and Slack items in §19–§21.
+- §18 acceptance rows concerning Slack ingress, external sends, audits, markers, uncertain or unconfirmed output, rollback audits and output holds (A01–A03, A16–A27, A35, A39, A42, A56, A60, A61, A64, A67, A69, A74, A75, A79, A80, A82, A86) do not apply. These rows are restated: A07 — the genesis head carries one activation message; A17/A18 — cancel fences new renders and the obligation reaches a cancelled head; A37/A50 — import preserves controls, untold evidence, method source and costs, without an output hold; A43 — the raising head carries exactly one prompt; A44 — a CLI answer closes the question and the prompt stays in the message history; A70 — a render dispatched before a pause may publish its digest, none is dispatched after; A71 — the lineage ends with an authored failure reply printed by `ask`; unknown model charges remain visible.
+- Earlier owner decisions still apply: acceptance case A65 is omitted; exhausted storage surfaces as Protean's `StorageUnavailable` fence rather than a visible hold; GitHub transport health in status is omitted; namespaces, fixtures and configurations of the unreleased prototype are unsupported.
 
 ## 1. Decision and purpose
 
