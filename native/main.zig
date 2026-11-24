@@ -91,8 +91,12 @@ fn describeBuild(init: std.process.Init, assets: native.discovery.Assets) !u8 {
     return 0;
 }
 
-fn client(init: std.process.Init, config: configuration.Config, args: []const []const u8) !u8 {
-    const request = try clientRequest(init, config, args);
+fn client(init: std.process.Init, config: configuration.Config, supplied: []const []const u8) !u8 {
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const args = try cli.callerArguments(arena.allocator(), init.io, supplied);
+    const command = (try cli.invocation(arena.allocator(), args)).command;
+    const request = try clientRequest(init, config, supplied, args, command);
     defer if (request) |bytes| init.gpa.free(bytes);
     var connection = try socket.Client.init(init.gpa, config.control_socket_path, .{
         .expected_server_uid = config.current_uid,
@@ -102,9 +106,10 @@ fn client(init: std.process.Init, config: configuration.Config, args: []const []
     if (request == null) return relay(init, &connection);
     const response = try connection.request(request.?);
     defer init.gpa.free(response);
-    if (same(args[0], "transfer") and try responseCode(init.gpa, response) == 0)
+    const name = if (command.len == 0) "" else command[0];
+    if (same(name, "transfer") and try responseCode(init.gpa, response) == 0)
         return awaitTransfer(init, &connection, request.?, response);
-    if (same(args[0], "ask") and try responseCode(init.gpa, response) == 0)
+    if (same(name, "ask") and try responseCode(init.gpa, response) == 0)
         return awaitTurn(init, &connection, response) catch |err| {
             try output(init.io, response);
             return err;
@@ -175,20 +180,19 @@ fn clientRequest(
     init: std.process.Init,
     config: configuration.Config,
     supplied: []const []const u8,
+    args: []const []const u8,
+    command: []const []const u8,
 ) !?[]const u8 {
     if (same(supplied[0], "stdio")) {
         if (supplied.len != 1) return error.InvalidArguments;
         return null;
     }
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena.deinit();
-    const args = try cli.callerArguments(arena.allocator(), init.io, supplied);
     const operation = try cli.defaultOperation(
         init.gpa,
         init.io,
         config.namespace_path,
         config.backup_directory,
-        args,
+        command,
     );
     defer init.gpa.free(operation);
     return try cli.request(init.gpa, args, operation);

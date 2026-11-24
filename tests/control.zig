@@ -124,7 +124,7 @@ test "control CLI preserves the caller's directory for a relative import path" {
         "transfer", "--operation", "import", "import", "backups/h.paredros", "--bytes-max", "9",
     };
     const resolved = try cli.callerArguments(frame, io, supplied);
-    try std.testing.expectEqualStrings(expected, resolved[4]);
+    try std.testing.expectEqualStrings(expected, resolved[2]);
     try std.testing.expectEqualStrings("backups/h.paredros", supplied[4]);
     const absolute: []const []const u8 = &.{ "transfer", "import", "/b/h.paredros" };
     try std.testing.expectEqualStrings(
@@ -144,6 +144,70 @@ test "control CLI preserves the caller's directory for a relative import path" {
     try std.testing.expectError(
         error.RelativeTransferPath,
         cli.request(frame, &.{ "transfer", "import", "h.paredros" }, "id"),
+    );
+}
+
+test "control CLI preserves one import identity across leading options and path spellings" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    const io = std.testing.io;
+    const current = try std.process.currentPathAlloc(io, frame);
+    const parent = std.fs.path.dirname(current).?;
+    const leaf = std.fs.path.basename(current);
+    const expected = try std.fs.path.join(frame, &.{ current, "h.paredros" });
+    const spellings = [_][]const u8{
+        "h.paredros",
+        "./h.paredros",
+        ".//h.paredros",
+        try std.fmt.allocPrint(frame, "../{s}/h.paredros", .{leaf}),
+        try std.fmt.allocPrint(frame, "{s}/./{s}/h.paredros", .{ parent, leaf }),
+    };
+    var operations: [spellings.len][]const u8 = undefined;
+    for (spellings, &operations) |path, *operation| {
+        const leading = try cli.callerArguments(
+            frame,
+            io,
+            &.{ "--operation", "chosen", "transfer", "import", path },
+        );
+        const encoded = try cli.request(frame, leading, "unused");
+        const request = try native.values.fromJson(
+            control.Request,
+            frame,
+            try decode(frame, encoded),
+        );
+        try std.testing.expectEqualStrings(expected, request.command.transfer_import.path.bytes);
+        try std.testing.expectEqualStrings("chosen", request.operation.?.bytes);
+        const plain = try cli.callerArguments(frame, io, &.{ "transfer", "import", path });
+        try std.testing.expectEqualStrings(expected, plain[2]);
+        operation.* = try cli.defaultOperation(
+            frame,
+            io,
+            "/ns",
+            "/backup",
+            (try cli.invocation(frame, plain)).command,
+        );
+        const split = try cli.callerArguments(
+            frame,
+            io,
+            &.{ "transfer", "--operation", "chosen", "import", path },
+        );
+        try std.testing.expectEqualStrings(
+            operation.*,
+            try cli.defaultOperation(frame, io, "/ns", "/backup", (try cli.invocation(
+                frame,
+                split,
+            )).command),
+        );
+    }
+    for (operations[1..]) |operation| try std.testing.expectEqualStrings(operations[0], operation);
+    try std.testing.expectEqualStrings(
+        "ask",
+        (try cli.invocation(frame, &.{ "--operation", "chosen", "ask", "hello" })).command[0],
+    );
+    try std.testing.expectError(
+        error.InvalidArguments,
+        cli.callerArguments(frame, io, &.{ "transfer", "import", "h", "--operation" }),
     );
 }
 
@@ -285,7 +349,7 @@ test "control pages pending directives with exact frozen contents" {
     const hex_id = std.fmt.bytesToHex(id, .lower);
     var expected: [35]t.Directive = undefined;
     for (&expected, 0..) |*value, position| {
-        const operation = try std.fmt.allocPrint(frame, "paged-control:{d}", .{position});
+        const operation = try std.fmt.allocPrint(frame, "paged-control-{d}", .{position});
         const verb = if (position % 2 == 0) "pause" else "resume";
         const request = try cli.request(frame, &.{ "monitor", verb, &hex_id }, operation);
         const task = try taskId(try dispatch(frame, &driver, request, 501));
@@ -332,7 +396,7 @@ fn admitLarge(
     count: usize,
 ) !void {
     for (0..count) |position| {
-        const operation = try std.fmt.allocPrint(frame, "large:{s}:{d}", .{
+        const operation = try std.fmt.allocPrint(frame, "large-{s}-{d}", .{
             &std.fmt.bytesToHex(target, .lower),
             position,
         });
@@ -401,7 +465,7 @@ test "control pages pending directives and status within one frame" {
     @memset(wording, 1);
     var ids: [3]t.Id = undefined;
     for (&ids, [_]usize{ 44, 16, 16 }, 0..) |*id, count, position| {
-        const name = try std.fmt.allocPrint(frame, "large-monitor:{d}", .{position});
+        const name = try std.fmt.allocPrint(frame, "large-monitor-{d}", .{position});
         id.* = try taskId(try dispatch(frame, &driver, try control.encode(frame, .{
             .version = 1,
             .operation = .{ .bytes = name },
@@ -743,7 +807,7 @@ test "control proposal consumer shows and confirms maximal retained body by auth
     var input = consumerTurn(target);
     const offered: model_contract.ProposalBody = .{ .directive = .{ .amend = .{
         .expected_revision = 0,
-        .interval_ms = std.math.maxInt(u64),
+        .interval_ms = config.interval_ms_max,
         .wording = .{ .bytes = wording },
         .policies = @import("contracts.zig").specification().policies,
         .repository_route = .{
@@ -912,4 +976,234 @@ fn consumerToken(fixture: *ConsumerFixture, input: t.Turn) ![]const u8 {
         &identity,
         input.attempt,
     });
+}
+
+fn expectRejected(response: native.json.Value, expected: []const u8) !void {
+    try std.testing.expectEqualStrings(
+        "rejected",
+        try native.json.text(response.object.get("status").?),
+    );
+    const actual = try native.json.text(response.object.get("error").?);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "control malformed and unsupported operation identities are refused without admission" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const reserved = [_][]const u8{
+        "turn-retry:00112233445566778899aabbccddeeff:1",
+        "turn-replace:00112233445566778899aabbccddeeff",
+        "delivery:00",
+        "step:00:1:0",
+        "continuity-genesis:00",
+        "restore-hold:00:00",
+        "export-cut:00",
+        "owner:chosen",
+        ":",
+    };
+    for (reserved) |operation| {
+        const asked = try control.encode(frame, .{
+            .version = 1,
+            .operation = .{ .bytes = operation },
+            .command = .{ .ask = .{ .text = .{ .bytes = "hello" }, .target = null } },
+        });
+        try expectRejected(try dispatch(frame, &driver, asked, 501), "ReservedOperationId");
+        for ([_][]const []const u8{
+            &.{ "--operation", operation, "monitor", "add" },
+            &.{ "transfer", "export", "handoff.paredros", "--operation", operation },
+        }) |args| {
+            const request = try cli.request(frame, args, "unused");
+            try expectRejected(try dispatch(frame, &driver, request, 501), "ReservedOperationId");
+        }
+    }
+    var index = try driver.rebuild(frame);
+    try std.testing.expectEqual(0, index.records.len);
+    index.deinit();
+    const args: []const []const u8 = &.{ "--operation", "owner-chosen.1_A", "ask", "hi" };
+    const chosen = try cli.request(frame, args, "x");
+    _ = try taskId(try dispatch(frame, &driver, chosen, 501));
+}
+
+fn unboundedProposals(fixture: *ConsumerFixture, target: t.Id) ![2][]const u8 {
+    const too_long = config.interval_ms_max + 1;
+    var amend = consumerTurn(target);
+    amend.proposal_offers.items = &.{.{ .directive = .{ .amend = .{
+        .expected_revision = 0,
+        .interval_ms = too_long,
+        .wording = null,
+        .policies = null,
+        .repository_route = null,
+    } } }};
+    _ = try consumerExecute(fixture, "consumer-turn", .{ .turn = amend });
+    var genesis = consumerTurn(target);
+    genesis.envelope.operation.bytes = "genesis-turn";
+    genesis.envelope.stable_request = @splat(78);
+    genesis.target = null;
+    genesis.expected_revision = null;
+    var specification = @import("contracts.zig").specification();
+    specification.interval_ms = too_long;
+    genesis.proposal_offers.items = &.{.{ .genesis = specification }};
+    _ = try consumerExecute(fixture, "genesis-turn", .{ .turn = genesis });
+    return .{ try consumerToken(fixture, amend), try consumerToken(fixture, genesis) };
+}
+
+test "control malformed and unsupported intervals are refused without admission" {
+    var fixture: ConsumerFixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    const target = try consumerExecute(&fixture, "genesis", .{
+        .genesis = @import("contracts.zig").genesis(),
+    });
+    const tokens = try unboundedProposals(&fixture, target);
+    var clock: Clock = .{};
+    var driver: Driver = .{ .service = &fixture.service.?, .clock = .{
+        .context = &clock,
+        .now = Clock.now,
+    } };
+    try driver.attach(frame);
+    defer driver.detach();
+    var before = try driver.rebuild(frame);
+    const admitted = before.records.len;
+    before.deinit();
+    const hex_id = std.fmt.bytesToHex(target, .lower);
+    const longest = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max});
+    const excess = try std.fmt.allocPrint(frame, "{d}", .{config.interval_ms_max + 1});
+    const Refusal = struct { args: []const []const u8, error_name: []const u8 };
+    for ([_]Refusal{
+        .{
+            .args = &.{ "monitor", "add", "--interval-ms", excess },
+            .error_name = "IntervalTooLong",
+        },
+        .{ .args = &.{ "monitor", "add", "--interval-ms", "0" }, .error_name = "InvalidInterval" },
+        .{
+            .args = &.{ "monitor", "amend", &hex_id, "0", "--interval-ms", excess },
+            .error_name = "IntervalTooLong",
+        },
+        .{
+            .args = &.{ "monitor", "amend", &hex_id, "0", "--interval-ms", "0" },
+            .error_name = "InvalidInterval",
+        },
+        .{
+            .args = &.{ "proposal", "confirm", tokens[0] },
+            .error_name = "IntervalTooLong",
+        },
+        .{
+            .args = &.{ "proposal", "confirm", tokens[1] },
+            .error_name = "IntervalTooLong",
+        },
+    }, 0..) |refusal, position| {
+        const operation = try std.fmt.allocPrint(frame, "refused-{d}", .{position});
+        const request = try cli.request(frame, refusal.args, operation);
+        try expectRejected(try dispatch(frame, &driver, request, 501), refusal.error_name);
+    }
+    var after = try driver.rebuild(frame);
+    try std.testing.expectEqual(admitted, after.records.len);
+    after.deinit();
+    for ([_][]const []const u8{
+        &.{ "monitor", "add", "--interval-ms", longest },
+        &.{ "monitor", "amend", &hex_id, "0", "--interval-ms", longest },
+    }, 0..) |args, position| {
+        const operation = try std.fmt.allocPrint(frame, "bounded-{d}", .{position});
+        _ = try taskId(try dispatch(frame, &driver, try cli.request(frame, args, operation), 501));
+    }
+}
+
+test "control malformed and unsupported proposal state fails task show without omission" {
+    var fixture: ConsumerFixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    const target = try consumerExecute(&fixture, "genesis", .{
+        .genesis = @import("contracts.zig").genesis(),
+    });
+    var input = consumerTurn(target);
+    input.proposal_offers.items = &.{.{ .directive = .check }};
+    const turn_id = try consumerExecute(&fixture, "consumer-turn", .{ .turn = input });
+    var clock: Clock = .{};
+    var driver: Driver = .{ .service = &fixture.service.?, .clock = .{
+        .context = &clock,
+        .now = Clock.now,
+    } };
+    try driver.attach(frame);
+    defer driver.detach();
+    try consumerPrinted(frame, &driver, turn_id, try consumerToken(&fixture, input));
+    var twin = input;
+    twin.envelope.operation.bytes = "consumer-twin";
+    _ = try consumerExecute(&fixture, "consumer-twin", .{ .turn = twin });
+    const id = std.fmt.bytesToHex(turn_id, .lower);
+    const request = try cli.request(frame, &.{ "task", "show", &id }, "unused");
+    try expectRejected(try dispatch(frame, &driver, request, 501), "AmbiguousProposal");
+}
+
+fn widestStatus(frame: std.mem.Allocator, driver: *Driver, index: *const @import(
+    "../native/index.zig",
+).Index) ![]const u8 {
+    const request = try control.encode(frame, .{
+        .version = 1,
+        .operation = null,
+        .command = .{ .status = .{ .after = null, .limit = 1 } },
+    });
+    const settings = configuration();
+    return control.dispatchWithIndex(frame, driver, settings, 501, request, null, index, null);
+}
+
+fn shownPending(page: native.json.Value) usize {
+    const entry = page.object.get("obligations").?.array.items[0];
+    return entry.object.get("pending_directives").?.array.items.len;
+}
+
+test "control pages pending status with the widest next cursor within one frame" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const frame = fixture.arena.allocator();
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(frame);
+    defer driver.detach();
+    const add = try cli.request(frame, &.{ "monitor", "add" }, "widest-monitor");
+    const id = try taskId(try dispatch(frame, &driver, add, 501));
+    try finish(&fixture, id);
+    const hex_id = std.fmt.bytesToHex(id, .lower);
+    for ([_][]const u8{ "pause", "resume" }) |verb| {
+        const operation = try std.fmt.allocPrint(frame, "widest-{s}", .{verb});
+        const control_request = try cli.request(frame, &.{ "monitor", verb, &hex_id }, operation);
+        _ = try taskId(try dispatch(frame, &driver, control_request, 501));
+    }
+    var index = try driver.rebuild(frame);
+    defer index.deinit();
+    const head = &index.records[index.tasks.get(id).?].result.?.genesis;
+    head.specification.wording.bytes = "a";
+    const probe_bytes = try widestStatus(frame, &driver, &index);
+    const probe = (try decodeFrame(frame, probe_bytes)).object.get("data").?;
+    try std.testing.expectEqual(2, shownPending(probe));
+    const next = try native.json.canonical(frame, probe.object.get("next").?);
+    try std.testing.expect(next.len >= 50);
+    const wording = try frame.alloc(u8, control.frame_bytes_max + 2 - probe_bytes.len);
+    @memset(wording, 'a');
+    head.specification.wording.bytes = wording;
+    const bytes = try widestStatus(frame, &driver, &index);
+    try std.testing.expect(bytes.len <= control.frame_bytes_max);
+    const value = try decodeFrame(frame, bytes);
+    const disposition = try native.json.text(value.object.get("status").?);
+    try std.testing.expectEqualStrings("observed", disposition);
+    const shown = value.object.get("data").?;
+    try std.testing.expectEqual(1, shownPending(shown));
+    try std.testing.expectEqualDeep(
+        @as(?t.Id, id),
+        try native.values.fromJson(?t.Id, frame, shown.object.get("next").?),
+    );
 }

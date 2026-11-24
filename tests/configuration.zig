@@ -81,6 +81,16 @@ test "configuration closed schema validates uid version and bindings" {
     const relative = try encoded(changed);
     defer a.free(relative);
     try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, relative, 42));
+    changed = fixture();
+    changed.interval_ms = configuration.interval_ms_max;
+    const longest = try encoded(changed);
+    defer a.free(longest);
+    var accepted = try configuration.parse(a, longest, 42);
+    accepted.deinit();
+    changed.interval_ms = configuration.interval_ms_max + 1;
+    const unbounded = try encoded(changed);
+    defer a.free(unbounded);
+    try std.testing.expectError(error.InvalidConfiguration, configuration.parse(a, unbounded, 42));
 }
 
 fn withModel() configuration.Config {

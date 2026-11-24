@@ -40,6 +40,7 @@ pub const Model = struct {
     response_bytes: u32 = 2 * 1024 * 1024,
     timeout_ms: u32 = 30_000,
 };
+pub const interval_ms_max: u64 = 366 * 24 * 60 * 60 * 1000;
 pub const Config = struct {
     version: u32,
     current_uid: u32,
@@ -87,7 +88,8 @@ fn validate(value: Config, current_uid: u32) !void {
     if (value.backup_directory) |path| try absolute(path);
     if (std.mem.eql(u8, value.namespace_path, value.control_socket_path))
         return error.InvalidConfiguration;
-    if (value.interval_ms == 0) return error.InvalidConfiguration;
+    if (value.interval_ms == 0 or value.interval_ms > interval_ms_max)
+        return error.InvalidConfiguration;
     const repository_names = [_][]const u8{
         value.repository.account, value.repository.owner, value.repository.name,
     };

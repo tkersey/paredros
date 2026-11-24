@@ -25,17 +25,36 @@ pub const help =
     \\  transfer export NAME [--snapshot]
     \\  transfer import PATH [--bytes-max N]
     \\  request JSON | stdio              Machine-readable daemon access
-    \\Mutations accept --operation ID. Success means admission, not remote completion.
+    \\Mutations accept --operation ID; IDs may not contain `:`.
+    \\Success means admission, not remote completion. Intervals are 1 to 31622400000 ms.
 ;
+
+pub const Invocation = struct { operation: ?[]const u8, command: []const []const u8 };
+
+pub fn invocation(a: std.mem.Allocator, args: []const []const u8) !Invocation {
+    var command: std.ArrayList([]const u8) = .empty;
+    var operation: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!same(args[i], "--operation")) {
+            try command.append(a, args[i]);
+            continue;
+        }
+        if (operation != null or i + 1 == args.len) return error.InvalidArguments;
+        i += 1;
+        operation = args[i];
+    }
+    return .{ .operation = operation, .command = try command.toOwnedSlice(a) };
+}
 
 pub fn defaultOperation(
     a: std.mem.Allocator,
     io: std.Io,
     namespace: []const u8,
     backup_directory: ?[]const u8,
-    args: []const []const u8,
+    command: []const []const u8,
 ) ![]u8 {
-    if (!same(args[0], "transfer") or snapshotExport(args)) {
+    if (command.len == 0 or !same(command[0], "transfer") or snapshotExport(command)) {
         var random: [16]u8 = undefined;
         try io.randomSecure(&random);
         return a.dupe(u8, &std.fmt.bytesToHex(random, .lower));
@@ -43,7 +62,7 @@ pub fn defaultOperation(
     const bytes = try std.json.Stringify.valueAlloc(a, .{
         .namespace = namespace,
         .backup_directory = backup_directory,
-        .arguments = args,
+        .arguments = command,
     }, .{});
     defer a.free(bytes);
     var digest: t.Digest = undefined;
@@ -53,9 +72,9 @@ pub fn defaultOperation(
 
 pub fn callerPath(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (path.len == 0) return error.InvalidArguments;
-    if (std.fs.path.isAbsolute(path)) return path;
+    if (std.fs.path.isAbsolute(path)) return std.fs.path.resolveAlloc(a, &.{path});
     const current = try std.process.currentPathAlloc(io, a);
-    return std.fs.path.join(a, &.{ current, path });
+    return std.fs.path.resolveAlloc(a, &.{ current, path });
 }
 
 pub fn callerArguments(
@@ -63,28 +82,17 @@ pub fn callerArguments(
     io: std.Io,
     args: []const []const u8,
 ) ![]const []const u8 {
-    if (!same(args[0], "transfer")) return args;
-    const resolved = try a.dupe([]const u8, args);
-    var positional: usize = 0;
-    var i: usize = 0;
-    while (i < resolved.len) : (i += 1) {
-        if (same(resolved[i], "--operation")) {
-            i += 1;
-            continue;
-        }
-        positional += 1;
-        if (positional == 2 and !same(resolved[i], "import")) return args;
-        if (positional == 3) {
-            resolved[i] = try callerPath(a, io, resolved[i]);
-            return resolved;
-        }
-    }
-    return args;
+    const parsed = try invocation(a, args);
+    const command = try a.dupe([]const u8, parsed.command);
+    if (command.len >= 3 and same(command[0], "transfer") and same(command[1], "import"))
+        command[2] = try callerPath(a, io, command[2]);
+    const operation = parsed.operation orelse return command;
+    return std.mem.concat(a, []const u8, &.{ command, &.{ "--operation", operation } });
 }
 
-fn snapshotExport(args: []const []const u8) bool {
-    if (args.len < 3 or !same(args[1], "export")) return false;
-    for (args[3..]) |arg| if (same(arg, "--snapshot")) return true;
+fn snapshotExport(command: []const []const u8) bool {
+    if (command.len < 3 or !same(command[1], "export")) return false;
+    for (command[3..]) |arg| if (same(arg, "--snapshot")) return true;
     return false;
 }
 
@@ -96,23 +104,13 @@ pub fn request(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var filtered: std.ArrayList([]const u8) = .empty;
-    var operation = generated_operation;
-    var explicit = false;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--operation")) {
-            if (explicit or i + 1 == args.len) return error.InvalidArguments;
-            i += 1;
-            operation = args[i];
-            explicit = true;
-        } else try filtered.append(scratch, args[i]);
-    }
-    const values = filtered.items;
+    const parsed = try invocation(scratch, args);
+    const operation = parsed.operation orelse generated_operation;
+    const values = parsed.command;
     if (values.len == 2 and std.mem.eql(u8, values[0], "request")) {
-        var parsed = try native.json.parse(scratch, values[1], .{});
-        defer parsed.deinit();
-        const decoded = try native.values.fromJson(control.Request, scratch, parsed.value);
+        var json = try native.json.parse(scratch, values[1], .{});
+        defer json.deinit();
+        const decoded = try native.values.fromJson(control.Request, scratch, json.value);
         return control.encode(a, decoded);
     }
     const command = try parse(scratch, values);

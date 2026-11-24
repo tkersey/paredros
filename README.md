@@ -147,9 +147,16 @@ paredros --config /absolute/config.json monitor pause OBLIGATION_ID
 ```
 
 `--help` lists the typed commands. `stdio` accepts one JSON request per line over
-the same authenticated local socket. Mutations accept `--operation ID`; reuse an
-ID only for the same request. An admission response means the operation is
-durable. It does not mean the resulting message has been recorded yet.
+the same authenticated local socket. Mutations accept `--operation ID` anywhere
+on the command line; reuse an ID only for the same request. An ID is printable
+ASCII without `:`, which is reserved for operations the daemon derives itself; an
+ID containing it is refused with `ReservedOperationId`. An admission response
+means the operation is durable. It does not mean the resulting message has been
+recorded yet.
+
+A monitor interval (`--interval-ms`, an amendment, a confirmed proposal, or the
+configured default) must be between 1 ms and 366 days (31622400000 ms); a longer
+one is refused with `IntervalTooLong`.
 
 `status` reports the running daemon's application version and executable SHA-256
 under `data.daemon`. `data.namespace_bytes` sums the logical lengths of the live
@@ -223,7 +230,10 @@ PATH question answer ID QUESTION_DIGEST CHOICE`. PATH is the absolute path of th
 configuration the daemon was started with, so the command works from any
 directory; `monitor show` also reports the open question. `proposal
 show` and `proposal confirm` handle proposals, and `ask` waits for and prints the
-conversation reply. A held digest is inspected with `delivery show KEY_JSON` and
+conversation reply. `task show` of a turn reports `retry_pending` while the daemon
+will still replace or resume an unfinished attempt, so `ask` keeps waiting through
+a blocked, parked, or failed attempt until the retry or the final failure reply
+exists. A held digest is inspected with `delivery show KEY_JSON` and
 released with `delivery release ID KEY_JSON`.
 
 ## Upgrading a namespace
@@ -269,7 +279,8 @@ Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's
 manifest; the daemon then materializes its members and lineages in bounded steps,
 including across a restart, while other control ingress waits. The client
-resolves a relative PATH against its own working directory before sending it.
+resolves a relative PATH against its own working directory and normalizes `.` and
+`..` before sending it, so every spelling of one path repeats the same import.
 Repeat `transfer import PATH` to observe progress; exit 75 means the daemon is still
 materializing. Reusing an import operation for a different file is refused as an
 operation conflict. Import preserves portable observations, pending controls,

@@ -13,6 +13,7 @@ const restore = @import("restore.zig");
 const ingress_policy = @import("ingress_policy.zig");
 const messages = @import("messages.zig");
 const cli = @import("cli.zig");
+const recovery_status = @import("recovery_status.zig");
 
 pub const frame_bytes_max: u32 = 4 * 1024 * 1024;
 pub const capacity_rejection =
@@ -175,6 +176,7 @@ fn operation(request: Request) ![]const u8 {
     const value = (request.operation orelse return error.MissingOperationId).bytes;
     if (value.len == 0) return error.InvalidOperationId;
     for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidOperationId;
+    if (std.mem.indexOfScalar(u8, value, ':') != null) return error.ReservedOperationId;
     return value;
 }
 
@@ -343,6 +345,7 @@ fn validateDirective(
     target: t.Id,
     body: t.DirectiveBody,
 ) !void {
+    if (body == .amend) if (body.amend.interval_ms) |interval_ms| try checkInterval(interval_ms);
     if (try driver.service.operationLookup(a, operation_id)) |found| {
         var receipt = found;
         defer receipt.deinit();
@@ -426,6 +429,7 @@ fn confirmProposal(
     const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
     if (prior) |task_id| return task_id;
     const selected = try commands.proposal(&index, confirmation);
+    if (selected.body == .genesis) try checkInterval(selected.body.genesis.interval_ms);
     if (selected.body == .directive) try validateDirective(
         a,
         driver,
@@ -452,7 +456,7 @@ fn specification(
     interval: ?u64,
 ) !t.Specification {
     const interval_ms = interval orelse config.interval_ms;
-    if (interval_ms == 0) return error.InvalidInterval;
+    try checkInterval(interval_ms);
     return .{
         .revision = 0,
         .repository = config.repository.value(),
@@ -461,6 +465,11 @@ fn specification(
         .wording = wording,
         .policies = config.policies,
     };
+}
+
+fn checkInterval(interval_ms: u64) !void {
+    if (interval_ms == 0) return error.InvalidInterval;
+    if (interval_ms > configuration.interval_ms_max) return error.IntervalTooLong;
 }
 
 fn admitted(a: std.mem.Allocator, task_id: t.Id) !native.json.Value {
@@ -490,13 +499,13 @@ fn inspect(
             page.limit,
         ),
         .messages => |page| try messagePage(a, index, page, config_path),
-        .task_show => |id| try task(a, index, id, config_path),
+        .task_show => |id| try task(a, service, index, id, config_path),
         .method_show => |id| try native.values.toJson(
             t.Method,
             a,
             index.head(index.obligation(id) orelse return error.UnknownObligation).method,
         ),
-        .delivery_show => |key| try deliveries(a, index, key, config_path),
+        .delivery_show => |key| try deliveries(a, service, index, key, config_path),
         .proposal_show => |value| try proposal(a, index, value),
         .experiment_show => |value| try campaign(a, index, value),
         .recovery_status => try recoveryStatus(a, index),
@@ -588,7 +597,8 @@ fn status(
     var result = try statusSummary(a, service, index, clock_ms);
     var items: std.array_list.Managed(native.json.Value) = .init(a);
     try native.json.put(a, &result, "obligations", .{ .array = items });
-    try native.json.put(a, &result, "next", try native.values.toJson(t.Id, a, @splat(0)));
+    const widest: ?t.Id = @splat(std.math.maxInt(u8));
+    try native.json.put(a, &result, "next", try native.values.toJson(?t.Id, a, widest));
     const room = try dataRoom(a);
     var used = try extent(a, result);
     var next: ?t.Id = null;
@@ -822,6 +832,7 @@ fn appendPending(
 
 fn task(
     a: std.mem.Allocator,
+    service: anytype,
     index: *const idx.Index,
     id: t.Id,
     config_path: ?[]const u8,
@@ -850,12 +861,9 @@ fn task(
     try native.json.put(a, &result, "superseded", .{ .bool = record.superseded });
     const confirming = try confirmations(a, index, record, config_path);
     try native.json.put(a, &result, "confirmations", confirming);
-    const owner_status = if (record.owner_evidence) |evidence| evidence.status else null;
-    const retry_pending = record.input == .turn and record.input.turn.attempt < 2 and
-        record.result == null and (owner_status == .failed or owner_status == .cancelled or
-        owner_status == .unknown);
-    try native.json.put(a, &result, "retry_pending", .{ .bool = retry_pending });
-    try native.json.put(a, &result, "task_status", if (owner_status) |value|
+    const progress = try taskProgress(a, service, record);
+    try native.json.put(a, &result, "retry_pending", .{ .bool = progress.retry_pending });
+    try native.json.put(a, &result, "task_status", if (progress.status) |value|
         native.json.string(@tagName(value))
     else
         .null);
@@ -869,6 +877,20 @@ fn task(
         );
     }
     return result;
+}
+
+const Progress = struct { status: ?native.tasks.Status, retry_pending: bool };
+
+fn taskProgress(a: std.mem.Allocator, service: anytype, record: *const idx.Record) !Progress {
+    if (!recovery_status.recoverableTurn(record.*)) return .{
+        .status = if (record.owner_evidence) |evidence| evidence.status else null,
+        .retry_pending = false,
+    };
+    const state = try recovery_status.turn(service, a, record.*);
+    return .{
+        .status = state.status,
+        .retry_pending = recovery_status.continues(state.action, record.input.turn.attempt),
+    };
 }
 
 fn confirmations(
@@ -887,7 +909,11 @@ fn confirmations(
             .attempt = turn.attempt,
             .ordinal = @intCast(ordinal),
         };
-        const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch continue;
+        const resolved = commands.resolveProposal(index, .{ .identity = identity }) catch |err|
+            switch (err) {
+                error.UnknownProposal, error.InvalidProposalIdentity => continue,
+                else => return err,
+            };
         if (!std.meta.eql(resolved.turn.task, record.task)) continue;
         const token = try std.fmt.allocPrint(a, "{s}:{d}:{d}", .{
             &std.fmt.bytesToHex(identity.request, .lower),
@@ -923,6 +949,7 @@ fn currentTask(index: *const idx.Index, id: t.Id) !*const idx.Record {
 
 fn deliveries(
     a: std.mem.Allocator,
+    service: anytype,
     index: *const idx.Index,
     key: t.DeliveryKey,
     config_path: ?[]const u8,
@@ -930,7 +957,7 @@ fn deliveries(
     var items: std.array_list.Managed(native.json.Value) = .init(a);
     for (index.records) |record| {
         if (record.input != .delivery or !std.meta.eql(record.input.delivery.key, key)) continue;
-        try items.append(try task(a, index, record.task, config_path));
+        try items.append(try task(a, service, index, record.task, config_path));
     }
     if (items.items.len == 0) return error.UnknownDelivery;
     return .{ .array = items };

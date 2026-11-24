@@ -14,7 +14,7 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
     var admitted: std.ArrayList(t.Id) = .empty;
     errdefer admitted.deinit(a);
     for (index.records) |record| {
-        if (record.input != .turn or record.superseded or record.result != null) continue;
+        if (!recovery_status.recoverableTurn(record)) continue;
         if (admitted.items.len == limit) break;
         if (try advanceOne(driver, a, record)) |task| try admitted.append(a, task);
     }
@@ -22,28 +22,19 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
 }
 
 fn advanceOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !?t.Id {
-    var saved = try driver.service.task(a, record.task);
-    defer saved.deinit();
-    const status = try driver.service.status(a, saved.value);
-    const action = recovery_status.classify(
-        status,
-        saved.value.blocker,
-        saved.value.current_occurrence,
-        record.owner_snapshot orelse return error.MissingOwnerSnapshot,
-    );
-    if (action == .replace) {
-        if (record.input.turn.attempt >= 2) return null;
-        return try replace(driver, a, record);
-    }
+    const attempt = record.input.turn.attempt;
+    const state = try recovery_status.turn(driver.service, a, record);
+    if (!recovery_status.continues(state.action, attempt)) return null;
+    if (state.action == .replace) return try replace(driver, a, record);
     const resumed = try recovery_status.resumeSelected(
         driver.service,
         a,
         record.task,
-        saved.value.revision,
-        action,
-        saved.value.current_occurrence,
+        state.revision,
+        state.action,
+        state.occurrence,
     );
-    if (resumed == .incompatible and record.input.turn.attempt < 2)
+    if (resumed == .incompatible and recovery_status.replaceable(attempt))
         return try replace(driver, a, record);
     return null;
 }

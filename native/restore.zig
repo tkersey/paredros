@@ -295,7 +295,7 @@ fn directives(
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
         const kind: []const u8 = if (releasing) "release" else "hold";
-        const operation = try std.fmt.allocPrint(a, "restore-{s}-{s}-{s}", .{
+        const operation = try std.fmt.allocPrint(a, "restore-{s}:{s}:{s}", .{
             kind,                                        std.fmt.bytesToHex(reference.task, .lower),
             std.fmt.bytesToHex(obligation.task, .lower),
         });

@@ -2,6 +2,7 @@ const std = @import("std");
 const native = @import("protean_native");
 const t = @import("application_types");
 const retained = @import("retained.zig");
+const idx = @import("index.zig");
 
 pub const Action = union(enum) {
     stay: void,
@@ -10,6 +11,46 @@ pub const Action = union(enum) {
     replace: @FieldType(t.Supersession, "cause"),
 };
 pub const Resume = enum { unchanged, resumed, incompatible };
+pub const Turn = struct {
+    status: native.tasks.Status,
+    action: Action,
+    revision: u64,
+    occurrence: ?t.Digest,
+};
+
+pub fn recoverableTurn(record: idx.Record) bool {
+    return record.input == .turn and !record.superseded and record.result == null;
+}
+
+pub fn replaceable(attempt: u32) bool {
+    return attempt < 2;
+}
+
+pub fn continues(action: Action, attempt: u32) bool {
+    return switch (action) {
+        .stay => false,
+        .replace => replaceable(attempt),
+        .resume_captured, .resume_parked => true,
+    };
+}
+
+pub fn turn(service: anytype, a: std.mem.Allocator, record: idx.Record) !Turn {
+    std.debug.assert(recoverableTurn(record));
+    var saved = try service.task(a, record.task);
+    defer saved.deinit();
+    const status = try service.status(a, saved.value);
+    return .{
+        .status = status,
+        .action = classify(
+            status,
+            saved.value.blocker,
+            saved.value.current_occurrence,
+            record.owner_snapshot orelse return error.MissingOwnerSnapshot,
+        ),
+        .revision = saved.value.revision,
+        .occurrence = saved.value.current_occurrence,
+    };
+}
 
 pub fn classify(
     status: native.tasks.Status,
