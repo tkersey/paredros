@@ -55,7 +55,7 @@ def inventory(zig, system, install, output, full):
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
-        counts = {"authority": 87, "providers": 30, "transitions": 35, "rendering": 57, "continuity": 44}
+        counts = {"authority": 93, "providers": 30, "transitions": 35, "rendering": 57, "continuity": 46}
         matrix = [dict(name=name, part=name, count=n) for name, n in counts.items()] + [
             row for row in matrix if row["part"] in ("methods", "product", "crash")
         ]
