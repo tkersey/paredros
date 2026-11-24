@@ -3,6 +3,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
+const compatibility = @import("compatibility.zig");
 const continuity = @import("continuity.zig");
 const configuration = @import("configuration.zig");
 
@@ -297,7 +298,6 @@ pub fn prepare(
     mode: Mode,
 ) !OwnedBundle {
     if (importPending(index)) return error.ContinuityImportPending;
-    if (genesisPending(index)) return error.ContinuityGenesisPending;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -326,6 +326,7 @@ pub fn capture(driver: anytype, a: std.mem.Allocator, source: Source, mode: Mode
     defer driver.service.dispatch_gate = gate;
     var index = try driver.rebuild(a);
     defer index.deinit();
+    if (try genesisPending(driver.service, a, &index)) return error.ContinuityGenesisPending;
     return prepare(a, &index, source, mode);
 }
 
@@ -821,15 +822,44 @@ pub fn importPending(index: anytype) bool {
     return view.phase != .materialized;
 }
 
-pub fn genesisPending(index: *const idx.Index) bool {
+pub fn genesisPending(service: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
     for (index.records) |record| {
-        if (record.input != .genesis) continue;
-        switch ((record.owner_snapshot orelse return true).outcome) {
-            .progressed, .yielded, .requested => return true,
-            .completed, .failed, .cancelled => {},
-        }
+        if (record.input != .genesis or record.result != null) continue;
+        if (try genesisRunnable(service, a, record.task)) return true;
     }
     return false;
+}
+
+fn genesisRunnable(service: anytype, a: std.mem.Allocator, task: t.Id) !bool {
+    var saved = try service.task(a, task);
+    defer saved.deinit();
+    const value = saved.value;
+    switch (try service.status(a, value)) {
+        .completed, .failed, .cancelled, .blocked, .unknown => return false,
+        .queued, .running, .waiting_input, .parked, .cancelling => {},
+    }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const candidate = try compatibility.fromProfile(
+        arena.allocator(),
+        continuity.hash(service.assets.image),
+        service.application.controller != null,
+        service.profile,
+    );
+    const disposition = try compatibility.classify(candidate, .{
+        .task = value.id,
+        .revision = value.revision,
+        .terminal = value.terminal(),
+        .application_id = value.application_id.bytes,
+        .principal = value.principal.bytes,
+        .tenant = value.tenant.bytes,
+        .image = value.image,
+        .profile = value.profile,
+        .resources = value.resources.items,
+        .runtime_identity = value.runtime_identity,
+        .has_controller = value.controller != null,
+    });
+    return disposition == .exact_continuation;
 }
 
 pub fn validateExportDestination(io: std.Io, directory: []const u8, name: []const u8) !void {

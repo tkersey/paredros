@@ -282,7 +282,6 @@ fn populatedHead() t.Head {
         .identity = @splat(21),
         .condition = @splat(22),
         .specification_revision = 6,
-        .evidence = .{ .retained = .{ .task = @splat(23), .digest = @splat(24) } },
         .choices = .{ .items = &.{.{ .bytes = "accept" }} },
         .prompt = delivery(),
     };

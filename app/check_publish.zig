@@ -416,12 +416,12 @@ fn newQuestion(
         .identity = identity,
         .condition = identity,
         .specification_revision = try pb.field(specification, "revision"),
-        .evidence = try c.literal(t.PublicationReference, .{ .current = {} }),
         .source_condition = try pb.variant(try c.schema(?condition_type), "some", condition),
         .choices = try c.literal(@FieldType(t.Question, "choices"), .{ .items = &.{
             .{ .bytes = "accept_gap" },
         } }),
         .prompt = try prompt(c, pb, input, head, base, present.payload()),
+        .held = try pb.constant(bool, false),
     });
     return b.match(
         tip,

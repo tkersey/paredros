@@ -320,7 +320,7 @@ test "outbound delivery respects deadline hold and effective pending control fen
     try std.testing.expectEqual(0, store.submits);
 }
 
-test "outbound delivers the current question prompt once" {
+test "outbound delivers the current question prompt once and never while it is held" {
     var fixture = try Fixture.init();
     defer fixture.index.deinit();
     var store: Store = .{};
@@ -331,10 +331,14 @@ test "outbound delivers the current question prompt once" {
         .identity = @splat(2),
         .condition = @splat(3),
         .specification_revision = fixture.head().specification.revision,
-        .evidence = .{ .current = {} },
         .choices = .{ .items = &.{} },
         .prompt = question,
+        .held = true,
     };
+    const held = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
+    defer a.free(held);
+    try std.testing.expectEqual(0, held.len);
+    fixture.head().question.?.held = false;
     const asked = try outbound.admitDeliveries(&store, a, &fixture.index, fixture.target, 200);
     defer a.free(asked);
     try std.testing.expectEqual(1, asked.len);

@@ -696,6 +696,19 @@ const Backup = struct {
     }
 };
 
+fn handoffFile(from: *Fixture, backup: *Backup, clock: *u8) ![]const u8 {
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var original = try hopDriver(from, clock);
+    var bundle = try transfer.capture(&original, a, source(from), .snapshot);
+    defer bundle.deinit();
+    try writeBundle(a, backup.temporary.dir, "handoff.paredros", bundle.value);
+    original.detach();
+    try from.close();
+    return std.fs.path.join(a, &.{ try backup.path(), "handoff.paredros" });
+}
+
 test "native continuity control import commits one manifest for one bundle" {
     var from: Fixture = .{};
     defer from.deinit();
@@ -703,32 +716,12 @@ test "native continuity control import commits one manifest for one bundle" {
     var to: Fixture = .{};
     defer to.deinit();
     const a = from.arena.allocator();
-    const genesis = contracts.genesis();
-    _ = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
-    var original: Driver = .{
-        .service = &from.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-        .bindings = configuration.bindings(config()),
-    };
-    try original.attach(a);
-    defer if (original.attached) original.detach();
-    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
-    defer bundle.deinit();
     var backup = try Backup.init();
     defer backup.temporary.cleanup();
-    const directory = try backup.path();
-    try writeBundle(a, backup.temporary.dir, "handoff.paredros", bundle.value);
-    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
-    original.detach();
-    try from.close();
+    const file = try handoffFile(&from, &backup, &clock);
     try to.init();
-    var destination: Driver = .{
-        .service = &to.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-        .bindings = configuration.bindings(config()),
-    };
-    try destination.attach(to.arena.allocator());
+    var destination = try hopDriver(&to, &clock);
     defer destination.detach();
     const manifest = try controlImport(&to, &destination, file);
     var index = try destination.rebuild(a);
@@ -794,6 +787,128 @@ fn transferWritten(
         }
     }
     return error.ExportDidNotComplete;
+}
+
+test "native continuity import repeats after a configured route rename" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    var clock: u8 = 0;
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const file = try handoffFile(&from, &backup, &clock);
+    try to.init();
+    var destination = try hopDriver(&to, &clock);
+    defer destination.detach();
+    const manifest = try controlImport(&to, &destination, file);
+    var renamed = config();
+    renamed.repository.owner = "renamed-owner";
+    renamed.repository.name = "renamed-name";
+    var progress = try continuity_control.importBundle(
+        &destination,
+        a,
+        renamed,
+        .{ .io = std.testing.io, .source = source(&to) },
+        "file-import",
+        origin,
+        .{ .path = .{ .bytes = file } },
+    );
+    defer progress.deinit(a);
+    try std.testing.expectEqual(.materialized, progress.phase);
+    try std.testing.expectEqualDeep(manifest, progress.manifest);
+}
+
+test "native continuity import refuses a relative path sent to the daemon" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    var clock: u8 = 0;
+    var driver = try hopDriver(&f, &clock);
+    defer driver.detach();
+    try std.testing.expectError(error.RelativeTransferPath, continuity_control.importBundle(
+        &driver,
+        f.arena.allocator(),
+        config(),
+        .{ .io = std.testing.io, .source = source(&f) },
+        "relative-import",
+        origin,
+        .{ .path = .{ .bytes = "handoff.paredros" } },
+    ));
+}
+
+fn finishExcept(f: *Fixture, driver: *Driver, skipped: t.Id) !void {
+    var index = try driver.rebuild(f.arena.allocator());
+    defer index.deinit();
+    for (index.records) |record| {
+        if (record.result == null and !std.meta.eql(record.task, skipped))
+            try finish(f, record.task);
+    }
+}
+
+fn strandedExport(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    stranded: t.Id,
+    request: continuity_control.Export,
+) !continuity_control.ExportProgress {
+    const environment: continuity_control.Environment = .{
+        .io = std.testing.io,
+        .source = source(f),
+    };
+    for (0..16) |_| {
+        const progress = try continuity_control.exportBundle(
+            driver,
+            f.arena.allocator(),
+            settings,
+            environment,
+            request.name.bytes,
+            origin,
+            request,
+        );
+        if (progress.phase == .written) return progress;
+        try finishExcept(f, driver, stranded);
+    }
+    return error.ExportDidNotComplete;
+}
+
+test "native continuity export finishes without a genesis this build can never run" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    const stranded = (try f.service.?.submit(
+        a,
+        genesis.envelope.operation.bytes,
+        .{ .genesis = genesis },
+    )).receipt.task;
+    try f.close();
+    f.profile.bytes = "edited-native-test-profile";
+    try f.open();
+    var clock: u8 = 0;
+    var driver = try hopDriver(&f, &clock);
+    defer driver.detach();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    _ = try strandedExport(&f, &driver, settings, stranded, .{
+        .name = .{ .bytes = "stranded.paredros" },
+        .snapshot = true,
+    });
+    const handoff = try strandedExport(&f, &driver, settings, stranded, .{
+        .name = .{ .bytes = "handoff.paredros" },
+    });
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    var bundle = try transfer.committedBundle(a, &index, handoff.cut.?);
+    defer bundle.deinit();
+    try std.testing.expectEqual(0, bundle.value.lineages.items.len);
+    try std.testing.expectEqual(null, index.record(stranded).?.result);
 }
 
 test "native continuity export waits for an admitted genesis that has not run" {

@@ -137,7 +137,7 @@ fn finalize(
         try restore.beginTransfer(driver, a, operation, origin, digest);
     var index = try driver.rebuild(a);
     defer index.deinit();
-    var finished = !transfer.genesisPending(&index);
+    var finished = !try transfer.genesisPending(driver.service, a, &index);
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
@@ -195,15 +195,13 @@ pub fn importBundle(
     request: Import,
 ) !transfer.ImportProgress {
     if (!driver.attached or origin != .local) return error.TransferLocalOnly;
+    if (!std.fs.path.isAbsolute(request.path.bytes)) return error.RelativeTransferPath;
     const admitted_request: admission.Request = .{
         .operation = operation,
         .kind = .continuity_cut,
         .target = null,
         .origin = origin,
-        .digest = try admission.stableDigest(a, .{
-            .request = request,
-            .repository = config.repository.value(),
-        }),
+        .digest = try admission.stableDigest(a, request),
     };
     const maximum: ?usize = if (request.bytes_max) |value|
         std.math.cast(usize, value) orelse return error.Capacity

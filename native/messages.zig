@@ -9,7 +9,7 @@ const cli = @import("cli.zig");
 
 const answer_action = "answer";
 
-pub const State = enum { delivered, pending, undelivered };
+pub const State = enum { delivered, pending, uncertain, undelivered };
 pub const Choice = struct {
     label: @FieldType(t.Button, "label"),
     value: @FieldType(t.Button, "value"),
@@ -62,8 +62,7 @@ pub fn page(
     defer entries.deinit(a);
     try obligationEntries(a, index, obligation, &entries);
     const settled = try settledDeliveries(a, index, obligation);
-    defer a.free(settled.confirmed);
-    defer a.free(settled.unconfirmed);
+    defer a.free(settled);
     std.mem.sort(Entry, entries.items, {}, Entry.less);
     const total: u64 = entries.items.len;
     const start: usize = @intCast(@min(after orelse 0, total));
@@ -123,43 +122,45 @@ fn foldSegments(
     return folds;
 }
 
-const Settled = struct { confirmed: []const t.DeliveryKey, unconfirmed: []const t.Id };
+const Settled = struct { task: t.Id, outcome: t.DeliveryOutcome };
 
 fn settledDeliveries(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
-) !Settled {
-    var confirmed: std.ArrayList(t.DeliveryKey) = .empty;
-    errdefer confirmed.deinit(a);
-    var unconfirmed: std.ArrayList(t.Id) = .empty;
-    errdefer unconfirmed.deinit(a);
+) ![]const Settled {
+    var settled: std.ArrayList(Settled) = .empty;
+    errdefer settled.deinit(a);
     for (obligation.chain) |position| {
         const input = index.records[position].input;
         if (input != .step) continue;
         for (input.step.facts.items) |fact| {
-            const settled = fact.delivery orelse continue;
-            if (settled.outcome == .confirmed) {
-                try confirmed.append(a, settled.admitted.key);
-            } else try unconfirmed.append(a, fact.reference.task);
+            const delivery = fact.delivery orelse continue;
+            try settled.append(a, .{ .task = fact.reference.task, .outcome = delivery.outcome });
         }
     }
-    const keys = try confirmed.toOwnedSlice(a);
-    errdefer a.free(keys);
-    return .{ .confirmed = keys, .unconfirmed = try unconfirmed.toOwnedSlice(a) };
+    return settled.toOwnedSlice(a);
 }
 
-fn state(a: std.mem.Allocator, record: idx.Record, settled: Settled) !State {
-    const delivery = record.input.delivery;
-    for (settled.confirmed) |key| if (std.meta.eql(key, delivery.key)) return .delivered;
-    for (settled.unconfirmed) |task| if (std.meta.eql(task, record.task)) return .undelivered;
+fn state(a: std.mem.Allocator, record: idx.Record, settled: []const Settled) !State {
+    for (settled) |fact| {
+        if (std.meta.eql(fact.task, record.task)) return outcomeState(fact.outcome);
+    }
     const snapshot = record.owner_snapshot orelse return .pending;
     const evidence = record.owner_evidence orelse return .pending;
     var proof = try delivery_fact.inspect(a, snapshot, evidence);
     defer proof.deinit();
     const outcome = proof.value.outcome orelse
         return if (proof.value.terminal) .undelivered else .pending;
-    return if (outcome == .confirmed) .delivered else .undelivered;
+    return outcomeState(outcome);
+}
+
+fn outcomeState(outcome: t.DeliveryOutcome) State {
+    return switch (outcome) {
+        .confirmed => .delivered,
+        .indeterminate => .uncertain,
+        .rejected => .undelivered,
+    };
 }
 
 fn command(
@@ -185,7 +186,7 @@ fn message(
     record: idx.Record,
     owner: t.Id,
     ordinal: u64,
-    settled: Settled,
+    settled: []const Settled,
     config_path: ?[]const u8,
 ) !Message {
     const delivery = record.input.delivery;

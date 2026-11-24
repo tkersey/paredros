@@ -61,7 +61,6 @@ fn question() t.Question {
         .identity = @splat(20),
         .condition = @splat(21),
         .specification_revision = 6,
-        .evidence = .{ .retained = .{ .task = @splat(22), .digest = @splat(23) } },
         .source_condition = .{
             .epoch = 2,
             .base = @splat('a'),
@@ -262,7 +261,6 @@ const AnswerCase = enum {
     identity,
     choice,
     revision,
-    evidence,
     epoch,
     base,
     no_tip,
@@ -279,7 +277,6 @@ fn changedQuestion(
         .identity => answer.question = @splat(99),
         .choice => answer.choice = .{ .bytes = "not offered" },
         .revision => previous.question.?.specification_revision = 5,
-        .evidence => previous.question.?.evidence = .{ .current = {} },
         .epoch => previous.question.?.source_condition.?.epoch = 1,
         .base => previous.question.?.source_condition.?.base = @splat('z'),
         .no_tip => previous.observed.tip = null,
@@ -307,7 +304,7 @@ test "native directive policy refuses stale or unbound answers and exhausted sou
         const value = try execute(&f, @tagName(case), previous, &.{fact});
         try std.testing.expectEqualDeep(selected(previous, fact), value.head);
         const code = switch (case) {
-            .identity, .choice, .revision, .evidence => "question_binding_mismatch",
+            .identity, .choice, .revision => "question_binding_mismatch",
             else => "source_condition_changed",
         };
         try expectRejected(value, 0, code);
@@ -355,6 +352,48 @@ test "native directive policy authorizes one new digest issue preserving unknown
     const refused = try execute(&f, "second-release", again, &.{exhausted});
     try std.testing.expectEqualDeep(selected(again, exhausted), refused.head);
     try expectRejected(refused, 0, "release_not_authorized");
+}
+
+const question_warning = "The earlier question prompt may also have arrived. " ++
+    "This is the authorized replacement issue.\n\n";
+
+test "native directive policy holds a question at a boundary and reissues it once released" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    var previous = head();
+    previous.question = question();
+    const boundary: t.InputReference = .{ .task = @splat(30), .digest = @splat(31) };
+    const hold = directive(2, 1, null, .{ .recovery_hold = .{ .recovery = boundary } });
+    const old_key = question().prompt.key;
+    const release = directive(3, 2, hold.reference, .{ .release = .{ .key = old_key } });
+    const value = try execute(&f, "question-release", previous, &.{ hold, release });
+    try expectApplied(value, 0);
+    try expectApplied(value, 1);
+    var expected = question();
+    expected.prompt.key.identity = release.value.envelope.stable_request;
+    expected.prompt.key.generation = 0;
+    expected.prompt.payload.issue = 1;
+    expected.prompt.payload.supersedes = old_key;
+    expected.prompt.payload.frozen_text = .{
+        .bytes = question_warning ++ "Seven verified changes.",
+    };
+    try std.testing.expectEqualDeep(expected, value.head.question.?);
+    try std.testing.expect(value.head.recovery_hold);
+    const again = directive(4, 3, release.reference, .{ .release = .{
+        .key = expected.prompt.key,
+    } });
+    const repeated = try execute(&f, "question-release-again", value.head, &.{again});
+    try std.testing.expectEqualDeep(selected(value.head, again), repeated.head);
+    try expectRejected(repeated, 0, "release_not_authorized");
+    const unheld = directive(5, 1, null, .{ .release = .{ .key = old_key } });
+    const refused = try execute(&f, "question-release-unheld", previous, &.{unheld});
+    try std.testing.expectEqualDeep(selected(previous, unheld), refused.head);
+    try expectRejected(refused, 0, "release_not_authorized");
+    var absent = head();
+    absent.question = null;
+    const missing = try execute(&f, "question-release-missing", absent, &.{unheld});
+    try expectRejected(missing, 0, "question_missing");
 }
 
 const ReleaseCase = enum {

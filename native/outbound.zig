@@ -55,7 +55,8 @@ pub fn permitted(
         else
             false,
         .question => if (head.question) |question|
-            question.specification_revision == head.specification.revision and
+            !question.held and
+                question.specification_revision == head.specification.revision and
                 question.prompt.payload.specification_revision ==
                     head.specification.revision and
                 try equal(a, t.DeliveryIntent, question.prompt, intent)

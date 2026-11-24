@@ -223,7 +223,9 @@ as messages are added; continue from the last ordinal until the next cursor is
 null. Each item carries its task, purpose, key, issue, superseded key, covered
 sequence range, text, links, and choices, with a state: `delivered` once its
 confirmation is recorded, `undelivered` when its delivery task ended without one
-(a retryable message is then reissued under a new key), and `pending` otherwise.
+(a retryable message is then reissued under a new key), `uncertain` when its
+outcome is unknown (a digest is then held until `delivery release`), and `pending`
+otherwise. Each state comes from that message's own delivery task.
 
 A question's choices include the command that answers it, `paredros --config
 PATH question answer ID QUESTION_DIGEST CHOICE`. PATH is the absolute path of the
@@ -235,6 +237,13 @@ will still replace or resume an unfinished attempt, so `ask` keeps waiting throu
 a blocked, parked, or failed attempt until the retry or the final failure reply
 exists. A held digest is inspected with `delivery show KEY_JSON` and
 released with `delivery release ID KEY_JSON`.
+
+A question pending when a recovery boundary begins (including the one that
+releases an import) is held with the digest: `monitor show` reports it with
+`held` true and its prompt is not delivered. It can still be answered.
+`delivery release ID KEY_JSON` with the prompt's key reissues the prompt under a
+new key, labelled as a replacement that may duplicate an earlier one; each release
+needs a new hold.
 
 ## Upgrading a namespace
 
@@ -265,7 +274,11 @@ application closure and the imported members it still depends on, once; it never
 contains an earlier bundle, so repeated snapshots and transfer chains do not grow
 with prior cuts. Export refuses a namespace whose own import is incomplete, and
 refuses a filename that already exists before it takes a cut or fences the source;
-existing files are never overwritten.
+existing files are never overwritten. While an admitted `monitor add` has not run,
+snapshot export refuses with `ContinuityGenesisPending` and transfer export keeps
+finalizing. A monitor this build can never run (its task is blocked, or pinned to
+another program, profile, or runtime) does not hold export: it stays unrun in the
+source and is not carried.
 
 Each snapshot export run takes a new cut, except that a run for a NAME whose cut
 is still pending resumes that cut. A namespace has one transfer: after the first
@@ -281,9 +294,12 @@ manifest; the daemon then materializes its members and lineages in bounded steps
 including across a restart, while other control ingress waits. The client
 resolves a relative PATH against its own working directory and normalizes `.` and
 `..` before sending it, so every spelling of one path repeats the same import.
-Repeat `transfer import PATH` to observe progress; exit 75 means the daemon is still
-materializing. Reusing an import operation for a different file is refused as an
-operation conflict. Import preserves portable observations, pending controls,
+The daemon refuses a relative path (`RelativeTransferPath`). Repeat `transfer
+import PATH` to observe progress; exit 75 means the daemon is still materializing.
+The import operation is bound to its path and size limit; resource bindings are
+checked separately, so a configured owner/name rename does not change it. Reusing
+an import operation for a different file is refused as an operation conflict.
+Import preserves portable observations, pending controls,
 method source, and unresolved delivery evidence. Imported output, including
 imported conversation turns, remains held; `recovery status` reports `import_hold`.
 While it is held, `ask`, `monitor add`, and monitor proposals are refused with

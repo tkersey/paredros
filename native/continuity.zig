@@ -409,14 +409,6 @@ pub fn rebaseHead(
         if (batch.* == .retained)
             batch.retained = try mapReference(bundle, mappings, .batch, batch.retained);
     };
-    if (head.question) |*question| if (question.evidence == .retained) {
-        question.evidence.retained = try mapReference(
-            bundle,
-            mappings,
-            .batch,
-            question.evidence.retained,
-        );
-    };
     if (head.told_receipt) |*receipt|
         receipt.evidence = try mapReference(bundle, mappings, .delivery, receipt.evidence);
     if (head.method == .retained) {

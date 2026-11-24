@@ -167,7 +167,6 @@ pub const Question = struct {
     identity: Digest,
     condition: Digest,
     specification_revision: u64,
-    evidence: PublicationReference,
     source_condition: ?struct {
         epoch: u64,
         base: Oid,
@@ -176,6 +175,7 @@ pub const Question = struct {
     } = null,
     choices: c.Vector(Name, 8),
     prompt: DeliveryIntent,
+    held: bool = false,
 };
 pub const Method = union(enum) {
     ordinary: void,

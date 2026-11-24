@@ -101,7 +101,7 @@ fn applyBody(
         .adopt = try adopt.ret(adopted),
         .revert = try revert.ret(reverted),
         .answer = try answer.ret(try answerQuestion(c, answer.body(), h, head, answer.payload())),
-        .release = try release.ret(try releaseDigest(
+        .release = try release.ret(try releaseOutput(
             c,
             release.body(),
             h,
@@ -262,13 +262,7 @@ fn answerQuestion(
         try sb.field(some.payload(), "specification_revision"),
         try sb.field(try sb.field(head, "specification"), "revision"),
     );
-    const anchored = try sb.booleanNot(try isNone(
-        c,
-        sb,
-        t.PublicationReference,
-        try sb.field(some.payload(), "evidence"),
-    ));
-    const valid = try all(sb, &.{ same_id, chosen, current, anchored });
+    const valid = try all(sb, &.{ same_id, chosen, current });
     const accepted = try sb.branch();
     const rejected = try sb.branch();
     const next = try answerCondition(
@@ -409,6 +403,96 @@ fn publishGap(
     return b.update(try accept(c, b, next), .{
         .gap = try b.variant(try c.schema(?t.Batch), "some", gap),
     });
+}
+
+fn releaseOutput(
+    c: protean.Context,
+    b: anytype,
+    h: Helpers,
+    head: a.Value(t.Head),
+    directive: a.Value(t.Directive),
+    requested: a.Value(t.DeliveryKey),
+) !a.Value(chain.Applied) {
+    const Purpose = @FieldType(t.DeliveryKey, "purpose");
+    const prompt = try mode.enumIs(c, b, Purpose, try b.field(requested, "purpose"), .question);
+    const question = try b.branch();
+    const digest = try b.branch();
+    return b.conditional(
+        prompt,
+        try question.ret(try releaseQuestion(c, question, h, head, directive, requested)),
+        try digest.ret(try releaseDigest(c, digest, h, head, directive, requested)),
+    );
+}
+
+fn releaseQuestion(
+    c: protean.Context,
+    b: anytype,
+    h: Helpers,
+    head: a.Value(t.Head),
+    directive: a.Value(t.Directive),
+    requested: a.Value(t.DeliveryKey),
+) !a.Value(chain.Applied) {
+    const question = try b.field(head, "question");
+    const none = try b.caseOf(question, "none");
+    const some = try b.caseOf(question, "some");
+    const sb = some.body();
+    const key = try sb.field(try sb.field(some.payload(), "prompt"), "key");
+    const identity = try sb.field(try sb.field(directive, "envelope"), "stable_request");
+    const valid = try all(sb, &.{
+        try keyEqual(sb, h, key, requested),
+        try sb.field(some.payload(), "held"),
+        try sb.booleanNot(try digestEqual(sb, h, identity, try sb.field(key, "identity"))),
+        try digestEqual(sb, h, try sb.field(key, "lineage"), try sb.field(head, "lineage")),
+    });
+    const accepted = try sb.branch();
+    const rejected = try sb.branch();
+    const next = try reissueQuestion(c, accepted, head, some.payload(), identity);
+    const applied = try sb.conditional(
+        valid,
+        try accepted.ret(next),
+        try rejected.ret(try refuse(c, rejected, head, "release_not_authorized")),
+    );
+    return b.match(question, .{
+        .none = try none.ret(try refuse(c, none.body(), head, "question_missing")),
+        .some = try some.ret(applied),
+    });
+}
+
+fn reissueQuestion(
+    c: protean.Context,
+    b: anytype,
+    head: a.Value(t.Head),
+    question: a.Value(t.Question),
+    identity: a.Value(t.Digest),
+) !a.Value(chain.Applied) {
+    const prompt = try b.field(question, "prompt");
+    const old_key = try b.field(prompt, "key");
+    const old_payload = try b.field(prompt, "payload");
+    const key = try b.update(
+        old_key,
+        .{ .identity = identity, .generation = try b.constant(u32, 0) },
+    );
+    const warning = try c.literal(t.Text, .{
+        .bytes = "The earlier question prompt may also have arrived. " ++
+            "This is the authorized replacement issue.\n\n",
+    });
+    const payload = try b.update(old_payload, .{
+        .issue = try b.checked(
+            .add,
+            try b.field(old_payload, "issue"),
+            try b.constant(u32, 1),
+            .{ .overflow = try a.failure(c, "question_issue_overflow") },
+        ),
+        .supersedes = try b.variant(try c.schema(?t.DeliveryKey), "some", old_key),
+        .frozen_text = try join(c, b, warning, try b.field(old_payload, "frozen_text")),
+    });
+    const reissued = try b.update(question, .{
+        .prompt = try b.update(prompt, .{ .key = key, .payload = payload }),
+        .held = try b.constant(bool, false),
+    });
+    return accept(c, b, try b.update(head, .{
+        .question = try b.variant(try c.schema(?t.Question), "some", reissued),
+    }));
 }
 
 fn releaseDigest(
@@ -697,11 +781,7 @@ fn all(b: anytype, values: []const a.Value(bool)) !a.Value(bool) {
 }
 
 fn isNone(c: protean.Context, b: anytype, comptime T: type, value: a.Value(T)) !a.Value(bool) {
-    const expected = if (T == t.PublicationReference)
-        try c.literal(T, .{ .current = {} })
-    else
-        try c.literal(T, null);
-    return b.equal(try b.variantTag(value), try b.variantTag(expected));
+    return b.equal(try b.variantTag(value), try b.variantTag(try c.literal(T, null)));
 }
 
 fn join(c: protean.Context, b: anytype, left: anytype, right: anytype) !a.Value(t.Text) {

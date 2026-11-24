@@ -101,6 +101,23 @@ pub fn recoveryHold(
         .recovery_hold = try b.constant(bool, true),
         .recovery_boundary = try b.variant(try c.schema(?t.InputReference), "some", reference),
         .digest = next_digest,
+        .question = try holdQuestion(c, b, try b.field(head, "question")),
+    });
+}
+
+fn holdQuestion(
+    c: protean.Context,
+    b: anytype,
+    question: a.Value(?t.Question),
+) !a.Value(?t.Question) {
+    const none = try b.caseOf(question, "none");
+    const some = try b.caseOf(question, "some");
+    const held = try some.body().update(some.payload(), .{
+        .held = try some.body().constant(bool, true),
+    });
+    return b.match(question, .{
+        .none = try none.ret(try c.literal(?t.Question, null)),
+        .some = try some.ret(try some.body().variant(try c.schema(?t.Question), "some", held)),
     });
 }
 

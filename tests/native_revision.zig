@@ -94,7 +94,6 @@ fn head() t.Head {
         .identity = @splat(22),
         .condition = @splat(23),
         .specification_revision = 6,
-        .evidence = .{ .retained = .{ .task = @splat(24), .digest = @splat(25) } },
         .choices = .{ .items = &.{.{ .bytes = "accept" }} },
         .prompt = delivery(),
     };
