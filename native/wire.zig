@@ -6,7 +6,11 @@ pub const Error = native.values.Error || error{SystemDirective};
 
 pub fn identifier(comptime T: type) bool {
     const info = @typeInfo(T);
-    return info == .array and info.array.child == u8 and info.array.len != 0;
+    return info == .array and info.array.child == u8 and info.array.len != 0 and !objectName(T);
+}
+
+fn objectName(comptime T: type) bool {
+    return T == [40]u8;
 }
 
 fn container(comptime T: type) bool {
@@ -17,7 +21,7 @@ fn container(comptime T: type) bool {
 }
 
 fn textual(comptime T: type) bool {
-    return identifier(T) or (container(T) and @hasDecl(T, "parseText"));
+    return identifier(T) or objectName(T) or (container(T) and @hasDecl(T, "parseText"));
 }
 
 fn narrowed(comptime T: type) bool {
@@ -30,6 +34,7 @@ pub fn hex(value: anytype) [@sizeOf(@TypeOf(value)) * 2]u8 {
 }
 
 pub fn parse(comptime T: type, bytes: []const u8) error{InvalidIdentity}!T {
+    if (comptime objectName(T)) return parseObjectName(bytes);
     if (comptime !identifier(T)) return T.parseText(bytes);
     if (bytes.len != @sizeOf(T) * 2) return error.InvalidIdentity;
     var value: T = undefined;
@@ -37,7 +42,17 @@ pub fn parse(comptime T: type, bytes: []const u8) error{InvalidIdentity}!T {
     return value;
 }
 
+fn parseObjectName(bytes: []const u8) error{InvalidIdentity}![40]u8 {
+    if (bytes.len != 40) return error.InvalidIdentity;
+    for (bytes) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return error.InvalidIdentity,
+    };
+    return bytes[0..40].*;
+}
+
 pub fn format(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error![]u8 {
+    if (comptime objectName(T)) return a.dupe(u8, &value);
     if (comptime !identifier(T)) return value.formatText(a);
     return a.dupe(u8, &hex(value));
 }

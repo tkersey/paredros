@@ -1279,7 +1279,9 @@ inline fn sample(comptime T: type) T {
         .optional => |info| return @as(T, sample(info.child)),
         .array => |info| {
             var value: T = undefined;
-            for (&value, 0..) |*item, position| item.* = if (info.child == u8)
+            for (&value, 0..) |*item, position| item.* = if (T == t.Oid)
+                "0123456789abcdef"[position % 16]
+            else if (info.child == u8)
                 @intCast((position * 37 + 11) % 256)
             else
                 sample(info.child);
@@ -1311,6 +1313,7 @@ test "control CLI preserves every printed identifier and cursor as command input
     inline for (.{
         t.Id,
         t.Digest,
+        t.Oid,
         commands.ProposalIdentity,
         u32,
         u64,
