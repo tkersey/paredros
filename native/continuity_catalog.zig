@@ -35,30 +35,40 @@ fn reference(comptime T: type) bool {
         T == t.PublicationReference;
 }
 
-fn contains(comptime T: type) bool {
-    if (reference(T)) return true;
-    return switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_types) |F| {
-            if (contains(F)) break true;
-        } else false,
-        .@"union" => |info| inline for (info.field_types) |F| {
-            if (contains(F)) break true;
-        } else false,
-        .optional => |info| contains(info.child),
-        .pointer => |info| contains(info.child),
-        .array => |info| contains(info.child),
-        else => false,
+fn Carries(comptime T: type) type {
+    return struct {
+        pub const value: bool = reference(T) or switch (@typeInfo(T)) {
+            .@"struct" => |info| any(info.field_types),
+            .@"union" => |info| any(info.field_types),
+            .optional => |info| Carries(info.child).value,
+            .pointer => |info| Carries(info.child).value,
+            .array => |info| Carries(info.child).value,
+            else => false,
+        };
     };
 }
 
+fn any(comptime types: []const type) bool {
+    @setEvalBranchQuota(100_000);
+    for (types) |T| if (Carries(T).value) return true;
+    return false;
+}
+
+fn contains(comptime T: type) bool {
+    @setEvalBranchQuota(1_000_000);
+    return Carries(T).value;
+}
+
 fn classified(comptime Owner: type, comptime field: []const u8) ?Rule {
+    @setEvalBranchQuota(1_000_000);
     for (rules) |entry| {
         if (entry.Owner == Owner and std.mem.eql(u8, entry.field, field)) return entry.rule;
     }
     return null;
 }
 
-pub fn visit(comptime T: type, value: T, context: anytype) !void {
+pub inline fn visit(comptime T: type, value: T, context: anytype) !void {
+    @setEvalBranchQuota(1_000_000);
     if (comptime reference(T)) @compileError("unclassified continuity reference " ++ @typeName(T));
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, F| {
@@ -78,7 +88,8 @@ pub fn visit(comptime T: type, value: T, context: anytype) !void {
     }
 }
 
-fn each(comptime T: type, value: T, kind: t.ContinuityKind, context: anytype) !void {
+inline fn each(comptime T: type, value: T, kind: t.ContinuityKind, context: anytype) !void {
+    @setEvalBranchQuota(1_000_000);
     if (T == t.PublicationReference) {
         switch (value) {
             .current => {},
