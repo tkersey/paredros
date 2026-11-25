@@ -1646,6 +1646,11 @@ const pinned: []const Pin = &.{
     .{ .seed = 16, .events = 60 },
 };
 
+fn selectedPin(position: usize) bool {
+    if (position >= 64) return false;
+    return options.pins & (@as(u64, 1) << @intCast(position)) != 0;
+}
+
 fn pinnedSeed(position: usize) Pin {
     for (pinned, 0..) |pin, at| if (at == position) return pin;
     unreachable;
@@ -1677,11 +1682,13 @@ test "simulation holds every invariant across the selected seeds" {
     var calls: world_module.Calls = .{};
     var hops: u64 = 0;
     var injected: u64 = 0;
+    var ran: u64 = 0;
     const seeds = setting("PAREDROS_SIMULATION_SEEDS", options.seeds);
     const first = setting("PAREDROS_SIMULATION_FIRST", options.first);
     const count = (if (first == options.first) pinned.len else 0) + seeds;
     const pins = count - seeds;
     for (0..count) |position| {
+        if (position < pins and !selectedPin(position)) continue;
         const pin: Pin = if (position < pins)
             pinnedSeed(position)
         else
@@ -1689,6 +1696,7 @@ test "simulation holds every invariant across the selected seeds" {
         const seed = pin.seed;
         const begun = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
         const report = try expectClean(seed, pin.events);
+        ran += 1;
         if (options.progress) std.debug.print("seed {d}: {d} ms, {d} hops\n", .{
             seed, std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - begun, report.hops,
         });
@@ -1702,7 +1710,7 @@ test "simulation holds every invariant across the selected seeds" {
     const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
     std.debug.print("simulation: {d} seeds x {d} events in {d} ms; github {d}, model {d}, " ++
         "provider faults {d}, injected faults {d}, hops {d}\n", .{
-        count, events, elapsed, calls.github, calls.model, calls.faults, injected, hops,
+        ran, events, elapsed, calls.github, calls.model, calls.faults, injected, hops,
     });
 }
 

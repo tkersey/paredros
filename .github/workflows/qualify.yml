@@ -46,8 +46,20 @@ jobs:
           - lane: providers
             groups: providers
             budget: 600
-          - lane: simulation
-            groups: simulation
+          - lane: simulation-first
+            groups: simulation-first
+            budget: 600
+          - lane: simulation-second
+            groups: simulation-second
+            budget: 600
+          - lane: simulation-third
+            groups: simulation-third
+            budget: 600
+          - lane: simulation-fourth
+            groups: simulation-fourth
+            budget: 600
+          - lane: simulation-fifth
+            groups: simulation-fifth
             budget: 600
     env:
       ZIG_DEBUG_CMD: '1'

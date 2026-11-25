@@ -110,8 +110,9 @@ Process death stays with the process-death controller. `native/lifecycle.zig` st
 and fails compilation when a state cannot reach rest through ordinary inputs.
 
 CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
-three lanes, source with the emitted-application check, providers and simulation,
-and must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
+the source lane with the emitted-application check, providers, and five simulation
+lanes that each build the group once and replay one pinned seed (the first also runs
+the remaining simulation tests), and must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
 The Linux product smoke runs on every pull request as its own
 `Qualification / product` check but is outside the gate: compiling the product
 takes six to eight minutes on a hosted runner, which leaves the lane at nine to

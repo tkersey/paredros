@@ -9,7 +9,7 @@ const NativeGroup = enum {
     continuity,
     simulation,
 };
-const NativePartition = enum { first, second, third };
+const NativePartition = enum { first, second, third, fourth, fifth };
 
 pub fn build(b: *std.Build) void {
     qualifyStep(b);
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const partition = b.option(
         NativePartition,
         "native-partition",
-        "Select a continuity or transitions partition",
+        "Select a continuity, transitions or simulation partition",
     );
     if (partition != null and !native_tests)
         std.debug.panic("native-partition requires native-tests", .{});
@@ -183,11 +183,15 @@ fn nativeTests(
         if (filter != null)
             std.debug.panic("native-partition cannot be combined with test-filter", .{});
         const single = if (selected) |groups| groups.len == 1 else false;
-        if (!single or (selected.?[0] != .continuity and selected.?[0] != .transitions))
-            std.debug.panic(
-                "native-partition requires one continuity or transitions native-group",
-                .{},
-            );
+        const partitioned = single and switch (selected.?[0]) {
+            .continuity, .transitions => @backingInt(partition.?) < 3,
+            .simulation => true,
+            else => false,
+        };
+        if (!partitioned) std.debug.panic(
+            "native-partition requires one continuity, transitions or simulation native-group",
+            .{},
+        );
     }
     const execute = b.step("test-native", "Run every selected native owner group");
     const compile = b.step("build-native-tests", "Build every selected native owner group");
@@ -203,7 +207,8 @@ fn nativeTests(
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
-        if (group == .simulation) root.addOptions("simulation_options", simulationOptions(b));
+        if (group == .simulation)
+            root.addOptions("simulation_options", simulationOptions(b, partition));
         const checks = addPlatformTest(b, .{
             .filters = if (partition) |part|
                 nativePartitionFilters(group, part)
@@ -226,8 +231,11 @@ fn nativeTests(
     }
 }
 
-fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
+fn simulationOptions(b: *std.Build, partition: ?NativePartition) *std.Build.Step.Options {
     const values = b.addOptions();
+    const all_pins: u64 = std.math.maxInt(u64);
+    const pins = if (partition) |part| @as(u64, 1) << @backingInt(part) else all_pins;
+    values.addOption(u64, "pins", pins);
     values.addOption(?u64, "seed", b.option(u64, "simulation-seed", "Replay one simulation seed"));
     values.addOption(u64, "seeds", b.option(
         u64,
@@ -256,6 +264,10 @@ fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
 
 fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []const []const u8 {
     return switch (group) {
+        .simulation => switch (partition) {
+            .first => &.{},
+            else => &.{"simulation holds every invariant across the selected seeds"},
+        },
         .continuity => switch (partition) {
             .first => &.{"tests.transfer.test."},
             .third => &.{
@@ -268,6 +280,7 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
                 "tests.control.test.",
                 "tests.configuration.test.",
             },
+            .fourth, .fifth => unreachable,
         },
         .transitions => switch (partition) {
             .first => &.{
@@ -289,6 +302,7 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
                 "tests.native_genesis.test.",
                 "tests.contracts.test.",
             },
+            .fourth, .fifth => unreachable,
         },
         else => unreachable,
     };
