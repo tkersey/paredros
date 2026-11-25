@@ -104,6 +104,12 @@ pub const World = struct {
         }
     }
 
+    pub fn divergeFrom(self: *World, observed: t.Oid) void {
+        const seen = number(observed) orelse return;
+        if (seen == 0 or seen >= commits_max) return;
+        self.tip = self.commit(self.parents[seen]) orelse return;
+    }
+
     fn ancestor(self: *const World, older: u32, newer: u32) bool {
         var cursor = newer;
         for (0..commits_max) |_| {

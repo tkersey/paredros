@@ -681,9 +681,11 @@ fn confirm(sim: *Sim, value: *Node) !void {
     const shown = try dispatchBytes(sim, value, (try encodeArgs(sim, &.{
         "task", "show", try idText(sim, turn),
     })) orelse return);
-    const data = shown.data orelse return;
+    const data = shown.data orelse return sim.note("confirm", "task show refused", .{});
     const items = (data.object.get("confirmations") orelse return).array.items;
-    if (items.len == 0) return;
+    if (items.len == 0) return sim.note("confirm", "turn has no proposals: {s}", .{
+        shown.bytes[0..@min(shown.bytes.len, 400)],
+    });
     const identity = try native.json.text(items[sim.below(items.len)].object.get("identity").?);
     const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
     const response = (try mutate(sim, value, .confirm, args)) orelse return;
@@ -707,7 +709,7 @@ fn answer(sim: *Sim, value: *Node) !void {
     for (index.obligations) |*obligation|
         if (index.head(obligation).question != null)
             try open.append(sim.allocator(), obligation.task);
-    if (open.items.len == 0) return;
+    if (open.items.len == 0) return sim.note("answer", "no open question", .{});
     const target = open.items[sim.below(open.items.len)];
     if (sim.chance(50)) {
         const revision = index.head(index.obligation(target).?).specification.revision;
@@ -728,6 +730,27 @@ fn answer(sim: *Sim, value: *Node) !void {
         _ = try mutate(sim, value, .directive, try withOperation(sim, args, "answer"));
         return;
     };
+}
+
+fn questionScenario(sim: *Sim, value: *Node) !void {
+    var index = try rebuild(sim, value);
+    var target: ?t.Id = null;
+    for (index.obligations) |*obligation| {
+        const current = index.head(obligation);
+        const tip = current.observed.tip orelse continue;
+        if (current.mode != .active) continue;
+        sim.world.divergeFrom(tip);
+        target = obligation.task;
+    }
+    index.deinit();
+    try sim.note("rewrite", "tip {d} diverges", .{sim.world.tip});
+    if (target) |id| {
+        const args = try withOperation(sim, &.{ "monitor", "check", try idText(sim, id) }, "check");
+        _ = try mutate(sim, value, .directive, args);
+    }
+    try polls(sim, value, sim.random().intRangeAtMost(usize, 12, 36));
+    try answer(sim, value);
+    try polls(sim, value, sim.random().intRangeAtMost(usize, 6, 24));
 }
 
 fn commandArgs(sim: *Sim, line: []const u8) ![]const []const u8 {
@@ -885,7 +908,7 @@ fn polls(sim: *Sim, value: *Node, count: usize) !void {
 }
 
 fn exportStart(sim: *Sim, value: *Node) !void {
-    if (sim.nodes.items.len >= options.hops_max + 1 or sim.events.items.len < 10) return;
+    if (sim.nodes.items.len >= options.hops_max + 1 or sim.events.items.len < 20) return;
     var index = try rebuild(sim, value);
     const empty = index.obligations.len == 0;
     index.deinit();
@@ -1031,6 +1054,9 @@ fn importContinue(sim: *Sim, value: *Node) !void {
 
 fn act(sim: *Sim) !void {
     const value = sim.node();
+    if (sim.pending_export != null and sim.chance(35)) return exportContinue(sim, value, false);
+    if (value.import_args != null and sim.chance(35) and try importing(sim, value))
+        return importContinue(sim, value);
     const roll = sim.below(100);
     switch (roll) {
         0...28 => try polls(sim, value, sim.random().intRangeAtMost(usize, 2, 24)),
@@ -1048,7 +1074,8 @@ fn act(sim: *Sim) !void {
         89...90 => try restartEvent(sim, value, true, false),
         91...92 => try restartEvent(sim, value, false, true),
         93...95 => try exportEvent(sim, value),
-        96...98 => try answer(sim, value),
+        96 => try answer(sim, value),
+        97...98 => try questionScenario(sim, value),
         else => try strand(sim, value),
     }
 }
@@ -1419,6 +1446,8 @@ pub fn run(seed: u64, events: usize) !Report {
         } else null,
         .at = at,
     };
+    if (std.testing.environ.getPosix("PAREDROS_SIMULATION_TRACE") != null and
+        sim.violation == null) printTrace(&sim, report);
     if (sim.violation != null) {
         printTrace(&sim, report);
         dumpState(&sim) catch |err| std.debug.print("state dump: {s}\n", .{@errorName(err)});
@@ -1496,9 +1525,11 @@ fn dumpHead(record: idx.Record) void {
 }
 
 fn printTrace(sim: *const Sim, report: Report) void {
-    std.debug.print("simulation seed {d} violated {s} at event {d}: {s}\n", .{
-        report.seed, report.violation.?.invariant, report.at, report.violation.?.detail,
-    });
+    if (report.violation) |found| {
+        std.debug.print("simulation seed {d} violated {s} at event {d}: {s}\n", .{
+            report.seed, found.invariant, report.at, found.detail,
+        });
+    } else std.debug.print("simulation seed {d} trace\n", .{report.seed});
     for (sim.events.items, 0..) |event, position|
         std.debug.print("  {d:>4} {s}: {s}\n", .{ position, event.kind, event.detail });
     std.debug.print("replay: zig build test-native -Dnative-tests=true " ++
