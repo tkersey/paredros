@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "current_uid": 1000,
+  "namespace_path": "/var/lib/paredros/state",
+  "control_socket_path": "/run/paredros/control.sock",
+  "backup_directory": "/var/lib/paredros/backups",
+  "mode": "offline",
+  "repository": {
+    "account": "github-owner",
+    "id": 1,
+    "owner": "owner",
+    "name": "repository",
+    "ref": "refs/heads/main"
+  }
+}

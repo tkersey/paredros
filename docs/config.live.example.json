@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "current_uid": 1000,
+  "namespace_path": "/var/lib/paredros/state",
+  "control_socket_path": "/run/paredros/control.sock",
+  "backup_directory": "/var/lib/paredros/backups",
+  "mode": "live",
+  "grants": {
+    "github_read": true,
+    "model": true
+  },
+  "interval_ms": 900000,
+  "repository": {
+    "account": "github-owner",
+    "id": 1,
+    "owner": "REPLACE_WITH_REPOSITORY_OWNER",
+    "name": "REPLACE_WITH_REPOSITORY_NAME",
+    "ref": "refs/heads/main"
+  },
+  "github_credential_file": "/etc/paredros/secrets/github-token",
+  "model": {
+    "account": "REPLACE_WITH_MODEL_ACCOUNT",
+    "slug": "REPLACE_WITH_MODEL_SLUG",
+    "effort": "medium",
+    "siwc_bin": "/usr/local/bin/siwc",
+    "auth_dir": "/var/lib/paredros/model-auth",
+    "request_bytes": 1048576,
+    "response_bytes": 2097152,
+    "timeout_ms": 30000
+  }
+}

@@ -1,0 +1,289 @@
+name: Offline qualification
+run-name: Essential qualification
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  tiger-style:
+    name: TigerStyle
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Enforce TigerStyle on all tracked Zig source
+        run: bash tools/tiger-style.sh --all HEAD
+  build-source:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: source
+            groups: source,emitted
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: &build-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Build ${{ matrix.groups }}
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          zig build qualify -- --build-only --artifacts "$RUNNER_TEMP/artifacts" --group "${{ matrix.groups }}" \
+            --budget-seconds 900
+      - name: Show build logs
+        if: ${{ !success() }}
+        run: tail -n 40 zig-out/qualification/run-*/*.log
+      - name: Archive ${{ matrix.lane }} artifacts
+        run: tar -C "$RUNNER_TEMP/artifacts" -cf "$RUNNER_TEMP/${{ matrix.lane }}.tar" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.lane }}
+          path: ${{ runner.temp }}/${{ matrix.lane }}.tar
+          if-no-files-found: error
+          retention-days: 1
+  build-providers-first:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: providers-first
+            groups: providers-first
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-providers-second:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: providers-second
+            groups: providers-second
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-providers-third:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: providers-third
+            groups: providers-third
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-product:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: product
+            groups: product
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-crash:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - lane: crash
+            groups: crash
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  run-source:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: source
+            groups: source,emitted
+    steps: &run-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.lane }}
+          path: ${{ runner.temp }}
+      - name: Unpack ${{ matrix.lane }} artifacts
+        run: mkdir "$RUNNER_TEMP/artifacts" && tar -C "$RUNNER_TEMP/artifacts" -xf "$RUNNER_TEMP/${{ matrix.lane }}.tar"
+      - name: Run ${{ matrix.groups }}
+        run: |
+          uv run --no-project python tests/qualify.py --prebuilt "$RUNNER_TEMP/artifacts" --group "${{ matrix.groups }}" \
+            --budget-seconds 600
+      - name: Show run logs
+        if: ${{ !success() }}
+        run: tail -n 40 zig-out/qualification/run-*/*.log
+  run-providers-first:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers-first
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers-first
+            groups: providers-first
+    steps: *run-steps
+  run-providers-second:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers-second
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers-second
+            groups: providers-second
+    steps: *run-steps
+  run-providers-third:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers-third
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers-third
+            groups: providers-third
+    steps: *run-steps
+  run-product:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-product
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: product
+            groups: product
+    steps: *run-steps
+  run-crash:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-crash
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: crash
+            groups: crash
+    steps: *run-steps
+  simulation:
+    name: Qualification / simulation / macos-aarch64
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Remove untracked sources and keep ignored build state
+        run: git clean -ffd
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Qualify simulation
+        run: |
+          if [ -n "${PAREDROS_CI_CACHE:-}" ]; then
+            export ZIG_GLOBAL_CACHE_DIR="$PAREDROS_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PAREDROS_CI_CACHE/zig-local"
+          fi
+          zig build qualify -- --group simulation --budget-seconds 600
+  native:
+    name: native
+    needs: [tiger-style, simulation, build-source, build-providers-first, build-providers-second,
+      build-providers-third, build-product, build-crash, run-source, run-providers-first, run-providers-second,
+      run-providers-third, run-product, run-crash]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every stage within ten minutes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          created=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '.created_at | fromdate')
+          read -r built ran simulated < <(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" | jq -r \
+            --argjson created "$created" '
+              def done(prefix): [.jobs[] | select(.name | startswith(prefix)) | .completed_at | fromdate] | max;
+              [done("Build /") - $created, done("Run /") - done("Build /"),
+                done("Qualification / simulation /") - $created] | map(tostring) | join(" ")')
+          {
+            echo "BUILD stage, trigger to last build completion: ${built}s (maximum 900s)"
+            echo "RUN stage, last build completion to last run completion: ${ran}s (maximum 600s)"
+            echo "Simulation, trigger to completion: ${simulated}s (maximum 600s)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" > /dev/null
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo 'Qualification requires the first attempt of its run.'
+            exit 1
+          fi
+          test "$built" -le 900
+          test "$ran" -le 600
+          test "$simulated" -le 600

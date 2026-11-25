@@ -1,6 +1,10 @@
 name: macOS fallback qualification
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact commit to qualify; defaults to the dispatched ref
+        required: false
 permissions:
   contents: read
   actions: read
@@ -12,8 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
           clean: false
+      - name: Require the requested commit
+        env:
+          EXPECTED: ${{ inputs.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED"
       - name: Remove untracked sources and keep ignored build state
         run: git clean -ffd
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

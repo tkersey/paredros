@@ -1,0 +1,147 @@
+const std = @import("std");
+const protean = @import("protean");
+const horos = @import("horos");
+const a = @import("author.zig");
+const t = @import("application_types");
+const genesis = @import("genesis.zig");
+const step = @import("step.zig");
+const check = @import("check.zig");
+const policy = @import("directive_policy.zig");
+const render = @import("render.zig");
+const model = @import("model.zig");
+const method = @import("method.zig");
+const turn = @import("turn.zig");
+const experiment = @import("experiment.zig");
+const github = @import("github_contract.zig");
+const m = @import("model_contract.zig");
+
+const Function = a.Function(struct { input: t.Input }, t.Output);
+const Functions = struct {
+    genesis: genesis.Function,
+    step: step.Function,
+    turn: turn.Function,
+    experiment: experiment.Function,
+};
+
+pub const Application = struct {
+    pub fn emit(c: protean.Context) !horos.source.Module {
+        const completion = try model.emit(c);
+        const inference = try m.P.declare(c);
+        const reader = try check.emit(c);
+        const github_read = try operation(c, reader, github.Request, github.Reply, github.identity);
+        const method_ops = try method.declare(c);
+        const render_effects = .{ inference, method_ops.workspace, method_ops.codec };
+        const retained = try method.emit(c, method_ops, completion, render_effects);
+        const experiment_ops = try experiment.declare(c);
+        const experiment_effects = .{
+            inference,            method_ops.workspace, method_ops.codec, experiment_ops.codec,
+            experiment_ops.clock,
+        };
+        const functions: Functions = .{
+            .genesis = try genesis.emit(c),
+            .step = try step.emit(
+                c,
+                try policy.emit(c),
+                reader,
+                try render.emit(c, completion, retained, render_effects),
+                .{ github_read, inference, method_ops.workspace, method_ops.codec },
+            ),
+            .turn = try turn.emit(c, completion, .{inference}),
+            .experiment = try experiment.emit(
+                c,
+                experiment_ops,
+                method_ops,
+                completion,
+                experiment_effects,
+            ),
+        };
+        const entry = try dispatch(c, functions, .{
+            github_read,      inference,            method_ops.workspace,
+            method_ops.codec, experiment_ops.codec, experiment_ops.clock,
+        });
+        return c.author.module(entry, try c.schema(t.Failure));
+    }
+};
+
+fn operation(
+    c: protean.Context,
+    function: anytype,
+    comptime Payload: type,
+    comptime Reply: type,
+    identity: []const u8,
+) !a.Operation(Payload, Reply) {
+    const id = try horos.authoring.interop.functionId(c.author, function);
+    const effects = c.builder.functions.items[@intCast(id)].effects;
+    if (effects.len != 1 or
+        !std.mem.eql(u8, c.builder.effects.items[@intCast(effects[0])].identity, identity))
+        return error.UnexpectedProviderEffects;
+    return horos.authoring.interop.externalOperation(
+        c.author,
+        effects[0],
+        try c.schema(Payload),
+        try c.schema(Reply),
+    );
+}
+
+fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Function {
+    const function = try c.author.function("dispatch admitted PAREDROS input", .{
+        .input = try c.schema(t.Input),
+    }, try c.schema(t.Output), effects);
+    const b = try c.author.body(function);
+    const input = try b.parameter("input");
+    const initial = try b.caseOf(input, "genesis");
+    const advance = try b.caseOf(input, "step");
+    const directive = try b.caseOf(input, "directive");
+    const converse = try b.caseOf(input, "turn");
+    const compare = try b.caseOf(input, "experiment");
+    const member = try b.caseOf(input, "continuity_member");
+    const cut = try b.caseOf(input, "continuity_cut");
+    const marker = try b.caseOf(input, "transfer");
+    const receipt = try b.caseOf(input, "confirmation");
+    try envelope(c, directive.body(), directive.payload());
+    const result = try b.match(input, .{
+        .genesis = try initial.ret(try invoke(c, initial, functions.genesis, "genesis")),
+        .step = try advance.ret(try invoke(c, advance, functions.step, "step")),
+        .directive = try directive.ret(try directive.body().variant(
+            try c.schema(t.Output),
+            "directive",
+            directive.payload(),
+        )),
+        .turn = try converse.ret(try invoke(c, converse, functions.turn, "turn")),
+        .experiment = try compare.ret(try invoke(c, compare, functions.experiment, "experiment")),
+        .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
+        .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
+        .transfer = try marker.ret(try preserve(c, marker, "transfer")),
+        .confirmation = try receipt.ret(try preserve(c, receipt, "confirmation")),
+    });
+    try c.author.define(function, try b.ret(result));
+    return function;
+}
+
+fn preserve(c: protean.Context, case: anytype, comptime tag: []const u8) !a.Value(t.Output) {
+    const b = case.body();
+    const input = case.payload();
+    try envelope(c, b, input);
+    return b.variant(try c.schema(t.Output), tag, input);
+}
+
+fn invoke(
+    c: protean.Context,
+    case: anytype,
+    function: anytype,
+    comptime tag: []const u8,
+) !a.Value(t.Output) {
+    const b = case.body();
+    const input = case.payload();
+    try envelope(c, b, input);
+    return b.variant(try c.schema(t.Output), tag, try b.call(function, .{ .input = input }));
+}
+
+fn envelope(c: protean.Context, b: anytype, input: anytype) !void {
+    try a.require(
+        c,
+        b,
+        try b.equal(try b.field(try b.field(input, "envelope"), "version"), try b.constant(u32, 1)),
+        "unsupported_input_version",
+    );
+}

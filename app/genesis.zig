@@ -1,0 +1,142 @@
+const protean = @import("protean");
+const t = @import("application_types");
+const a = @import("author.zig");
+const notification = @import("notification.zig");
+const specification_bounds = @import("specification.zig");
+
+pub const Function = a.Function(struct { input: t.Genesis }, t.Head);
+
+pub fn emit(c: protean.Context) !Function {
+    const validate = try specification_bounds.emit(c);
+    const function = try c.author.function("paredros genesis", .{
+        .input = try c.schema(t.Genesis),
+    }, try c.schema(t.Head), &.{});
+    const b = try c.author.body(function);
+    const input = try b.parameter("input");
+    try a.require(c, b, try b.equal(
+        try b.field(try b.field(input, "envelope"), "version"),
+        try b.constant(u32, 1),
+    ), "unsupported_input_version");
+    const imported = try b.field(input, "imported");
+    const fresh = try b.caseOf(imported, "none");
+    const restored = try b.caseOf(imported, "some");
+    const result = try b.match(imported, .{
+        .none = try fresh.ret(try freshHead(c, fresh.body(), input)),
+        .some = try restored.ret(try restoredHead(c, restored.body(), input, restored.payload())),
+    });
+    try a.require(c, b, try specification_bounds.valid(
+        c,
+        b,
+        try b.call(validate, .{ .specification = try b.field(result, "specification") }),
+    ), "invalid_specification");
+    try c.author.define(function, try b.ret(result));
+    return function;
+}
+
+fn freshHead(c: protean.Context, b: anytype, input: a.Value(t.Genesis)) !a.Value(t.Head) {
+    const specification = try b.field(input, "specification");
+    try a.require(c, b, try b.equal(
+        try b.field(specification, "revision"),
+        try b.constant(u64, 0),
+    ), "invalid_initial_revision");
+    return b.product(try c.schema(t.Head), .{
+        .version = try b.constant(u32, 1),
+        .obligation = try c.literal(t.GenesisIdentity, .{ .self = {} }),
+        .lineage = try b.field(input, "lineage"),
+        .sequence = try b.constant(u64, 0),
+        .predecessor = try c.literal(?t.Reference, null),
+        .attempt = try b.constant(u32, 0),
+        .superseded = try c.literal(?t.InputReference, null),
+        .folded_directive_ordinal = try b.constant(u64, 0),
+        .last_directive = try c.literal(?t.InputReference, null),
+        .consumed = try c.literal(@FieldType(t.Head, "consumed"), .{ .items = &.{} }),
+        .specification = specification,
+        .mode = try c.literal(t.Mode, .active),
+        .desired_mode = try c.literal(@FieldType(t.Head, "desired_mode"), .active),
+        .observed = try c.literal(t.Frontier, .{ .sequence = 0, .epoch = 0, .tip = null }),
+        .told = try c.literal(t.Frontier, .{ .sequence = 0, .epoch = 0, .tip = null }),
+        .last_observation = try c.literal(?t.Observation, null),
+        .message = try c.literal(?t.Notification, .{
+            .specification_revision = 0,
+            .text = .{ .bytes = "PAREDROS is active. First source observation is pending." },
+            .purpose = .{ .activation = {} },
+        }),
+        .question = try c.literal(?t.Question, null),
+        .method = try c.literal(t.Method, .{ .ordinary = {} }),
+        .method_disposition = try c.literal(?t.MethodDisposition, null),
+        .schedule = try b.product(try c.schema(t.Schedule), .{
+            .next_due_ms = try b.field(input, "clock_ms"),
+            .source_not_before_ms = try b.field(input, "clock_ms"),
+            .render_not_before_ms = try b.field(input, "clock_ms"),
+            .provider_not_before_ms = try b.field(input, "clock_ms"),
+        }),
+        .check_requested = try b.constant(bool, false),
+        .clock_ms = try b.field(input, "clock_ms"),
+        .skipped_slots = try b.constant(u64, 0),
+        .clock_regressions = try b.constant(u64, 0),
+        .last_clock_regression = try c.literal(?t.ClockRegression, null),
+        .phase = try c.literal(t.Phase, .fold),
+        .previous_check_overran = try b.constant(bool, false),
+        .check_failure_streak = try b.constant(u32, 0),
+        .render_failure_streak = try b.constant(u32, 0),
+        .accounting = try c.literal(t.Accounting, .{}),
+    });
+}
+
+fn restoredHead(
+    c: protean.Context,
+    b: anytype,
+    input: a.Value(t.Genesis),
+    imported: a.Value(@typeInfo(@FieldType(t.Genesis, "imported")).optional.child),
+) !a.Value(t.Head) {
+    const carried = try b.field(imported, "carried");
+    const fresh = try b.caseOf(carried, "none");
+    const kept = try b.caseOf(carried, "some");
+    return b.match(carried, .{
+        .none = try fresh.ret(try freshHead(c, fresh.body(), input)),
+        .some = try kept.ret(try importedHead(c, kept.body(), input, kept.payload())),
+    });
+}
+
+fn importedHead(
+    c: protean.Context,
+    b: anytype,
+    input: a.Value(t.Genesis),
+    imported: a.Value(t.CarriedHead),
+) !a.Value(t.Head) {
+    const previous = try b.field(imported, "head");
+    const Desired = @FieldType(t.Head, "desired_mode");
+    const desired = try b.field(previous, "desired_mode");
+    const prior = try b.select(
+        try enumIs(c, b, Desired, desired, .cancelled),
+        try c.literal(t.Mode, .cancelled),
+        try b.select(
+            try enumIs(c, b, Desired, desired, .paused),
+            try c.literal(t.Mode, .paused),
+            try c.literal(t.Mode, .active),
+        ),
+    );
+    return a.replace(c, b, t.Head, previous, .{
+        .obligation = try c.literal(t.GenesisIdentity, .{ .self = {} }),
+        .sequence = try b.constant(u64, 0),
+        .predecessor = try c.literal(?t.Reference, null),
+        .attempt = try b.constant(u32, 0),
+        .superseded = try c.literal(?t.InputReference, null),
+        .consumed = try c.literal(@FieldType(t.Head, "consumed"), .{ .items = &.{} }),
+        .folded_directive_ordinal = try b.constant(u64, 0),
+        .last_directive = try c.literal(?t.InputReference, null),
+        .mode = prior,
+        .message = try notification.pending(c, b, previous),
+        .clock_ms = try b.field(input, "clock_ms"),
+    });
+}
+
+fn enumIs(
+    c: protean.Context,
+    b: anytype,
+    comptime T: type,
+    value: a.Value(T),
+    expected: T,
+) !a.Value(bool) {
+    return b.equal(try b.enumTag(value), try b.enumTag(try c.literal(T, expected)));
+}

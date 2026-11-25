@@ -1,0 +1,24 @@
+[Unit]
+Description=PAREDROS personal assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paredros
+Group=paredros
+UMask=0077
+StateDirectory=paredros
+StateDirectoryMode=0700
+RuntimeDirectory=paredros
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/bin/paredros --config /etc/paredros/config.json serve
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
