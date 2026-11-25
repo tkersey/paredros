@@ -1217,36 +1217,43 @@ fn same(comptime T: type, x: T, y: T) bool {
         .@"struct" => |info| {
             if (comptime @hasDecl(T, "KV") and @hasDecl(T, "iterator")) return sameMap(T, x, y);
             inline for (info.field_names, info.field_types) |name, Field| {
-                if (!same(Field, @field(x, name), @field(y, name))) return false;
+                if (!sameMember(Field, @field(x, name), @field(y, name))) return false;
             }
             return true;
         },
         .@"union" => {
             if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
             return switch (x) {
-                inline else => |value, tag| same(@TypeOf(value), value, @field(y, @tagName(tag))),
+                inline else => |value, tag| {
+                    const other = @field(y, @tagName(tag));
+                    return sameMember(@TypeOf(value), value, other);
+                },
             };
         },
         .optional => |info| {
             if (x == null or y == null) return x == null and y == null;
-            return same(info.child, x.?, y.?);
+            return sameMember(info.child, x.?, y.?);
         },
         .pointer => |info| switch (info.size) {
             .slice => {
                 if (info.child == u8) return std.mem.eql(u8, x, y);
                 if (x.len != y.len) return false;
-                for (x, y) |l, r| if (!same(info.child, l, r)) return false;
+                for (x, y) |l, r| if (!sameMember(info.child, l, r)) return false;
                 return true;
             },
-            .one => return same(info.child, x.*, y.*),
+            .one => return sameMember(info.child, x.*, y.*),
             else => @compileError("unsupported index pointer"),
         },
         .array => |info| {
-            for (x, y) |l, r| if (!same(info.child, l, r)) return false;
+            for (x, y) |l, r| if (!sameMember(info.child, l, r)) return false;
             return true;
         },
         else => return std.meta.eql(x, y),
     }
+}
+
+fn sameMember(comptime T: type, x: T, y: T) bool {
+    return same(T, x, y);
 }
 
 fn sameMap(comptime T: type, x: T, y: T) bool {
@@ -1254,7 +1261,7 @@ fn sameMap(comptime T: type, x: T, y: T) bool {
     var entries = x.iterator();
     while (entries.next()) |entry| {
         const other = y.get(entry.key_ptr.*) orelse return false;
-        if (!same(@TypeOf(other), entry.value_ptr.*, other)) return false;
+        if (!sameMember(@TypeOf(other), entry.value_ptr.*, other)) return false;
     }
     return true;
 }
