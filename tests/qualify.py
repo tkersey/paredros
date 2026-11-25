@@ -54,6 +54,8 @@ def build_jobs():
 def inventory(zig, system, install, output, full):
     linux = system == ("Linux", "x86_64")
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
+    if linux and Path("/dev/shm").is_dir():
+        os.environ.setdefault("PAREDROS_SIMULATION_DIR", "/dev/shm/paredros-simulation")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
         counts = {"authority": 102, "providers": 31, "transitions": 40, "rendering": 62, "continuity": 53,

@@ -105,7 +105,9 @@ seeds; `-Dsimulation-seed=N` replays one seed, and `-Dsimulation-seeds=N`,
 `-Dsimulation-first=N` and `-Dsimulation-events=N` add consecutive seeds.
 `PAREDROS_SIMULATION_SEED`, `PAREDROS_SIMULATION_SEEDS`, `PAREDROS_SIMULATION_FIRST`
 and `PAREDROS_SIMULATION_EVENTS` override them at run time, `PAREDROS_SIMULATION_TRACE`
-prints a clean seed's trace and `PAREDROS_SIMULATION_PROFILE` its per-poll cost.
+prints a clean seed's trace, `PAREDROS_SIMULATION_PROFILE` its per-poll cost, and
+`PAREDROS_SIMULATION_DIR` places its namespaces under another directory; qualification
+sets it to `/dev/shm` on Linux.
 Process death stays with the process-death controller. `native/lifecycle.zig` states each lifecycle as a table
 and fails compilation when a state cannot reach rest through ordinary inputs.
 

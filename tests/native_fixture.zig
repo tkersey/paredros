@@ -85,11 +85,25 @@ fn manifest(a: std.mem.Allocator, image: []const u8, application: []const u8) ![
     }, .{});
 }
 
+pub fn scratch(root: ?[]const u8) !std.testing.TmpDir {
+    const base = root orelse return std.testing.tmpDir(.{});
+    const io = std.testing.io;
+    var random_bytes: [12]u8 = undefined;
+    io.random(&random_bytes);
+    var value: std.testing.TmpDir = undefined;
+    _ = std.base64.url_safe.Encoder.encode(&value.sub_path, &random_bytes);
+    value.parent_dir = try std.Io.Dir.cwd().createDirPathOpen(io, base, .{});
+    errdefer value.parent_dir.close(io);
+    value.dir = try value.parent_dir.createDirPathOpen(io, &value.sub_path, .{});
+    return value;
+}
+
 pub fn Fixture(comptime Types: type, comptime Application: type) type {
     return struct {
         const Self = @This();
         arena: std.heap.ArenaAllocator = .init(std.testing.allocator),
         temporary: ?std.testing.TmpDir = null,
+        root: ?[]const u8 = null,
         path: []const u8 = undefined,
         assets: native.discovery.Assets = undefined,
         application: ?native.discovery.Application = null,
@@ -127,7 +141,7 @@ pub fn Fixture(comptime Types: type, comptime Application: type) type {
                 self.handlers.?,
             );
             try self.grant(identities);
-            self.temporary = std.testing.tmpDir(.{});
+            self.temporary = try scratch(self.root);
             var path_buffer: [4096]u8 = undefined;
             const length = try self.temporary.?.dir.realPath(std.testing.io, &path_buffer);
             self.path = try std.fmt.allocPrint(a, "{s}/native", .{path_buffer[0..length]});

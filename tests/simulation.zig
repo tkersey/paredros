@@ -19,7 +19,8 @@ const world_module = @import("simulation_world.zig");
 const oracle = @import("simulation_oracle.zig");
 const Driver = @import("../native/driver.zig").Driver(app.Types);
 const Daemon = daemon_module.Daemon(app.Types);
-const Fixture = @import("native_fixture.zig").Fixture(app.Types, world_module.Application);
+const native_fixture = @import("native_fixture.zig");
+const Fixture = native_fixture.Fixture(app.Types, world_module.Application);
 const World = world_module.World;
 const Check = oracle.Check;
 const gpa = std.testing.allocator;
@@ -296,14 +297,16 @@ fn openNode(sim: *Sim, label: u8) !*Node {
     fixture.profile.environment = &sim.world;
     fixture.profile.runtime_identity = runtimeDigest(sim.runtime);
     const binding = try modelBinding(fixture);
+    const root = std.testing.environ.getPosix("PAREDROS_SIMULATION_DIR");
+    fixture.root = root;
     try fixture.initWithGrants(&.{ github.identity, mc.P.identity });
-    value.backup = std.testing.tmpDir(.{});
+    value.backup = try native_fixture.scratch(root);
     try value.backup.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var buffer: [4096]u8 = undefined;
     const length = try value.backup.dir.realPath(std.testing.io, &buffer);
     value.backup_path = try sim.allocator().dupe(u8, buffer[0..length]);
     value.socket_path = try std.fs.path.join(sim.allocator(), &.{
-        std.testing.TmpDir.parent_dir_path, &fixture.temporary.?.sub_path, "control",
+        root orelse std.testing.TmpDir.parent_dir_path, &fixture.temporary.?.sub_path, "control",
     });
     value.config = .{
         .version = 1,
