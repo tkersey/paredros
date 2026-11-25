@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--history", type=int, default=0)
     parser.add_argument("--fixture", type=Path)
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--samples", type=int, default=31)
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     targets = sorted(set(args.targets))
@@ -95,12 +96,14 @@ def main():
             shutil.copytree(args.fixture.resolve(strict=True) / "state", root / "state")
         else:
             invoke("empty", PAREDROS_EMPTY_PHASE="seed", PAREDROS_EMPTY_HISTORY=str(args.history))
-        rows, elapsed = invoke("empty", PAREDROS_EMPTY_PHASE="daemon")
+        rows, elapsed = invoke(
+            "empty", PAREDROS_EMPTY_PHASE="daemon", PAREDROS_EMPTY_SAMPLES=str(args.samples),
+        )
         attach = [row for row in rows if "daemon_attach_nanoseconds" in row]
         checks = [row for row in rows if "empty_check" in row]
         idle = [row for row in rows if "idle_poll" in row]
-        assert len(attach) == 1 and len(checks) == 31 and checks[0]["baseline"]
-        assert [row["empty_check"] for row in checks] == list(range(31))
+        assert len(attach) == 1 and len(checks) == args.samples and checks[0]["baseline"]
+        assert [row["empty_check"] for row in checks] == list(range(args.samples))
         save({
             "history": args.history,
             "fixture": str(args.fixture) if args.fixture else None,
@@ -111,6 +114,11 @@ def main():
             "polls": distribution([row["polls"] for row in checks[1:]]),
             "database_growth_bytes": distribution([row["database_growth_bytes"] for row in checks[1:]]),
             "idle_poll_owner_nanoseconds": distribution([row["owner_nanoseconds"] for row in idle]),
+            **{
+                f"{scope}_{key}": distribution([row[key] for row in rows])
+                for scope, rows in (("check", checks[1:]), ("idle_poll", idle))
+                for key in ("probes", "loads", "derivations") if key in rows[0]
+            },
             "process_seconds": elapsed,
             "load_average": os.getloadavg(),
             **retained(root),

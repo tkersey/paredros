@@ -121,6 +121,7 @@ fn openAt(f: *Fixture, path: []const u8) !void {
 }
 
 pub fn run(path: []const u8) !void {
+    index_module.verify_against_rebuild = false;
     const phase = std.testing.environ.getPosix("PAREDROS_EMPTY_PHASE") orelse "";
     if (std.mem.eql(u8, phase, "seed")) return seedPhase(path);
     if (std.mem.eql(u8, phase, "daemon")) return daemonPhase(path);
@@ -345,7 +346,9 @@ fn daemonSamples(f: *Fixture, driver: *Driver, daemon: *Daemon, target: t.Id) !v
     for (0..samples) |n| {
         clock_ms = head.schedule.next_due_ms;
         const before = try storageBytes(f.arena.allocator(), f.path);
+        const counters = driver.index.?.counters;
         const measured = try daemonCheck(f, daemon, target, head.sequence + 1);
+        const after = driver.index.?.counters;
         head = try currentHead(driver, target, true);
         try emit(.{
             .empty_check = n,
@@ -353,15 +356,28 @@ fn daemonSamples(f: *Fixture, driver: *Driver, daemon: *Daemon, target: t.Id) !v
             .owner_nanoseconds = measured.owner,
             .wall_nanoseconds = measured.wall,
             .polls = measured.polls,
+            .probes = after.probes - counters.probes,
+            .loads = after.loads - counters.loads,
+            .derivations = after.derivations - counters.derivations,
             .database_growth_bytes = (try storageBytes(f.arena.allocator(), f.path)) - before,
         });
     }
     for (0..idle_polls) |n| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
+        const counters = driver.index.?.counters;
         const before = nanoseconds();
         _ = try daemon.poll(arena.allocator(), 0);
-        try emit(.{ .idle_poll = n, .owner_nanoseconds = nanoseconds() - before });
+        const elapsed = nanoseconds() - before;
+        const after = driver.index.?.counters;
+        try emit(.{
+            .idle_poll = n,
+            .owner_nanoseconds = elapsed,
+            .probes = after.probes - counters.probes,
+            .loads = after.loads - counters.loads,
+            .derivations = after.derivations - counters.derivations,
+            .records = driver.index.?.current.records.len,
+        });
     }
 }
 
