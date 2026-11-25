@@ -123,22 +123,23 @@ pub fn admit(driver: anytype, a: std.mem.Allocator, origin: t.Origin) !Progress 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var index = try driver.rebuild(scratch);
-    defer index.deinit();
+    var indexed = try driver.view(scratch);
+    defer indexed.deinit();
+    const index = &indexed.index;
     if (index.transferred()) return error.TransferredNamespace;
     const view = index.continuity_import orelse return .{};
     if (view.bundle == null) return .{};
-    const selected = try pending(scratch, &index, view);
+    const selected = try pending(scratch, index, view);
     if (selected.len == 0) return .{};
     const input = try mappedInput(
         scratch,
-        &index,
+        index,
         view,
         selected[0].at,
         driver.model,
-        try nextOrdinal(&index),
+        try nextOrdinal(index),
     );
-    const admitted = try driver.service.submit(
+    const admitted = try driver.submit(
         scratch,
         input.envelope.operation.bytes,
         .{ .turn = input },

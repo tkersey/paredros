@@ -5,10 +5,10 @@ const recovery = @import("recovery_status.zig");
 pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) !u32 {
     if (!driver.attached) return error.DriverDetached;
     if (limit == 0) return error.InvalidRecoveryLimit;
-    var index = try driver.rebuild(a);
-    defer index.deinit();
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
     var resumed: u32 = 0;
-    for (index.records) |record| {
+    for (indexed.index.records) |record| {
         if (record.superseded or record.result != null or
             record.input == .step or record.input == .turn) continue;
         if (resumed == limit) break;
@@ -16,14 +16,15 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) !u32 {
             .{ .item = record.task, .work = .retained },
             recovery.Resume,
             resumeOne,
-            .{ driver.service, a, record },
+            .{ driver, a, record },
         );
         if (outcome == recovery.Resume.resumed) resumed += 1;
     }
     return resumed;
 }
 
-fn resumeOne(service: anytype, a: std.mem.Allocator, record: idx.Record) !recovery.Resume {
+fn resumeOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !recovery.Resume {
+    const service = driver.service;
     var saved = try service.task(a, record.task);
     defer saved.deinit();
     const action = recovery.classify(
@@ -33,7 +34,7 @@ fn resumeOne(service: anytype, a: std.mem.Allocator, record: idx.Record) !recove
         record.owner_snapshot orelse return error.MissingOwnerSnapshot,
     );
     return recovery.resumeSelected(
-        service,
+        driver,
         a,
         record.task,
         saved.value.revision,

@@ -197,12 +197,13 @@ fn admitGenesis(
             } };
         }
     };
-    var index = try driver.rebuild(scratch);
-    defer index.deinit();
-    if (try importedGenesis(scratch, &index, request)) |task| return task;
-    const result = try admission.admit(driver.service, scratch, request, Materializer{
+    var indexed = try driver.view(scratch);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    if (try importedGenesis(scratch, index, request)) |task| return task;
+    const result = try admission.admit(driver, scratch, request, Materializer{
         .driver = driver,
-        .index = &index,
+        .index = index,
         .specification = specification,
         .anchor_now = anchor_now,
     });
@@ -272,16 +273,17 @@ pub fn turn(
             allocator: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
-            var index = try self.driver.rebuild(allocator);
-            defer index.deinit();
+            var indexed = try self.driver.view(allocator);
+            defer indexed.deinit();
+            const index = &indexed.index;
             var frozen = self.request;
             if (frozen.genesis_template) |*template| {
                 template.anchor_ms = try self.driver.clock.now(self.driver.clock.context);
             }
-            return turnInput(allocator, &index, self.driver.model, requested, frozen);
+            return turnInput(allocator, index, self.driver.model, requested, frozen);
         }
     };
-    const result = try admission.admit(driver.service, scratch, request, Materializer{
+    const result = try admission.admit(driver, scratch, request, Materializer{
         .driver = driver,
         .request = requested_turn,
     });
@@ -393,7 +395,7 @@ pub fn confirmed(
         .origin = origin,
         .digest = digest,
     };
-    _ = try admission.admit(driver.service, a, request, Receipt{ .task = prior });
+    _ = try admission.admit(driver, a, request, Receipt{ .task = prior });
     return prior;
 }
 

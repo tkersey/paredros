@@ -57,13 +57,14 @@ pub fn exportBundle(
         .request = request,
         .directory = c.Text(4096){ .bytes = directory },
     });
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const selected = try a.dupe(u8, exportOperation(&index, operation, request.snapshot, stable));
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    const selected = try a.dupe(u8, exportOperation(index, operation, request.snapshot, stable));
     if (index.operations.contains(selected)) {
         try transfer.validateExportDestination(environment.io, directory, request.name.bytes);
     } else {
-        if (transfer.importPending(&index)) return error.ContinuityImportPending;
+        if (transfer.importPending(index)) return error.ContinuityImportPending;
         try transfer.validateExportName(environment.io, directory, request.name.bytes);
     }
     var progress: ExportProgress = .{
@@ -71,17 +72,18 @@ pub fn exportBundle(
         .operation = .{ .bytes = selected },
         .name = request.name,
     };
-    if (!request.snapshot and !try finalize(driver, a, &index, selected, origin, stable))
+    if (!request.snapshot and !try finalize(driver, a, index, selected, origin, stable))
         return progress;
-    progress.cut = try exportCut(driver, a, &index, environment.source, .{
+    progress.cut = try exportCut(driver, a, index, environment.source, .{
         .operation = selected,
         .kind = .continuity_cut,
         .target = null,
         .origin = origin,
         .digest = stable,
     }, request.snapshot);
-    var committed = try driver.rebuild(a);
-    defer committed.deinit();
+    var committed_view = try driver.view(a);
+    defer committed_view.deinit();
+    const committed = &committed_view.index;
     progress.phase = .cut_pending;
     if (committed.record(progress.cut.?).?.result == null) return progress;
     progress.digest = try transfer.writeCommitted(
@@ -89,7 +91,7 @@ pub fn exportBundle(
         environment.io,
         directory,
         request.name.bytes,
-        &committed,
+        committed,
         progress.cut.?,
     );
     progress.phase = .written;
@@ -129,7 +131,7 @@ fn exportCut(
         if (index.operations.get(selected.operation)) |position|
             return index.records[position].task;
     }
-    const admitted = try admission.admit(driver.service, a, selected, ExportMaterializer(
+    const admitted = try admission.admit(driver, a, selected, ExportMaterializer(
         @TypeOf(driver),
     ){
         .driver = driver,
@@ -156,9 +158,10 @@ fn finalize(
         fenced.records[position].task
     else
         try transfer_marker.admit(driver, a, operation, origin, digest);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    var finished = !try transfer.genesisPending(driver.service, a, &index);
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    var finished = !try transfer.genesisPending(driver.service, a, index);
     for (index.obligations) |*obligation| {
         const head = index.head(obligation);
         if (head.mode == .cancelled or head.mode == .transferred) continue;
@@ -226,17 +229,18 @@ pub fn importBundle(
         .origin = origin,
         .digest = try admission.stableDigest(a, request),
     };
-    var index = try driver.rebuild(a);
-    defer index.deinit();
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
     const view = index.continuity_import;
     if (index.operations.contains(operation)) {
-        _ = try admission.admit(driver.service, a, admitted_request, Frozen{});
-        try storedBindings(a, config, &index);
+        _ = try admission.admit(driver, a, admitted_request, Frozen{});
+        try storedBindings(a, config, index);
     } else if (view != null and std.meta.eql(view.?.digest, request.digest)) {
-        try storedBindings(a, config, &index);
+        try storedBindings(a, config, index);
     } else {
         if (index.transferred()) return error.TransferredNamespace;
-        try beginImport(driver, a, config, environment.io, &index, admitted_request, request);
+        try beginImport(driver, a, config, environment.io, index, admitted_request, request);
     }
     return transfer.importProgress(driver, a);
 }
@@ -275,7 +279,7 @@ fn beginImport(
     if (try transfer.validateImport(a, index, config, namespace, bundle.value) != null)
         return error.ContinuityImportConflict;
     const input = try cut(request, a, bundle.value);
-    _ = try admission.admit(driver.service, a, request, Frozen{ .input = input });
+    _ = try admission.admit(driver, a, request, Frozen{ .input = input });
 }
 
 const Frozen = struct {

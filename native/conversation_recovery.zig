@@ -3,17 +3,16 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
-const catalog = @import("catalog.zig");
 const recovery_status = @import("recovery_status.zig");
 
 pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
     if (!driver.attached) return error.DriverDetached;
     if (limit == 0) return error.InvalidTurnLimit;
-    var index = try driver.rebuild(a);
-    defer index.deinit();
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
     var admitted: std.ArrayList(t.Id) = .empty;
     errdefer admitted.deinit(a);
-    for (index.records) |record| {
+    for (indexed.index.records) |record| {
         if (!recovery_status.recoverableTurn(record)) continue;
         if (admitted.items.len == limit) break;
         const outcome = try driver.guarded(
@@ -32,7 +31,7 @@ fn advanceOne(driver: anytype, a: std.mem.Allocator, record: idx.Record) !?t.Id 
     if (state.action == .stay) return null;
     if (state.action == .replace) return try replace(driver, a, record);
     const resumed = try recovery_status.resumeSelected(
-        driver.service,
+        driver,
         a,
         record.task,
         state.revision,
@@ -50,15 +49,15 @@ fn replace(driver: anytype, a: std.mem.Allocator, record: idx.Record) !t.Id {
     const operation = try std.fmt.allocPrint(scratch, "turn-replace:{s}", .{
         std.fmt.bytesToHex(record.task, .lower),
     });
-    const cancelled = try driver.service.requestCancel(
+    const cancelled = try driver.requestCancel(
         scratch,
         operation,
         record.task,
         "superseded conversation attempt",
     );
-    var current = try catalog.rebuild(driver.service, scratch, driver.page_limit);
-    defer current.deinit();
-    const old = current.record(record.task) orelse return error.MissingTurn;
+    var indexed = try driver.view(scratch);
+    defer indexed.deinit();
+    const old = indexed.index.record(record.task) orelse return error.MissingTurn;
     if (old.input != .turn or old.superseded or old.result != null)
         return error.StaleTurnReplacement;
     var owner = try retained.load(driver.service, scratch, old.task, driver.page_limit);
@@ -81,7 +80,7 @@ fn replace(driver: anytype, a: std.mem.Allocator, record: idx.Record) !t.Id {
         .reference = owner.snapshot.reference,
         .owner_snapshot = .{ .bytes = owner.snapshot.bytes },
     };
-    return (try driver.service.submit(
+    return (try driver.submit(
         scratch,
         next.envelope.operation.bytes,
         .{ .turn = next },

@@ -170,12 +170,26 @@ pub const Index = struct {
 };
 
 pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
-    if (page_limit == 0) return error.InvalidPageLimit;
     var index = Index.empty(a);
     errdefer index.deinit();
     var receipts = std.heap.ArenaAllocator.init(a);
     defer receipts.deinit();
     var cancellations: std.ArrayList(Cancellation) = .empty;
+    try load(service, &index, page_limit, receipts.allocator(), &cancellations, null);
+    try index.finish(cancellations.items);
+    return index;
+}
+
+fn load(
+    service: anytype,
+    index: *Index,
+    page_limit: u32,
+    receipts: std.mem.Allocator,
+    cancellations: *std.ArrayList(Cancellation),
+    maintained: ?*Maintained,
+) !void {
+    if (page_limit == 0) return error.InvalidPageLimit;
+    const a = index.arena.child_allocator;
     var temporary = std.heap.ArenaAllocator.init(a);
     defer temporary.deinit();
     var after: ?t.Id = null;
@@ -192,14 +206,14 @@ pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
                 retained.row(loaded),
                 loaded.snapshot.bytes,
             );
-            const replacement = switch (item.input) {
-                .step => |step| if (step.supersession) |x| x.cancellation else null,
-                .turn => |turn| if (turn.replacement) |x| x.cancellation else null,
-                else => null,
-            };
-            if (replacement) |request| {
-                const receipt = try readCancellation(service, receipts.allocator(), request);
-                try cancellations.append(receipts.allocator(), receipt.value);
+            if (cancellationOf(item.*)) |request| {
+                const receipt = try readCancellation(service, receipts, request);
+                try cancellations.append(receipts, receipt.value);
+            }
+            if (maintained) |owner| {
+                const status = loaded.evidence.status;
+                if (!try settled(service, scratch, status, task))
+                    try owner.watched.put(owner.allocator, task, {});
             }
             if (!temporary.reset(.retain_capacity)) return error.OutOfMemory;
         }
@@ -210,8 +224,27 @@ pub fn rebuild(service: anytype, a: std.mem.Allocator, page_limit: u32) !Index {
         } else exhausted = true;
     }
     index.namespace = service.namespace.identity;
-    try index.finish(cancellations.items);
-    return index;
+}
+
+fn cancellationOf(item: Record) ?t.ControlReceipt {
+    return switch (item.input) {
+        .step => |step| if (step.supersession) |x| x.cancellation else null,
+        .turn => |turn| if (turn.replacement) |x| x.cancellation else null,
+        else => null,
+    };
+}
+
+fn settled(
+    service: anytype,
+    a: std.mem.Allocator,
+    status: ?@import("protean_native").tasks.Status,
+    task: t.Id,
+) !bool {
+    const terminal = switch (status orelse return false) {
+        .completed, .failed, .cancelled => true,
+        else => false,
+    };
+    return terminal and try service.associatedWorkDisposed(a, task);
 }
 
 pub fn digest(bytes: []const u8) t.Digest {
@@ -843,4 +876,399 @@ pub fn readCancellation(
         .revision = saved.value.revision,
         .bytes = bytes,
     } };
+}
+
+pub var verify_against_rebuild: bool = @import("builtin").is_test;
+
+pub const Counters = struct { probes: u64 = 0, loads: u64 = 0, derivations: u64 = 0 };
+
+pub const View = struct {
+    index: Index,
+    owner: ?*Maintained,
+
+    pub fn deinit(self: *View) void {
+        if (self.owner) |owner| owner.release() else self.index.deinit();
+        self.* = undefined;
+    }
+};
+
+const Retired = union(enum) {
+    arena: *std.heap.ArenaAllocator,
+    derived: std.heap.ArenaAllocator,
+    records: std.ArrayList(Record),
+};
+
+const Change = struct {
+    task: t.Id,
+    position: ?usize,
+    settled: bool,
+    record: ?Record = null,
+    arena: ?*std.heap.ArenaAllocator = null,
+    evidence: ?retained.Evidence = null,
+    cancellation: ?Cancellation = null,
+    structural: bool = false,
+};
+
+fn destroyArena(a: std.mem.Allocator, arena: *std.heap.ArenaAllocator) void {
+    arena.deinit();
+    a.destroy(arena);
+}
+
+pub const Maintained = struct {
+    allocator: std.mem.Allocator,
+    page_limit: u32,
+    current: Index,
+    base: std.heap.ArenaAllocator,
+    receipts: std.heap.ArenaAllocator,
+    cancellations: std.ArrayList(Cancellation) = .empty,
+    owned: std.AutoHashMapUnmanaged(t.Id, *std.heap.ArenaAllocator) = .empty,
+    watched: std.AutoArrayHashMapUnmanaged(t.Id, void) = .empty,
+    pending: std.AutoArrayHashMapUnmanaged(t.Id, void) = .empty,
+    referenced: std.AutoHashMapUnmanaged(t.Id, void) = .empty,
+    retired: std.ArrayList(Retired) = .empty,
+    pins: u32 = 0,
+    derived: bool = false,
+    counters: Counters = .{},
+
+    pub fn init(self: *Maintained, service: anytype, a: std.mem.Allocator, page_limit: u32) !void {
+        self.* = .{
+            .allocator = a,
+            .page_limit = page_limit,
+            .current = Index.empty(a),
+            .base = std.heap.ArenaAllocator.init(a),
+            .receipts = std.heap.ArenaAllocator.init(a),
+        };
+        errdefer self.deinit();
+        const receipts = self.receipts.allocator();
+        try load(service, &self.current, page_limit, receipts, &self.cancellations, self);
+        self.base.deinit();
+        self.base = self.current.arena;
+        self.current.arena = std.heap.ArenaAllocator.init(a);
+        try self.derive();
+    }
+
+    pub fn deinit(self: *Maintained) void {
+        std.debug.assert(self.pins == 0);
+        self.reclaim();
+        self.retired.deinit(self.allocator);
+        var arenas = self.owned.valueIterator();
+        while (arenas.next()) |arena| destroyArena(self.allocator, arena.*);
+        self.owned.deinit(self.allocator);
+        self.watched.deinit(self.allocator);
+        self.pending.deinit(self.allocator);
+        self.current.deinit();
+        self.base.deinit();
+        self.receipts.deinit();
+        self.* = undefined;
+    }
+
+    pub fn reserve(self: *Maintained) !void {
+        try self.pending.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    pub fn note(self: *Maintained, task: t.Id) void {
+        self.pending.putAssumeCapacity(task, {});
+    }
+
+    pub fn acquire(self: *Maintained, service: anytype) !View {
+        try self.sync(service);
+        self.pins += 1;
+        return .{ .index = self.current, .owner = self };
+    }
+
+    fn release(self: *Maintained) void {
+        self.pins -= 1;
+        if (self.pins == 0) self.reclaim();
+    }
+
+    fn reclaim(self: *Maintained) void {
+        for (self.retired.items) |item| self.free(item);
+        self.retired.clearRetainingCapacity();
+    }
+
+    fn free(self: *Maintained, item: Retired) void {
+        var owned = item;
+        switch (owned) {
+            .arena => |arena| destroyArena(self.allocator, arena),
+            .derived => |*arena| arena.deinit(),
+            .records => |*records| records.deinit(self.allocator),
+        }
+    }
+
+    fn retire(self: *Maintained, item: Retired) void {
+        if (self.pins == 0) return self.free(item);
+        self.retired.appendAssumeCapacity(item);
+    }
+
+    pub fn sync(self: *Maintained, service: anytype) !void {
+        if (self.derived and self.pending.count() == 0 and self.watched.count() == 0) return;
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var subjects: std.AutoArrayHashMapUnmanaged(t.Id, void) = .empty;
+        for (self.pending.keys()) |task| try subjects.put(a, task, {});
+        for (self.watched.keys()) |task| try subjects.put(a, task, {});
+        const changes = try a.alloc(Change, subjects.count());
+        var prepared: usize = 0;
+        errdefer for (changes[0..prepared]) |change| if (change.arena) |arena|
+            destroyArena(self.allocator, arena);
+        for (subjects.keys(), changes) |task, *change| {
+            change.* = try self.probe(service, a, task);
+            prepared += 1;
+        }
+        try self.watched.ensureUnusedCapacity(self.allocator, changes.len);
+        try self.owned.ensureUnusedCapacity(self.allocator, @intCast(changes.len));
+        try self.retired.ensureUnusedCapacity(self.allocator, changes.len + 2);
+        var structural = !self.derived;
+        for (changes) |change| structural = structural or change.structural;
+        try self.apply(changes);
+        prepared = 0;
+        for (changes) |change| {
+            if (change.settled) {
+                _ = self.watched.swapRemove(change.task);
+            } else self.watched.putAssumeCapacity(change.task, {});
+        }
+        self.pending.clearRetainingCapacity();
+        if (structural) try self.derive();
+    }
+
+    fn probe(self: *Maintained, service: anytype, a: std.mem.Allocator, task: t.Id) !Change {
+        self.counters.probes += 1;
+        var saved = try service.task(a, task);
+        defer saved.deinit();
+        const done = saved.value.terminal() and try service.associatedWorkDisposed(a, task);
+        const position = self.current.tasks.get(task);
+        if (position) |found| {
+            const record = self.current.records[found];
+            if (saved.value.revision == record.revision) {
+                var evidence = record.owner_evidence orelse return error.MissingOwnerEvidence;
+                const status = try service.status(a, saved.value);
+                const unchanged: Change = .{ .task = task, .position = found, .settled = done };
+                if (evidence.status == status) return unchanged;
+                evidence.status = status;
+                var change = unchanged;
+                change.evidence = evidence;
+                return change;
+            }
+        }
+        var change = try self.reload(service, a, task, position);
+        change.settled = done;
+        return change;
+    }
+
+    fn reload(
+        self: *Maintained,
+        service: anytype,
+        a: std.mem.Allocator,
+        task: t.Id,
+        position: ?usize,
+    ) !Change {
+        self.counters.loads += 1;
+        const loaded = try retained.load(service, a, task, self.page_limit);
+        const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer destroyArena(self.allocator, arena);
+        var record = try decodeRow(
+            @import("protean_native"),
+            arena.allocator(),
+            a,
+            retained.row(loaded),
+            loaded.snapshot.bytes,
+        );
+        var change: Change = .{
+            .task = task,
+            .position = position,
+            .settled = false,
+            .arena = arena,
+            .structural = true,
+        };
+        if (position) |found| {
+            const old = self.current.records[found];
+            record.selected = old.selected;
+            record.superseded = old.superseded;
+            change.structural = !std.meta.eql(old.input_digest, record.input_digest) or
+                !std.meta.eql(old.result_digest, record.result_digest) or
+                self.referenced.contains(task);
+        } else if (cancellationOf(record)) |request| {
+            const receipt = try readCancellation(service, self.receipts.allocator(), request);
+            change.cancellation = receipt.value;
+        }
+        change.record = record;
+        return change;
+    }
+
+    fn apply(self: *Maintained, changes: []const Change) !void {
+        var inserts: usize = 0;
+        var updates: usize = 0;
+        for (changes) |change| {
+            if (change.record != null and change.position == null) inserts += 1;
+            if (change.record != null or change.evidence != null) updates += 1;
+        }
+        if (updates == 0) return;
+        try self.cancellations.ensureUnusedCapacity(self.receipts.allocator(), inserts);
+        if (self.pins != 0) {
+            try self.copyRecords(inserts);
+        } else try self.current.storage.ensureUnusedCapacity(self.allocator, inserts);
+        const items = self.current.storage.items;
+        for (changes) |change| {
+            const position = change.position orelse continue;
+            if (change.evidence) |evidence| items[position].owner_evidence = evidence;
+            const record = change.record orelse continue;
+            items[position] = record;
+            const previous = self.owned.fetchPutAssumeCapacity(change.task, change.arena.?);
+            if (previous) |entry| self.retire(.{ .arena = entry.value });
+        }
+        for (changes) |change| {
+            if (change.position != null) continue;
+            const record = change.record orelse continue;
+            if (change.cancellation) |receipt| self.cancellations.appendAssumeCapacity(receipt);
+            var low: usize = 0;
+            var high = self.current.storage.items.len;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                const other = self.current.storage.items[middle].task;
+                if (std.mem.order(u8, &other, &record.task) == .lt) {
+                    low = middle + 1;
+                } else high = middle;
+            }
+            self.current.storage.insertAssumeCapacity(low, record);
+            self.owned.putAssumeCapacity(change.task, change.arena.?);
+        }
+        self.current.records = self.current.storage.items;
+    }
+
+    fn copyRecords(self: *Maintained, extra: usize) !void {
+        const items = self.current.storage.items;
+        var copy = try std.ArrayList(Record).initCapacity(self.allocator, items.len + extra);
+        copy.appendSliceAssumeCapacity(items);
+        self.retire(.{ .records = self.current.storage });
+        self.current.storage = copy;
+        self.current.records = copy.items;
+    }
+
+    fn derive(self: *Maintained) !void {
+        self.derived = false;
+        try self.retired.ensureUnusedCapacity(self.allocator, 2);
+        if (self.pins != 0) try self.copyRecords(0);
+        const previous = self.current.arena;
+        self.current.arena = std.heap.ArenaAllocator.init(self.allocator);
+        self.current.tasks = .empty;
+        self.current.operations = .empty;
+        self.current.lineages = .empty;
+        self.current.continuity_import = null;
+        self.current.transfer_marker = null;
+        self.current.obligations = &.{};
+        self.referenced = .empty;
+        self.retire(.{ .derived = previous });
+        const a = self.current.arena.allocator();
+        const records = self.current.storage.items;
+        try self.current.tasks.ensureTotalCapacity(a, @intCast(records.len));
+        for (records, 0..) |*record, position| {
+            record.selected = false;
+            record.superseded = false;
+            self.current.tasks.putAssumeCapacity(record.task, position);
+        }
+        self.counters.derivations += 1;
+        try self.current.finish(self.cancellations.items);
+        self.referenced = try references(a, records);
+        self.derived = true;
+    }
+};
+
+fn references(
+    a: std.mem.Allocator,
+    records: []const Record,
+) !std.AutoHashMapUnmanaged(t.Id, void) {
+    var result: std.AutoHashMapUnmanaged(t.Id, void) = .empty;
+    for (records) |record| switch (record.input) {
+        .step => |step| {
+            for (step.facts.items) |fact| try result.put(a, fact.reference.task, {});
+            if (step.supersession) |value| try result.put(a, value.input.task, {});
+        },
+        .turn => |turn| if (turn.replacement) |value|
+            try result.put(a, value.input.task, {}),
+        .continuity_cut => try result.put(a, record.task, {}),
+        else => {},
+    };
+    return result;
+}
+pub fn difference(left: *const Index, right: *const Index) ?[]const u8 {
+    if (!same(?t.Digest, left.namespace, right.namespace)) return "namespace";
+    if (!same([]const Record, left.records, right.records)) return "records";
+    if (!same(@TypeOf(left.tasks), left.tasks, right.tasks)) return "tasks";
+    if (!same(@TypeOf(left.operations), left.operations, right.operations)) return "operations";
+    if (!same(@TypeOf(left.lineages), left.lineages, right.lineages)) return "lineages";
+    if (!same(?continuity.ImportView, left.continuity_import, right.continuity_import))
+        return "continuity_import";
+    if (!same(?usize, left.transfer_marker, right.transfer_marker)) return "transfer_marker";
+    if (left.obligations.len != right.obligations.len) return "obligations";
+    for (left.obligations, right.obligations) |x, y| {
+        var l = x;
+        var r = y;
+        l.fault = null;
+        r.fault = null;
+        if (!same(Obligation, l, r)) return "obligations";
+    }
+    return null;
+}
+
+fn same(comptime T: type, x: T, y: T) bool {
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| {
+            if (comptime @hasDecl(T, "KV") and @hasDecl(T, "iterator")) return sameMap(T, x, y);
+            inline for (info.field_names, info.field_types) |name, Field| {
+                if (!same(Field, @field(x, name), @field(y, name))) return false;
+            }
+            return true;
+        },
+        .@"union" => {
+            if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
+            return switch (x) {
+                inline else => |value, tag| same(@TypeOf(value), value, @field(y, @tagName(tag))),
+            };
+        },
+        .optional => |info| {
+            if (x == null or y == null) return x == null and y == null;
+            return same(info.child, x.?, y.?);
+        },
+        .pointer => |info| switch (info.size) {
+            .slice => {
+                if (info.child == u8) return std.mem.eql(u8, x, y);
+                if (x.len != y.len) return false;
+                for (x, y) |l, r| if (!same(info.child, l, r)) return false;
+                return true;
+            },
+            .one => return same(info.child, x.*, y.*),
+            else => @compileError("unsupported index pointer"),
+        },
+        .array => |info| {
+            for (x, y) |l, r| if (!same(info.child, l, r)) return false;
+            return true;
+        },
+        else => return std.meta.eql(x, y),
+    }
+}
+
+fn sameMap(comptime T: type, x: T, y: T) bool {
+    if (x.count() != y.count()) return false;
+    var entries = x.iterator();
+    while (entries.next()) |entry| {
+        const other = y.get(entry.key_ptr.*) orelse return false;
+        if (!same(@TypeOf(other), entry.value_ptr.*, other)) return false;
+    }
+    return true;
+}
+
+pub fn verifyAgainstRebuild(
+    service: anytype,
+    a: std.mem.Allocator,
+    maintained: *const Index,
+    page_limit: u32,
+) !void {
+    var oracle = try rebuild(service, a, page_limit);
+    defer oracle.deinit();
+    if (difference(&oracle, maintained)) |field| {
+        std.log.warn("maintained index differs from rebuild in {s}", .{field});
+        return error.IndexDivergence;
+    }
 }

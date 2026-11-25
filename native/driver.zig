@@ -89,26 +89,46 @@ pub fn Driver(comptime Types: type) type {
             observe: *const fn (*anyopaque, std.mem.Allocator, *const idx.Index) anyerror!void,
         } = null,
 
+        index: ?*idx.Maintained = null,
+
         pub fn attach(self: *Self, a: std.mem.Allocator) !void {
-            var index = try self.attachIndexed(a);
-            index.deinit();
+            var indexed = try self.attachIndexed(a);
+            indexed.deinit();
         }
 
-        pub fn attachIndexed(self: *Self, a: std.mem.Allocator) !idx.Index {
+        pub fn attachIndexed(self: *Self, a: std.mem.Allocator) !idx.View {
             if (self.attached) return error.AlreadyAttached;
             self.service.dispatch_gate = .held;
-            const index = try self.rebuild(a);
+            const maintained = try a.create(idx.Maintained);
+            maintained.init(self.service, a, self.page_limit) catch |err| {
+                a.destroy(maintained);
+                _ = try split(err);
+                return error.CorruptState;
+            };
+            self.index = maintained;
+            errdefer self.release();
+            var indexed = try self.view(a);
+            errdefer indexed.deinit();
             self.service.dispatch_gate = .{ .selected = .{
                 .context = self,
                 .permits = dispatch,
             } };
             self.attached = true;
-            return index;
+            return indexed;
         }
 
         pub fn detach(self: *Self) void {
             self.service.dispatch_gate = .held;
             self.attached = false;
+            self.release();
+        }
+
+        fn release(self: *Self) void {
+            const maintained = self.index orelse return;
+            const a = maintained.allocator;
+            maintained.deinit();
+            a.destroy(maintained);
+            self.index = null;
         }
 
         pub fn rebuild(self: *Self, a: std.mem.Allocator) !idx.Index {
@@ -117,13 +137,97 @@ pub fn Driver(comptime Types: type) type {
                 return error.CorruptState;
             };
             errdefer index.deinit();
+            self.annotate(&index);
+            return index;
+        }
+
+        fn annotate(self: *const Self, index: *const idx.Index) void {
             for (index.obligations) |*obligation|
                 obligation.fault = self.faults.latest(obligation.task);
+        }
+
+        pub fn view(self: *Self, a: std.mem.Allocator) !idx.View {
+            var result: idx.View = if (self.index) |maintained|
+                maintained.acquire(self.service) catch |err| {
+                    _ = try split(err);
+                    return error.CorruptState;
+                }
+            else
+                .{ .index = try self.rebuild(a), .owner = null };
+            errdefer result.deinit();
+            if (result.owner != null) {
+                self.annotate(&result.index);
+                if (idx.verify_against_rebuild)
+                    try idx.verifyAgainstRebuild(self.service, a, &result.index, self.page_limit);
+            }
             if (self.after_rebuild) |observer| {
                 self.after_rebuild = null;
-                try observer.observe(observer.context, a, &index);
+                try observer.observe(observer.context, a, &result.index);
             }
-            return index;
+            return result;
+        }
+
+        fn changed(self: *Self, task: t.Id) void {
+            if (self.index) |maintained| maintained.note(task);
+        }
+
+        fn reserve(self: *Self) !void {
+            if (self.index) |maintained| try maintained.reserve();
+        }
+
+        pub fn submit(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation: []const u8,
+            input: t.Input,
+        ) !native.tasks.Admission {
+            try self.reserve();
+            const admitted = try self.service.submit(a, operation, input);
+            self.changed(admitted.receipt.task);
+            return admitted;
+        }
+
+        pub fn requestCancel(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation: []const u8,
+            task: t.Id,
+            reason: []const u8,
+        ) !native.tasks.Admission {
+            try self.reserve();
+            const admitted = try self.service.requestCancel(a, operation, task, reason);
+            self.changed(task);
+            return admitted;
+        }
+
+        pub fn resumeTask(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation: []const u8,
+            task: t.Id,
+            revision: u64,
+        ) !native.tasks.Admission {
+            try self.reserve();
+            const admitted = try self.service.resumeTask(a, operation, task, revision);
+            self.changed(task);
+            return admitted;
+        }
+
+        pub fn operationLookup(
+            self: *Self,
+            a: std.mem.Allocator,
+            operation: []const u8,
+        ) @TypeOf(self.service.operationLookup(a, operation)) {
+            return self.service.operationLookup(a, operation);
+        }
+
+        pub fn applicationValue(
+            self: *Self,
+            a: std.mem.Allocator,
+            task: t.Id,
+            selection: anytype,
+        ) @TypeOf(self.service.applicationValue(a, task, selection)) {
+            return self.service.applicationValue(a, task, selection);
         }
 
         fn dispatch(
@@ -132,9 +236,9 @@ pub fn Driver(comptime Types: type) type {
             request: native.tasks.DispatchRequest,
         ) !bool {
             const self: *Self = @ptrCast(@alignCast(context));
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            return eligibility.permits(&index, request);
+            var indexed = try self.view(a);
+            defer indexed.deinit();
+            return eligibility.permits(&indexed.index, request);
         }
 
         pub fn genesis(
@@ -189,29 +293,30 @@ pub fn Driver(comptime Types: type) type {
 
         pub fn importStep(self: *Self, a: std.mem.Allocator) !bool {
             if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            return @import("transfer.zig").advanceImport(self, a, &index);
+            var indexed = try self.view(a);
+            defer indexed.deinit();
+            return @import("transfer.zig").advanceImport(self, a, &indexed.index);
         }
 
         pub fn importedTurns(self: *Self, a: std.mem.Allocator) !bool {
             if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
+            var indexed = try self.view(a);
+            defer indexed.deinit();
+            const index = &indexed.index;
             const transfer = @import("transfer.zig");
-            if (transfer.importPending(&index)) return transfer.advanceImport(self, a, &index);
+            if (transfer.importPending(index)) return transfer.advanceImport(self, a, index);
             if (index.transferred()) return false;
-            const view = index.continuity_import orelse return false;
-            const manifest = index.records[view.position].input.continuity_cut;
+            const pending_import = index.continuity_import orelse return false;
+            const manifest = index.records[pending_import.position].input.continuity_cut;
             const progress = try transfer.admitPendingTurns(self, a, manifest.envelope.origin);
             return progress.admitted != null;
         }
 
         pub fn importedControls(self: *Self, a: std.mem.Allocator, target: t.Id) !bool {
             if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
-            const record = index.record(target) orelse return error.UnknownObligation;
+            var indexed = try self.view(a);
+            defer indexed.deinit();
+            const record = indexed.index.record(target) orelse return error.UnknownObligation;
             if (record.input != .genesis) return error.UnknownObligation;
             if (record.input.genesis.imported == null) return false;
             const progress = try @import("transfer.zig").admitPendingControls(
@@ -264,7 +369,7 @@ pub fn Driver(comptime Types: type) type {
                 .digest = try admission.directiveDigest(a, operation, digest),
             };
             const result = try admission.admit(
-                self.service,
+                self,
                 a,
                 request,
                 DirectiveMaterializer{ .driver = self, .body = body },
@@ -281,8 +386,9 @@ pub fn Driver(comptime Types: type) type {
                 a: std.mem.Allocator,
                 request: admission.Request,
             ) !t.Input {
-                var index = try self.driver.rebuild(a);
-                defer index.deinit();
+                var indexed = try self.driver.view(a);
+                defer indexed.deinit();
+                const index = &indexed.index;
                 const obligation = index.obligation(request.target.?) orelse
                     return error.UnknownObligation;
                 const head = index.head(obligation);
@@ -290,7 +396,7 @@ pub fn Driver(comptime Types: type) type {
                     obligation.effective_mode == .transferred) return error.FinalObligation;
                 if (self.body == .amend) try admission.amendment(self.body.amend);
                 if (self.body == .adopt)
-                    try @import("method_catalog.zig").adoption(a, &index, self.body.adopt.method);
+                    try @import("method_catalog.zig").adoption(a, index, self.body.adopt.method);
                 var ordinal = head.folded_directive_ordinal;
                 var predecessor = head.last_directive;
                 if (obligation.directives.len > 0) {
@@ -333,32 +439,32 @@ pub fn Driver(comptime Types: type) type {
 
         pub fn nextStep(self: *Self, a: std.mem.Allocator, target: t.Id) !?t.Id {
             if (!self.attached) return error.DriverDetached;
-            var index = try self.rebuild(a);
-            defer index.deinit();
+            var indexed = try self.view(a);
+            defer indexed.deinit();
+            const index = &indexed.index;
             const obligation = index.obligation(target) orelse return error.UnknownObligation;
             const transferred_controls = try @import("transfer.zig").pendingControlsAdmitted(
                 a,
-                &index,
+                index,
                 target,
             );
             if (!transferred_controls) return null;
             const clock_ms = try self.clock.now(self.clock.context);
             if (!bounds.instant(clock_ms)) return error.ClockOutOfRange;
             if (obligation.eligible != null) return recovery.advance(
-                self.service,
+                self,
                 a,
-                &index,
+                index,
                 obligation,
                 clock_ms,
                 self.model,
-                self.page_limit,
             );
             const head = index.head(obligation);
             if (head.mode == .cancelled or head.mode == .transferred) return null;
-            if (!needsStep(&index, obligation, clock_ms)) return null;
-            var frozen = try materialize.step(a, &index, target, clock_ms, self.model);
+            if (!needsStep(index, obligation, clock_ms)) return null;
+            var frozen = try materialize.step(a, index, target, clock_ms, self.model);
             defer frozen.deinit();
-            const admitted = try self.service.submit(
+            const admitted = try self.submit(
                 a,
                 frozen.value.envelope.operation.bytes,
                 .{ .step = frozen.value },

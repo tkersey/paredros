@@ -2,22 +2,21 @@ const std = @import("std");
 const c = @import("protean_contracts");
 const t = @import("application_types");
 const idx = @import("index.zig");
-const catalog = @import("catalog.zig");
 const materialize = @import("materialize.zig");
 const recovery_status = @import("recovery_status.zig");
 const bounds = @import("../app/bounds.zig");
 
 pub fn advance(
-    service: anytype,
+    driver: anytype,
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
     clock_ms: i64,
     model: ?t.ModelBinding,
-    page_limit: u32,
 ) !?t.Id {
     const position = obligation.eligible orelse return null;
     const record = index.records[position];
+    const service = driver.service;
     var saved = try service.task(a, record.task);
     defer saved.deinit();
     const status = try service.status(a, saved.value);
@@ -45,7 +44,7 @@ pub fn advance(
             else
                 .{ .resume_parked = {} };
             const resumed = try recovery_status.resumeSelected(
-                service,
+                driver,
                 a,
                 record.task,
                 saved.value.revision,
@@ -56,7 +55,7 @@ pub fn advance(
             break :blk .incompatible;
         },
     };
-    return try replace(service, a, record, obligation.task, clock_ms, model, page_limit, cause);
+    return try replace(driver, a, record, obligation.task, clock_ms, model, cause);
 }
 
 pub const fold_retry_max_ms: i64 = 3_600_000;
@@ -77,20 +76,19 @@ fn foldRetryReady(
 }
 
 fn replace(
-    service: anytype,
+    driver: anytype,
     a: std.mem.Allocator,
     old: idx.Record,
     target: t.Id,
     clock_ms: i64,
     model: ?t.ModelBinding,
-    page_limit: u32,
     cause: @FieldType(t.Supersession, "cause"),
 ) !t.Id {
     const operation = try std.fmt.allocPrint(a, "replace:{s}", .{
         std.fmt.bytesToHex(old.task, .lower),
     });
     defer a.free(operation);
-    const cancelled = try service.requestCancel(
+    const cancelled = try driver.requestCancel(
         a,
         operation,
         old.task,
@@ -98,8 +96,9 @@ fn replace(
     );
     const bytes = try c.encodeOwned(@TypeOf(cancelled.receipt), a, cancelled.receipt);
     defer a.free(bytes);
-    var current = try catalog.rebuild(service, a, page_limit);
-    defer current.deinit();
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const current = &indexed.index;
     const obligation = current.obligation(target) orelse return error.UnknownObligation;
     const position = obligation.eligible orelse return error.StaleSupersession;
     if (!std.meta.eql(current.records[position].task, old.task)) return error.StaleSupersession;
@@ -114,9 +113,9 @@ fn replace(
         .cause = cause,
         .phase = try @import("phase.zig").attempted(old),
     };
-    var frozen = try materialize.replacement(a, &current, target, clock_ms, model, replacement);
+    var frozen = try materialize.replacement(a, current, target, clock_ms, model, replacement);
     defer frozen.deinit();
-    const admitted = try service.submit(
+    const admitted = try driver.submit(
         a,
         frozen.value.envelope.operation.bytes,
         .{ .step = frozen.value },

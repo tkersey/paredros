@@ -547,3 +547,173 @@ test "native driver continues every unfinished turn lineage until it replies" {
     try finish(&fixture, replacements[0]);
     try expectTurnProgress(a, &driver, old, "completed", true);
 }
+
+const idx = @import("../native/index.zig");
+
+fn expectMaintained(driver: *Driver, a: std.mem.Allocator) !void {
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    try idx.verifyAgainstRebuild(driver.service, a, &indexed.index, driver.page_limit);
+}
+
+test "native driver index matches rebuild across admissions results supersession restart" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const initial = fixture_values.genesis();
+    const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    try expectMaintained(&driver, a);
+    const origin: t.Origin = .{ .local = .{ .uid = 501 } };
+    const old = (try driver.nextStep(a, target)).?;
+    try expectMaintained(&driver, a);
+    _ = try driver.directive(a, "maintained-pause", origin, target, .{ .pause = {} });
+    try expectMaintained(&driver, a);
+    const replacement = (try driver.nextStep(a, target)).?;
+    try expectMaintained(&driver, a);
+    try finish(&fixture, replacement);
+    try expectMaintained(&driver, a);
+    var indexed = try driver.view(a);
+    try std.testing.expect(indexed.index.record(old).?.superseded);
+    try std.testing.expectEqual(t.Mode.paused, indexed.index.head(
+        indexed.index.obligation(target).?,
+    ).mode);
+    indexed.deinit();
+    _ = try driver.directive(a, "maintained-resume", origin, target, .{ .@"resume" = {} });
+    try finish(&fixture, (try driver.nextStep(a, target)).?);
+    try expectMaintained(&driver, a);
+    driver.detach();
+    try fixture.close();
+    try fixture.open();
+    driver.service = &fixture.service.?;
+    try driver.attach(a);
+    defer driver.detach();
+    try expectMaintained(&driver, a);
+    const derivations = driver.index.?.counters.derivations;
+    try expectMaintained(&driver, a);
+    try std.testing.expectEqual(derivations, driver.index.?.counters.derivations);
+}
+
+test "native driver verification rejects a namespace change that bypasses the index" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const initial = fixture_values.genesis();
+    _ = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    var other = fixture_values.genesis();
+    other.envelope.operation = .{ .bytes = "bypassing-genesis" };
+    other.lineage = @splat(9);
+    _ = try fixture.execute(other.envelope.operation.bytes, .{ .genesis = other });
+    try std.testing.expectError(error.IndexDivergence, driver.view(a));
+}
+
+test "native mutations of the task service flow through the driver" {
+    const sources = .{
+        "admission",  "application",        "catalog",               "cli",
+        "commands",   "compatibility",      "configuration",         "continuation_recovery",
+        "continuity", "continuity_control", "continuity_import",     "continuity_turn",
+        "control",    "control_socket",     "conversation_recovery", "daemon",
+        "dialogue",   "eligibility",        "experiment_external",   "experiments",
+        "github",     "github_adapter",     "github_external",       "http",
+        "index",      "ingress_policy",     "main",                  "materialize",
+        "messages",   "method_catalog",     "method_external",       "model_external",
+        "phase",      "recovery",           "recovery_status",       "render_measure",
+        "retained",   "transfer",           "transfer_marker",       "wire",
+    };
+    const forbidden = [_][]const u8{
+        "service.submit(",
+        "service.requestCancel(",
+        "service.resumeTask(",
+        "admit(driver.service",
+        "admit(self.service",
+    };
+    inline for (sources) |name| {
+        const source = @embedFile("../native/" ++ name ++ ".zig");
+        for (forbidden) |pattern| {
+            if (std.mem.indexOf(u8, source, pattern) != null) {
+                std.debug.print("{s}.zig bypasses the driver with {s}\n", .{ name, pattern });
+                return error.UnindexedMutation;
+            }
+        }
+    }
+}
+
+const Reads = struct { records: usize, probes: u64, loads: u64, derivations: u64 };
+
+const Unused = struct {
+    fn call(_: *anyopaque, _: std.mem.Allocator, _: *Driver, _: u32, _: []const u8) ![]const u8 {
+        return error.UnexpectedControl;
+    }
+};
+
+fn idleReads(history: u32) !Reads {
+    const socket = @import("../native/control_socket.zig");
+    const Daemon = @import("../native/daemon.zig").Daemon(app.Types);
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const initial = fixture_values.genesis();
+    const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    for (0..history) |n| {
+        const operation = try std.fmt.allocPrint(a, "history-pause-{d}", .{n});
+        _ = try driver.directive(a, operation, .{ .local = .{ .uid = 501 } }, target, .{
+            .pause = {},
+        });
+    }
+    try finish(&fixture, (try driver.nextStep(a, target)).?);
+    driver.detach();
+    const path = try std.fs.path.join(a, &.{
+        std.testing.TmpDir.parent_dir_path, &fixture.temporary.?.sub_path, "control",
+    });
+    var server = try socket.Server.init(std.testing.allocator, path, .{
+        .operator_uid = socket.currentUid(),
+    });
+    defer server.deinit();
+    const handler: Daemon.Handler = .{ .context = &driver, .call = Unused.call };
+    var daemon = try Daemon.init(a, &driver, &server, handler, .{});
+    for (0..6) |_| _ = try daemon.poll(a, 0);
+    const before = driver.index.?.counters;
+    for (0..12) |_| try std.testing.expectEqual(.idle, try daemon.poll(a, 0));
+    const after = driver.index.?.counters;
+    const reads: Reads = .{
+        .records = driver.index.?.current.records.len,
+        .probes = after.probes - before.probes,
+        .loads = after.loads - before.loads,
+        .derivations = after.derivations - before.derivations,
+    };
+    daemon.beginStop(0);
+    try std.testing.expectEqual(.stopped, try daemon.poll(a, 0));
+    try daemon.deinit();
+    return reads;
+}
+
+test "native daemon idle polls read a bounded number of tasks regardless of namespace size" {
+    const small = try idleReads(1);
+    const large = try idleReads(16);
+    try std.testing.expect(large.records >= small.records + 15);
+    try std.testing.expectEqual(small.probes, large.probes);
+    try std.testing.expectEqual(0, small.loads);
+    try std.testing.expectEqual(0, large.loads);
+    try std.testing.expectEqual(0, large.derivations);
+}

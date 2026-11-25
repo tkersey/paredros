@@ -63,17 +63,17 @@ pub fn directiveDigest(
 }
 
 pub fn admit(
-    service: anytype,
+    driver: anytype,
     a: std.mem.Allocator,
     request: Request,
     materializer: anytype,
 ) !@typeInfo(
-    @TypeOf(service.submit(a, request.operation, @as(t.Input, undefined))),
+    @TypeOf(driver.submit(a, request.operation, @as(t.Input, undefined))),
 ).error_union.payload {
-    if (try service.operationLookup(a, request.operation)) |saved| {
+    if (try driver.operationLookup(a, request.operation)) |saved| {
         var receipt = saved;
         defer receipt.deinit();
-        var input = (try service.applicationValue(a, receipt.value.task, .input)) orelse
+        var input = (try driver.applicationValue(a, receipt.value.task, .input)) orelse
             return error.MissingAdmittedInput;
         defer input.deinit();
         if (!std.mem.eql(u8, input.schema_id, t.input_schema_id) or input.encoding != .contract)
@@ -81,11 +81,11 @@ pub fn admit(
         var decoded = try c.decodeOwned(t.Input, a, input.bytes);
         defer decoded.deinit();
         try matches(a, request, decoded.value);
-        return service.submit(a, request.operation, decoded.value);
+        return driver.submit(a, request.operation, decoded.value);
     }
     const input = try materializer.materialize(a, request);
     try matches(a, request, input);
-    return service.submit(a, request.operation, input);
+    return driver.submit(a, request.operation, input);
 }
 
 fn envelope(input: t.Input) t.Envelope {

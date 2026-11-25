@@ -473,6 +473,8 @@ fn serve(
 ) !u8 {
     const a = init.gpa;
     var io = init.io;
+    if (init.environ_map.get("PAREDROS_VERIFY_INDEX")) |value|
+        @import("index.zig").verify_against_rebuild = std.mem.eql(u8, value, "1");
     var handlers = try native.Registry.init(a, application.Application.declarations);
     defer handlers.deinit();
     var admitted = try native.discovery.Application.init(t, a, assets, handlers);

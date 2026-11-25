@@ -38,7 +38,7 @@ pub fn admit(
         .origin = origin,
         .digest = request_digest,
     };
-    const result = try admission.admit(driver.service, a, request, Marker(@TypeOf(driver)){
+    const result = try admission.admit(driver, a, request, Marker(@TypeOf(driver)){
         .driver = driver,
     });
     return result.receipt.task;
@@ -53,10 +53,11 @@ fn Marker(comptime Driver: type) type {
             a: std.mem.Allocator,
             request: admission.Request,
         ) !t.Input {
-            var index = try self.driver.rebuild(a);
-            defer index.deinit();
+            var indexed = try self.driver.view(a);
+            defer indexed.deinit();
+            const index = &indexed.index;
             if (index.transferred()) return error.TransferredNamespace;
-            if (@import("transfer.zig").importPending(&index))
+            if (@import("transfer.zig").importPending(index))
                 return error.ContinuityImportPending;
             return .{ .transfer = .{ .envelope = .{
                 .operation = .{ .bytes = request.operation },

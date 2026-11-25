@@ -277,12 +277,13 @@ pub fn capture(driver: anytype, a: std.mem.Allocator, source: Source, mode: Mode
     const gate = driver.service.dispatch_gate;
     driver.service.dispatch_gate = .held;
     defer driver.service.dispatch_gate = gate;
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const unrun = try unrunGeneses(driver.service, a, &index);
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    const unrun = try unrunGeneses(driver.service, a, index);
     defer a.free(unrun.stranded);
     if (unrun.pending) return error.ContinuityGenesisPending;
-    return prepare(a, &index, source, mode, unrun.stranded);
+    return prepare(a, index, source, mode, unrun.stranded);
 }
 
 pub const ImportProgress = struct {
@@ -377,15 +378,16 @@ fn completedCut(a: std.mem.Allocator, record: idx.Record, identity: t.Digest) !?
 pub fn importProgress(driver: anytype, a: std.mem.Allocator) !ImportProgress {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var index = try driver.rebuild(arena.allocator());
-    defer index.deinit();
+    var indexed = try driver.view(arena.allocator());
+    defer indexed.deinit();
+    const index = &indexed.index;
     const view = index.continuity_import orelse return error.MissingContinuityManifest;
     var obligations: std.ArrayList(t.Id) = .empty;
     errdefer obligations.deinit(a);
     if (view.bundle) |bundle| for (bundle.members.items) |item| {
         if (item != .obligation) continue;
         const position = try continuity.importedLineage(
-            &index,
+            index,
             item.obligation.lineage,
             view.digest,
         ) orelse continue;
@@ -422,7 +424,7 @@ fn submitValues(
         if (submitted == members_per_step) break;
         const operation = try continuity.mappedOperation(a, .report, view.digest, value.identity);
         if (index.operations.contains(operation)) continue;
-        _ = try driver.service.submit(a, operation, .{ .continuity_member = .{
+        _ = try driver.submit(a, operation, .{ .continuity_member = .{
             .envelope = .{
                 .operation = .{ .bytes = operation },
                 .stable_request = value.identity,
@@ -453,7 +455,7 @@ fn submitGeneses(
         const position: u32 = @intCast(member);
         const input = try continuity.genesisInput(a, index, view, position, clock_ms, origin) orelse
             return error.MissingContinuityReport;
-        _ = try driver.service.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
+        _ = try driver.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
         submitted += 1;
     }
     return submitted != 0;
@@ -583,13 +585,14 @@ pub fn admitPendingControls(
     origin: t.Origin,
 ) !PendingControlProgress {
     if (!driver.attached or origin != .local) return error.TransferLocalOnly;
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const found = continuity.importedObligation(&index, target) orelse return .{};
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    const found = continuity.importedObligation(index, target) orelse return .{};
     var result: PendingControlProgress = .{};
     var next: ?usize = null;
     for (0..found.value.controls.items.len) |position| {
-        if (try continuity.mappedControl(a, &index, target, found, position) != null) continue;
+        if (try continuity.mappedControl(a, index, target, found, position) != null) continue;
         result.remaining += 1;
         if (next == null) next = position;
     }
@@ -602,7 +605,7 @@ pub fn admitPendingControls(
         operation,
         origin,
         target,
-        try continuity.controlBody(a, &index, found.view.digest, control),
+        try continuity.controlBody(a, index, found.view.digest, control),
         try continuity.digest(a, continuity.Control, control),
     );
     result.remaining -= 1;

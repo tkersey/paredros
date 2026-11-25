@@ -1234,6 +1234,7 @@ test "control task show reports an unconfirmable proposal instead of failing" {
     var twin = input;
     twin.envelope.operation.bytes = "consumer-twin";
     _ = try consumerExecute(&fixture, "consumer-twin", .{ .turn = twin });
+    _ = try driver.submit(frame, "consumer-twin", .{ .turn = twin });
     const id = std.fmt.bytesToHex(turn_id, .lower);
     const request = try cli.request(frame, &.{ "task", "show", &id }, "unused");
     const shown = try dispatch(frame, &driver, request, 501);

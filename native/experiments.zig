@@ -54,16 +54,17 @@ pub fn admit(
             frame: std.mem.Allocator,
             requested: admission.Request,
         ) !t.Input {
-            var index = try self.driver.rebuild(frame);
-            defer index.deinit();
-            try uniqueAttempt(&index, self.value.campaign, self.value.attempt);
+            var indexed = try self.driver.view(frame);
+            defer indexed.deinit();
+            const index = &indexed.index;
+            try uniqueAttempt(index, self.value.campaign, self.value.attempt);
             if (self.value.live_model) {
                 const selected = self.driver.model orelse return error.ModelNotConfigured;
                 if (self.value.plan != .compare or self.value.plan.compare.model == null or
                     !try equal(frame, t.ModelBinding, selected, self.value.plan.compare.model.?))
                     return error.ExperimentModelMismatch;
             }
-            const evidence = try authenticatePlan(frame, &index, self.value.plan);
+            const evidence = try authenticatePlan(frame, index, self.value.plan);
             const plan = try c.encodeOwned(e.Plan, frame, self.value.plan);
             if (plan.len > 1024 * 1024) return error.ExperimentPlanTooLarge;
             return .{ .experiment = .{
@@ -83,7 +84,7 @@ pub fn admit(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const result = try admission.admit(driver.service, scratch, .{
+    const result = try admission.admit(driver, scratch, .{
         .operation = operation,
         .kind = .experiment,
         .target = null,

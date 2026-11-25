@@ -98,7 +98,7 @@ fn blocked(
 }
 
 pub fn resumeSelected(
-    service: anytype,
+    driver: anytype,
     a: std.mem.Allocator,
     task: t.Id,
     revision: u64,
@@ -119,12 +119,12 @@ pub fn resumeSelected(
         else => return .unchanged,
     };
     defer a.free(operation);
-    if (try service.operationLookup(a, operation)) |saved| {
+    if (try driver.operationLookup(a, operation)) |saved| {
         var receipt = saved;
         receipt.deinit();
         return .unchanged;
     }
-    _ = service.resumeTask(a, operation, task, revision) catch |err| switch (err) {
+    _ = driver.resumeTask(a, operation, task, revision) catch |err| switch (err) {
         error.IncompatibleProfile => return .incompatible,
         else => return err,
     };

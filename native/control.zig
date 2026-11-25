@@ -198,12 +198,13 @@ fn execute(
             try driver.clock.now(driver.clock.context),
             read.config_path,
         );
-        var index = try driver.rebuild(a);
-        defer index.deinit();
+        var indexed = try driver.view(a);
+        defer indexed.deinit();
+        const index = &indexed.index;
         return inspect(
             a,
             driver.service,
-            &index,
+            index,
             request,
             try driver.clock.now(driver.clock.context),
             read.config_path,
@@ -236,23 +237,24 @@ fn validateFresh(
 ) !void {
     if (std.mem.indexOfScalar(u8, operation_id, ':') != null) return error.ReservedOperationId;
     if (command == .transfer_export or command == .transfer_import) return;
-    var index = try driver.rebuild(a);
-    defer index.deinit();
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
     switch (command) {
         .directive => |value| {
-            try ingress_policy.validate(&index);
-            try ingress_policy.directive(a, &index, value.target);
+            try ingress_policy.validate(index);
+            try ingress_policy.directive(a, index, value.target);
         },
         .proposal_confirm => |selector| {
-            try ingress_policy.validate(&index);
-            const confirmation = try commands.resolveProposal(&index, selector);
-            const selected = try commands.proposal(&index, confirmation);
+            try ingress_policy.validate(index);
+            const confirmation = try commands.resolveProposal(index, selector);
+            const selected = try commands.proposal(index, confirmation);
             if (selected.body != .directive) return;
             _ = try commands.CallerDirective.narrow(selected.body.directive);
             const target = selected.target orelse return error.InvalidProposalTarget;
-            try ingress_policy.directive(a, &index, target);
+            try ingress_policy.directive(a, index, target);
         },
-        else => try ingress_policy.validate(&index),
+        else => try ingress_policy.validate(index),
     }
 }
 
@@ -406,12 +408,13 @@ fn confirmProposal(
     selector: commands.ProposalSelector,
 ) !t.Id {
     try commands.authenticate(driver, origin);
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const confirmation = try commands.resolveProposal(&index, selector);
-    const prior = try commands.confirmed(driver, a, &index, operation_id, origin, confirmation);
+    var indexed = try driver.view(a);
+    defer indexed.deinit();
+    const index = &indexed.index;
+    const confirmation = try commands.resolveProposal(index, selector);
+    const prior = try commands.confirmed(driver, a, index, operation_id, origin, confirmation);
     if (prior) |task_id| return task_id;
-    return commands.admitConfirmation(driver, a, &index, operation_id, origin, confirmation);
+    return commands.admitConfirmation(driver, a, index, operation_id, origin, confirmation);
 }
 
 fn proposal(

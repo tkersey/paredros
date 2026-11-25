@@ -70,11 +70,10 @@ pub fn Daemon(comptime Types: type) type {
             if (config.controls_per_poll == 0 or config.obligations_per_poll == 0)
                 return error.InvalidConfig;
             var session = try native.Session(Types).init(driver.service);
-            var index = driver.attachIndexed(a) catch |err| {
+            var indexed = driver.attachIndexed(a) catch |err| {
                 try session.deinit();
                 return err;
             };
-            defer index.deinit();
             var result: Self = .{
                 .driver = driver,
                 .server = server,
@@ -86,12 +85,14 @@ pub fn Daemon(comptime Types: type) type {
                 if (observer.on_start and observer.enabled()) {
                     var frame = std.heap.ArenaAllocator.init(a);
                     defer frame.deinit();
-                    _ = result.controlOne(frame.allocator(), &index, null) catch |err| {
+                    _ = result.controlOne(frame.allocator(), &indexed.index, null) catch |err| {
+                        indexed.deinit();
                         try result.deinit();
                         return err;
                     };
                 }
             }
+            indexed.deinit();
             return result;
         }
 
@@ -213,8 +214,9 @@ pub fn Daemon(comptime Types: type) type {
                     return replacements.len != 0;
                 },
                 .select_obligation => {
-                    var index = try self.driver.rebuild(a);
-                    defer index.deinit();
+                    var indexed = try self.driver.view(a);
+                    defer indexed.deinit();
+                    const index = &indexed.index;
                     if (index.obligations.len == 0) {
                         self.scheduling = .retained;
                         return false;
