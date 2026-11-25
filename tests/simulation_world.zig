@@ -11,6 +11,7 @@ const model = @import("../native/model_external.zig");
 const model_contract = @import("../app/model_contract.zig");
 
 pub const commits_max = 4096;
+pub const targeted_marker = "(about the selected monitor)";
 pub const repository_id: u64 = 123;
 
 pub const Application = struct {
@@ -272,6 +273,8 @@ pub const World = struct {
         var prepared = try c.decodeOwned(model.Adapter.Prepared, ctx.allocator, bytes);
         defer prepared.deinit();
         const conversation = prepared.value.request.offered[1];
+        const messages = prepared.value.request.invocation.messages.items;
+        const context = if (messages.len > 1) messages[1].content.bytes else "";
         const fault = self.modelFault();
         if (fault != .none) self.calls.faults += 1;
         switch (fault) {
@@ -279,7 +282,7 @@ pub const World = struct {
             .not_sent => return .{ .definitely_not_sent = error.SimulatedRefusal },
             else => {},
         }
-        const body = try self.modelBody(ctx.allocator, conversation, fault);
+        const body = try self.modelBody(ctx.allocator, conversation, context, fault);
         defer ctx.allocator.free(body);
         return .{ .captured = try c.encodeOwned(model.Raw, ctx.allocator, .{
             .status = if (fault == .server) 500 else 200,
@@ -291,7 +294,13 @@ pub const World = struct {
         }) };
     }
 
-    fn modelBody(self: *World, a: std.mem.Allocator, conversation: bool, fault: ModelFault) ![]u8 {
+    fn modelBody(
+        self: *World,
+        a: std.mem.Allocator,
+        conversation: bool,
+        context: []const u8,
+        fault: ModelFault,
+    ) ![]u8 {
         if (fault == .garbage or fault == .server) return a.dupe(u8, "{\"error\":");
         if (fault == .refusal) return a.dupe(u8, "{\"id\":\"r\",\"status\":\"completed\"," ++
             "\"error\":null,\"output\":[{\"type\":\"message\",\"status\":\"completed\"," ++
@@ -299,7 +308,7 @@ pub const World = struct {
         const arguments = if (fault == .malformed)
             try a.dupe(u8, "{\"summary\":7,\"highlights\":[]}")
         else if (conversation)
-            try self.converse(a)
+            try self.converse(a, context)
         else
             try a.dupe(u8, "{\"summary\":\"Simulated digest\",\"highlights\":[]}");
         defer a.free(arguments);
@@ -319,25 +328,22 @@ pub const World = struct {
         }, .{});
     }
 
-    fn converse(self: *World, a: std.mem.Allocator) ![]u8 {
-        return switch (self.random().uintLessThan(u8, 5)) {
-            0 => a.dupe(u8, "{\"reply\":\"Nothing to change.\",\"proposals\":[]}"),
-            1 => a.dupe(u8, "{\"reply\":\"Offered.\",\"proposals\":[" ++
-                "{\"tag\":\"select_proposal\",\"value\":{\"index\":0}}]}"),
-            2 => std.fmt.allocPrint(a, "{{\"reply\":\"Amend.\",\"proposals\":[" ++
-                "{{\"tag\":\"propose_amend\",\"value\":{{\"interval_ms\":{d}," ++
-                "\"wording\":\"Concise\",\"policies\":null,\"repository_route\":null}}}}]}}", .{
-                self.random().intRangeAtMost(u64, 60_000, 3_600_000),
-            }),
-            3 => std.fmt.allocPrint(a, "{{\"reply\":\"New monitor.\",\"proposals\":[" ++
-                "{{\"tag\":\"propose_genesis\",\"value\":{{\"interval_ms\":{d}," ++
-                "\"wording\":\"Fresh\",\"policies\":{s}}}}}]}}", .{
-                self.random().intRangeAtMost(u64, 60_000, 3_600_000),
-                try std.json.Stringify.valueAlloc(a, t.Policies{}, .{}),
-            }),
-            else => a.dupe(u8, "{\"reply\":\"Two.\",\"proposals\":[" ++
-                "{\"tag\":\"select_proposal\",\"value\":{\"index\":0}}," ++
-                "{\"tag\":\"select_proposal\",\"value\":{\"index\":1}}]}"),
-        };
+    fn converse(self: *World, a: std.mem.Allocator, context: []const u8) ![]u8 {
+        const silent = "{\"reply\":\"Nothing to change.\",\"proposals\":[]}";
+        if (self.chance(15)) return a.dupe(u8, silent);
+        const targeted = std.mem.indexOf(u8, context, targeted_marker) != null;
+        if (!targeted) return std.fmt.allocPrint(a, "{{\"reply\":\"New monitor.\"," ++
+            "\"proposals\":[{{\"tag\":\"propose_genesis\",\"value\":{{\"interval_ms\":{d}," ++
+            "\"wording\":\"Fresh\",\"policies\":{s}}}}}]}}", .{
+            self.random().intRangeAtMost(u64, 60_000, 3_600_000),
+            try std.json.Stringify.valueAlloc(a, t.Policies{}, .{}),
+        });
+        return std.fmt.allocPrint(a, "{{\"reply\":\"Offered.\",\"proposals\":[" ++
+            "{{\"tag\":\"select_proposal\",\"value\":{{\"index\":{d}}}}}," ++
+            "{{\"tag\":\"propose_amend\",\"value\":{{\"interval_ms\":{d}," ++
+            "\"wording\":\"Concise\",\"policies\":null,\"repository_route\":null}}}}]}}", .{
+            self.random().uintLessThan(u8, 4),
+            self.random().intRangeAtMost(u64, 60_000, 3_600_000),
+        });
     }
 };

@@ -250,7 +250,7 @@ fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
         "Print each simulation seed's timing",
     ) orelse false);
     values.addOption(u64, "hops_max", 2);
-    values.addOption(u64, "rest_rounds", 96);
+    values.addOption(u64, "rest_rounds", 400);
     return values;
 }
 

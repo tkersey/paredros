@@ -657,9 +657,13 @@ fn ask(sim: *Sim, value: *Node) !void {
     const texts = [_][]const u8{ "What are you watching?", "Pause it.", "Check every hour." };
     var args: std.ArrayList([]const u8) = .empty;
     const a = sim.allocator();
-    try args.appendSlice(a, &.{ "ask", texts[sim.below(texts.len)] });
-    if (sim.chance(60)) if (pickObligation(sim, &index)) |target|
-        try args.appendSlice(a, &.{ "--target", try idText(sim, target) });
+    const text = texts[sim.below(texts.len)];
+    const target = if (sim.chance(60)) pickObligation(sim, &index) else null;
+    if (target) |id| {
+        const marker = world_module.targeted_marker;
+        const marked = try std.fmt.allocPrint(a, "{s} {s}", .{ text, marker });
+        try args.appendSlice(a, &.{ "ask", marked, "--target", try idText(sim, id) });
+    } else try args.appendSlice(a, &.{ "ask", text });
     const request = try withOperation(sim, args.items, "ask");
     const response = (try mutate(sim, value, .ask, request)) orelse return;
     if (responseTask(response)) |task| try value.turns.append(a, task);
@@ -667,21 +671,40 @@ fn ask(sim: *Sim, value: *Node) !void {
 
 fn confirm(sim: *Sim, value: *Node) !void {
     if (value.confirmed.items.len != 0 and sim.chance(40)) return reconfirm(sim, value);
-    if (value.turns.items.len == 0) return;
-    const turn = value.turns.items[sim.below(value.turns.items.len)];
-    const shown = try dispatchBytes(sim, value, (try encodeArgs(sim, &.{
-        "task", "show", try idText(sim, turn),
-    })) orelse return);
-    const data = shown.data orelse return sim.note("confirm", "task show refused", .{});
-    const items = (data.object.get("confirmations") orelse return).array.items;
-    if (items.len == 0) return sim.note("confirm", "turn has no proposals: {s}", .{
-        shown.bytes[0..@min(shown.bytes.len, 400)],
-    });
-    const identity = try native.json.text(items[sim.below(items.len)].object.get("identity").?);
-    const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
-    const response = (try mutate(sim, value, .confirm, args)) orelse return;
-    if (responseTask(response) != null)
-        try value.confirmed.append(sim.allocator(), try sim.allocator().dupe(u8, identity));
+    const count = value.turns.items.len;
+    if (count == 0) return;
+    const start = sim.below(count);
+    for (0..count) |offset| {
+        const turn = value.turns.items[(start + offset) % count];
+        const identity = try proposalOf(sim, value, turn) orelse continue;
+        const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
+        const response = (try mutate(sim, value, .confirm, args)) orelse return;
+        if (responseTask(response) != null)
+            try value.confirmed.append(sim.allocator(), try sim.allocator().dupe(u8, identity));
+        return;
+    }
+    try sim.note("confirm", "none of {d} turns offers a proposal", .{count});
+}
+
+fn proposalOf(sim: *Sim, value: *Node, turn: t.Id) !?[]const u8 {
+    const bytes = (try encodeArgs(sim, &.{ "task", "show", try idText(sim, turn) })) orelse
+        return null;
+    const shown = try dispatchBytes(sim, value, bytes);
+    const data = shown.data orelse return null;
+    const items = (data.object.get("confirmations") orelse return null).array.items;
+    if (items.len == 0) {
+        const status = data.object.get("task_status") orelse .null;
+        const result = data.object.get("result") orelse .null;
+        const reply = if (result == .object) result.object.get("value") else null;
+        try sim.note("turn", "{s} status {s} result {s}", .{
+            oracle.hex(turn),
+            if (status == .null) "none" else try native.json.text(status),
+            if (reply) |found| try native.json.canonical(sim.allocator(), found) else "none",
+        });
+        return null;
+    }
+    const item = items[sim.below(items.len)];
+    return try native.json.text(item.object.get("identity").?);
 }
 
 fn reconfirm(sim: *Sim, value: *Node) !void {
@@ -695,52 +718,96 @@ fn reconfirm(sim: *Sim, value: *Node) !void {
 
 fn answer(sim: *Sim, value: *Node) !void {
     var index = try rebuild(sim, value);
-    defer index.deinit();
     var open: std.ArrayList(t.Id) = .empty;
     for (index.obligations) |*obligation|
         if (index.head(obligation).question != null)
             try open.append(sim.allocator(), obligation.task);
+    index.deinit();
     if (open.items.len == 0) return sim.note("answer", "no open question", .{});
-    const target = open.items[sim.below(open.items.len)];
-    if (sim.chance(50)) {
+    try answerTarget(sim, value, open.items[sim.below(open.items.len)], sim.chance(50));
+}
+
+fn answerTarget(sim: *Sim, value: *Node, target: t.Id, amended: bool) !void {
+    if (amended) {
+        var index = try rebuild(sim, value);
         const revision = index.head(index.obligation(target).?).specification.revision;
+        index.deinit();
         const id = try idText(sim, target);
         const wording = "Amended while a question is open.";
         const fields = [_][]const u8{ "monitor", "amend", id, try number(sim, revision) };
         const args = try std.mem.concat(sim.allocator(), []const u8, &.{
             &fields, &.{ "--wording", wording },
         });
-        const amend = try withOperation(sim, args, "amend");
-        _ = try mutate(sim, value, .directive, amend);
+        _ = try mutate(sim, value, .directive, try withOperation(sim, args, "amend"));
     }
+    var index = try rebuild(sim, value);
+    defer index.deinit();
     const page = try messagePage(sim, value, &index, target, null, 64);
     for (page.messages.items) |item| for (item.choices.items) |choice| {
         const line = (choice.command orelse continue).bytes;
         const args = try commandArgs(sim, line);
-        if (sim.chance(50)) continue;
         _ = try mutate(sim, value, .directive, try withOperation(sim, args, "answer"));
         return;
     };
 }
 
+fn openQuestion(sim: *Sim, value: *Node, target: t.Id) !bool {
+    var index = try rebuild(sim, value);
+    defer index.deinit();
+    const obligation = index.obligation(target) orelse return false;
+    return index.head(obligation).question != null;
+}
+
+fn baseline(sim: *Sim, value: *Node) !void {
+    var index = try rebuild(sim, value);
+    var target: ?t.Id = null;
+    for (index.obligations) |*obligation| {
+        const current = index.head(obligation);
+        if (current.mode != .active or current.question != null) continue;
+        if (current.observed.tip != null) {
+            index.deinit();
+            return;
+        }
+        target = obligation.task;
+    }
+    index.deinit();
+    const id = target orelse return;
+    const args = try withOperation(sim, &.{ "monitor", "check", try idText(sim, id) }, "check");
+    _ = try mutate(sim, value, .directive, args);
+    for (0..24) |_| {
+        try polls(sim, value, 8);
+        var current = try rebuild(sim, value);
+        defer current.deinit();
+        const obligation = current.obligation(id) orelse return;
+        if (current.head(obligation).observed.tip != null) return;
+        sim.wall_ms += 60_000;
+    }
+}
+
 fn questionScenario(sim: *Sim, value: *Node) !void {
+    try baseline(sim, value);
     var index = try rebuild(sim, value);
     var target: ?t.Id = null;
     for (index.obligations) |*obligation| {
         const current = index.head(obligation);
         const tip = current.observed.tip orelse continue;
-        if (current.mode != .active) continue;
+        if (current.mode != .active or current.question != null) continue;
         sim.world.divergeFrom(tip);
         target = obligation.task;
     }
     index.deinit();
-    try sim.note("rewrite", "tip {d} diverges", .{sim.world.tip});
-    if (target) |id| {
-        const args = try withOperation(sim, &.{ "monitor", "check", try idText(sim, id) }, "check");
-        _ = try mutate(sim, value, .directive, args);
+    const id = target orelse return sim.note("rewrite", "no observed active monitor", .{});
+    try sim.note("rewrite", "tip {d} diverges from {s}", .{ sim.world.tip, oracle.hex(id) });
+    const args = try withOperation(sim, &.{ "monitor", "check", try idText(sim, id) }, "check");
+    _ = try mutate(sim, value, .directive, args);
+    var open = false;
+    for (0..24) |_| {
+        try polls(sim, value, 8);
+        open = try openQuestion(sim, value, id);
+        if (open) break;
     }
-    try polls(sim, value, sim.random().intRangeAtMost(usize, 12, 36));
-    try answer(sim, value);
+    try sim.note("question", "{s} open {}", .{ oracle.hex(id), open });
+    if (open) try answerTarget(sim, value, id, true);
     try polls(sim, value, sim.random().intRangeAtMost(usize, 6, 24));
 }
 
@@ -1076,17 +1143,11 @@ fn strand(sim: *Sim, value: *Node) !void {
     try restartEvent(sim, value, false, true);
 }
 
-fn restartEvent(sim: *Sim, value: *Node, mid_dispatch: bool, requested: bool) !void {
-    const continuing = sim.pending_export != null or try importing(sim, value);
-    const reconfigure = requested and (!continuing or strandContinuity());
+fn restartEvent(sim: *Sim, value: *Node, mid_dispatch: bool, reconfigure: bool) !void {
     try restart(sim, value, mid_dispatch, reconfigure);
     try sim.note("restart", "{c} mid_dispatch={} reconfigure={}", .{
         value.label, mid_dispatch, reconfigure,
     });
-}
-
-fn strandContinuity() bool {
-    return std.testing.environ.getPosix("PAREDROS_SIMULATION_STRAND_CONTINUITY") != null;
 }
 
 fn exportEvent(sim: *Sim, value: *Node) !void {
@@ -1453,6 +1514,12 @@ pub fn run(seed: u64, events: usize) !Report {
 fn dumpState(sim: *Sim) !void {
     const value = sim.node();
     if (value.fixture.service == null) return;
+    const catalog = @import("../native/catalog.zig");
+    var probe = catalog.rebuild(value.driver.service, sim.allocator(), 128) catch |err| {
+        std.debug.print("rebuild fails with {s}\n", .{@errorName(err)});
+        return err;
+    };
+    probe.deinit();
     var index = try value.driver.rebuild(sim.allocator());
     defer index.deinit();
     std.debug.print("state of {c}: {d} records, transferred {}, clock {d}\n", .{
