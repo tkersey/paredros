@@ -224,7 +224,7 @@ fn importedGenesis(
 ) !?t.Id {
     const lineage = try admission.stableDigest(a, genesisEnvelope(request));
     const position = index.lineages.get(lineage) orelse {
-        if (try continuity.importedGenesis(a, index, request.operation))
+        if (continuity.importedGenesis(index, request.operation))
             return error.OperationConflict;
         return null;
     };

@@ -99,9 +99,27 @@ fn importBundle(f: anytype, driver: *Driver, bundle: transfer.Bundle) !transfer.
     return fileImport(f, driver, config(), operation, file);
 }
 
+fn onlyObligation(bundle: transfer.Bundle) !continuity.Obligation {
+    var found: ?continuity.Obligation = null;
+    for (bundle.members.items) |item| {
+        if (item != .obligation) continue;
+        try std.testing.expect(found == null);
+        found = item.obligation;
+    }
+    return found orelse error.MissingContinuityObligation;
+}
+
+fn obligationCount(bundle: transfer.Bundle) usize {
+    var count: usize = 0;
+    for (bundle.members.items) |item| {
+        if (item == .obligation) count += 1;
+    }
+    return count;
+}
+
 fn importDone(f: anytype, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
-    const budget = bundle.members.items.len + bundle.lineages.items.len + 3;
+    const budget = bundle.members.items.len + 4;
     for (0..budget) |_| {
         var progress = try importBundle(f, driver, bundle);
         defer progress.deinit(a);
@@ -153,33 +171,45 @@ fn verifyImported(f: *Fixture, driver: *Driver, target: t.Id) !void {
     try std.testing.expectEqual(.active, after.head(obligation).desired_mode);
 }
 
-fn verifyCorruption(a: std.mem.Allocator, bundle: transfer.Bundle) !void {
-    const bytes = try c.encodeOwned(transfer.Bundle, a, bundle);
-    defer a.free(bytes);
-    var changed = try c.decodeOwned(transfer.Bundle, a, bytes);
-    defer changed.deinit();
-    const root = &@constCast(changed.value.lineages.items)[0];
-    for (@constCast(changed.value.members.items)) |*item| {
-        if (!std.meta.eql(item.identity, root.head)) continue;
-        var head = try continuity.decode(.head, a, item.data);
-        defer head.deinit();
-        head.value.clock_ms += 1;
-        item.data.payload.bytes = try c.encodeOwned(t.Head, a, head.value);
-        item.identity = try continuity.digest(a, t.ContinuityData, item.data);
-        root.head = item.identity;
-        break;
+fn rehead(
+    a: std.mem.Allocator,
+    bundle: transfer.Bundle,
+    comptime edit: fn (*t.Head) void,
+    digested: bool,
+) !transfer.Bundle {
+    const changed = (try c.decodeOwned(
+        transfer.Bundle,
+        a,
+        try c.encodeOwned(transfer.Bundle, a, bundle),
+    )).value;
+    for (@constCast(changed.members.items), @constCast(changed.manifest.items)) |*item, *key| {
+        if (item.* != .obligation or item.obligation.state != .head) continue;
+        edit(&item.obligation.state.head.head);
+        if (digested) key.* = try continuity.digest(a, continuity.Member, item.*);
     }
+    return changed;
+}
+
+fn later(head: *t.Head) void {
+    head.clock_ms += 1;
+}
+
+fn attached(head: *t.Head) void {
+    head.predecessor = .{ .task = @splat(0xee), .digest = @splat(0xef) };
+}
+
+fn verifyCorruption(a: std.mem.Allocator, bundle: transfer.Bundle) !void {
     try std.testing.expectError(
-        error.ContinuityPayloadMismatch,
-        continuity.validate(a, changed.value),
+        error.ContinuityDigestMismatch,
+        continuity.validate(a, try rehead(a, bundle, later, false)),
     );
-    changed.value = bundle;
-    changed.value.lineages.items = try a.dupe(continuity.Lineage, bundle.lineages.items);
-    @constCast(changed.value.lineages.items)[0].pending_controls.items = &.{};
     try std.testing.expectError(
-        error.MissingContinuityControl,
-        continuity.validate(a, changed.value),
+        error.AttachedContinuityReference,
+        continuity.validate(a, try rehead(a, bundle, attached, true)),
     );
+    var listed = bundle;
+    listed.manifest.items = bundle.manifest.items[1..];
+    try std.testing.expectError(error.ContinuityManifestMismatch, continuity.validate(a, listed));
 }
 
 test "native continuity import maps pending controls once and resumes the prior mode" {
@@ -203,7 +233,7 @@ test "native continuity import maps pending controls once and resumes the prior 
     _ = try original.directive(a, "old-resume", origin, target, .{ .@"resume" = {} });
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
-    try std.testing.expectEqual(2, bundle.value.lineages.items[0].pending_controls.items.len);
+    try std.testing.expectEqual(2, (try onlyObligation(bundle.value)).controls.items.len);
     try verifyCorruption(a, bundle.value);
     original.detach();
     try from.close();
@@ -287,7 +317,7 @@ fn verifyFrozenTurn(f: *Fixture, driver: *Driver, original: t.Turn, task: t.Id) 
     try std.testing.expectEqual(.portable_import, value.continuity.?.continuation);
     try std.testing.expectEqual(1, value.context_references.items.len);
     try std.testing.expectEqualDeep(
-        value.continuity.?.member.task,
+        value.continuity.?.manifest.task,
         value.context_references.items[0].task,
     );
     var context = try @import("../native/dialogue.zig").materialize(a, &index, .{
@@ -332,7 +362,7 @@ test "native continuity global turns preserve frozen context" {
     const frozen = before.record(task).?.input.turn;
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
-    try std.testing.expectEqual(0, bundle.value.lineages.items.len);
+    try std.testing.expectEqual(0, obligationCount(bundle.value));
     original.detach();
     try from.close();
     try to.init();
@@ -521,7 +551,7 @@ fn secondGenesis() t.Genesis {
 
 fn importInterleaved(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
     const a = f.arena.allocator();
-    const budget = bundle.members.items.len + 2 * bundle.lineages.items.len + 3;
+    const budget = 2 * bundle.members.items.len + 4;
     for (0..budget) |_| {
         var progress = try importBundle(f, driver, bundle);
         defer progress.deinit(a);
@@ -564,7 +594,7 @@ test "native continuity import completes every lineage while imported obligation
     _ = try original.directive(a, "old-pause-second", origin, targets[1], .{ .pause = {} });
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
-    try std.testing.expectEqual(2, bundle.value.lineages.items.len);
+    try std.testing.expectEqual(2, obligationCount(bundle.value));
     original.detach();
     try from.close();
     try to.init();
@@ -617,7 +647,7 @@ test "native continuity refuses a control behind a pending cancel and imports no
     _ = try cancelledWithLateControl(&from, &original);
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
-    try std.testing.expectEqual(0, bundle.value.lineages.items[0].pending_controls.items.len);
+    try std.testing.expectEqual(0, (try onlyObligation(bundle.value)).controls.items.len);
     original.detach();
     try from.close();
     try to.init();
@@ -859,13 +889,16 @@ fn strandedBundle(
 }
 
 fn expectPending(a: std.mem.Allocator, bundle: transfer.Bundle, genesis: t.Genesis) !void {
-    try std.testing.expectEqual(0, bundle.lineages.items.len);
-    try std.testing.expectEqual(1, bundle.pending.items.len);
-    const root = bundle.pending.items[0];
-    try std.testing.expectEqualDeep(genesis.lineage, root.lineage);
-    var carried = try continuity.decode(.genesis, a, continuity.member(bundle, root.member).?.data);
-    defer carried.deinit();
-    try std.testing.expect(try continuity.equal(a, t.Genesis, genesis, carried.value));
+    const carried = try onlyObligation(bundle);
+    try std.testing.expectEqualDeep(genesis.lineage, carried.lineage);
+    try std.testing.expect(carried.state == .genesis);
+    try std.testing.expect(try continuity.equal(a, t.Envelope, genesis.envelope, carried.origin));
+    try std.testing.expect(try continuity.equal(
+        a,
+        t.Specification,
+        genesis.specification,
+        carried.state.genesis,
+    ));
 }
 
 fn strandedSource(f: *Fixture) !t.Id {
@@ -965,7 +998,6 @@ test "native continuity transfer carries a genesis stranded after the fence as a
     const record = index.record(imported).?;
     try std.testing.expectEqualDeep(genesis.lineage, record.input.genesis.lineage);
     try std.testing.expect(record.input.genesis.imported.?.carried == null);
-    try std.testing.expect(continuity.findImport(&index, imported) == null);
     const obligation = index.obligation(imported).?;
     try std.testing.expect(obligation.ordinaryDispatch());
     try std.testing.expectEqual(null, index.head(obligation).predecessor);
@@ -1025,14 +1057,8 @@ test "native continuity export waits for an admitted genesis that has not run" {
     ));
     var bundle = try transferWritten(&f, &driver, settings, environment);
     defer bundle.deinit();
-    try std.testing.expectEqual(1, bundle.value.lineages.items.len);
-    var head = try continuity.decode(
-        .head,
-        a,
-        continuity.member(bundle.value, bundle.value.lineages.items[0].head).?.data,
-    );
-    defer head.deinit();
-    try std.testing.expectEqual(.transferred, head.value.mode);
+    const carried = try onlyObligation(bundle.value);
+    try std.testing.expectEqual(.transferred, carried.state.head.head.mode);
 }
 
 test "native continuity export refuses an occupied name before fencing the source" {
@@ -1136,83 +1162,83 @@ test "native continuity repeated snapshot exports do not embed earlier cuts" {
     try std.testing.expectEqual(sizes[0], sizes[2]);
 }
 
-fn verifyCarried(driver: *Driver, a: std.mem.Allocator, bundle: transfer.Bundle) !void {
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const manifest = index.records[index.continuity_import.?.position].task;
-    for (bundle.cut.items) |row| try std.testing.expect(!std.meta.eql(row.task, manifest));
-    var carried: usize = 0;
-    for (bundle.members.items) |item| {
-        if (item.data.kind == .settlement) if (index.record(item.data.source.task)) |record| {
-            try std.testing.expect(record.input != .continuity_cut);
-            try std.testing.expect(record.input != .continuity_member);
-        };
-        const producer = index.record(item.current.task).?;
-        if (producer.input == .continuity_member) carried += 1;
-    }
-    try std.testing.expectEqual(index.continuity_import.?.members, carried);
+fn importedHead(a: std.mem.Allocator, f: *Fixture, bundle: transfer.Bundle) !t.Head {
+    try f.init();
+    var clock: u8 = 0;
+    var driver = hopDriver(f, &clock);
+    try driver.attach(f.arena.allocator());
+    try importDone(f, &driver, bundle);
+    var index = try driver.rebuild(f.arena.allocator());
+    const bytes = try c.encodeOwned(t.Head, a, index.head(&index.obligations[0]));
+    index.deinit();
+    driver.detach();
+    try f.close();
+    return (try c.decodeOwned(t.Head, a, bytes)).value;
 }
 
-fn importTurnChain(f: *Fixture, driver: *Driver, bundle: transfer.Bundle) !void {
-    const a = f.arena.allocator();
-    try importDone(f, driver, bundle);
-    const mapped = try transfer.admitPendingTurns(driver, a, origin);
-    try finish(f, mapped.admitted.?);
+fn expectEquivalent(a: std.mem.Allocator, first: transfer.Bundle, second: transfer.Bundle) !void {
+    const left = try onlyObligation(first);
+    const right = try onlyObligation(second);
+    try std.testing.expect(try continuity.equal(a, t.Envelope, left.origin, right.origin));
+    const Controls = @TypeOf(left.controls);
+    try std.testing.expect(try continuity.equal(a, Controls, left.controls, right.controls));
+    const Turns = @TypeOf(left.turns);
+    try std.testing.expect(try continuity.equal(a, Turns, left.turns, right.turns));
+    const talk = struct {
+        fn of(bundle: transfer.Bundle) !continuity.Conversation {
+            for (bundle.members.items) |item| if (item == .conversation) return item.conversation;
+            return error.MissingContinuityConversation;
+        }
+    };
+    const Conversation = continuity.Conversation;
+    try std.testing.expect(try continuity.equal(
+        a,
+        Conversation,
+        try talk.of(first),
+        try talk.of(second),
+    ));
 }
 
-test "native continuity re-export carries imported members once without earlier bundles" {
+test "native continuity re-export from an imported namespace equals the original bundle" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
     var to: Fixture = .{};
     defer to.deinit();
-    var third: Fixture = .{};
-    defer third.deinit();
     const a = from.arena.allocator();
     const genesis = contracts.genesis();
     const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
     var clock: u8 = 0;
-    var original: Driver = .{
-        .service = &from.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-    };
+    var original = hopDriver(&from, &clock);
     try original.attach(a);
     _ = try original.directive(a, "chain-pause", origin, target, .{ .pause = {} });
+    _ = try original.turn(a, "chain-targeted", origin, .{
+        .text = .{ .bytes = "Is the branch moving?" },
+        .target = target,
+    });
     _ = try frozenTurn(&from, &original);
     var first = try transfer.capture(&original, a, source(&from), .snapshot);
     defer first.deinit();
     original.detach();
     try from.close();
     try to.init();
-    var middle: Driver = .{
-        .service = &to.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-        .bindings = configuration.bindings(config()),
-    };
+    var middle = hopDriver(&to, &clock);
     try middle.attach(to.arena.allocator());
-    try importTurnChain(&to, &middle, first.value);
+    try importDone(&to, &middle, first.value);
     var second = try transfer.capture(&middle, a, source(&to), .snapshot);
     defer second.deinit();
-    const first_bytes = try c.encodeOwned(transfer.Bundle, a, first.value);
-    const second_bytes = try c.encodeOwned(transfer.Bundle, a, second.value);
-    try std.testing.expect(second_bytes.len < 3 * first_bytes.len);
-    try verifyCarried(&middle, a, second.value);
     middle.detach();
     try to.close();
-    try third.init();
-    var last: Driver = .{
-        .service = &third.service.?,
-        .clock = .{ .context = &clock, .now = Clock.now },
-        .bindings = configuration.bindings(config()),
-    };
-    try last.attach(third.arena.allocator());
-    defer last.detach();
-    const imported = try importAll(&third, &last, second.value);
-    var index = try last.rebuild(a);
-    defer index.deinit();
-    try std.testing.expectEqual(1, index.obligations.len);
-    try std.testing.expectEqualDeep(imported, index.obligations[0].task);
-    try std.testing.expect(!transfer.importPending(&index));
+    try expectEquivalent(a, first.value, second.value);
+    const first_bytes = try c.encodeOwned(transfer.Bundle, a, first.value);
+    const second_bytes = try c.encodeOwned(transfer.Bundle, a, second.value);
+    try std.testing.expect(second_bytes.len <= first_bytes.len);
+    var direct: Fixture = .{};
+    defer direct.deinit();
+    var relayed: Fixture = .{};
+    defer relayed.deinit();
+    const direct_head = try importedHead(a, &direct, first.value);
+    try std.testing.expectEqualDeep(direct_head, try importedHead(a, &relayed, second.value));
 }
 
 const daemon_module = @import("../native/daemon.zig");
@@ -1239,7 +1265,7 @@ fn importView(driver: *Driver) !?continuity.ImportView {
         .position = view.position,
         .digest = view.digest,
         .phase = view.phase,
-        .members = view.members,
+        .materialized = view.materialized,
     };
 }
 
@@ -1265,7 +1291,7 @@ fn daemonImport(f: *Fixture, driver: *Driver, partial: bool) !continuity.ImportP
         const view = (try importView(driver)).?;
         phase = view.phase;
         if (phase == .materialized) break;
-        if (partial and phase == .members_pending and view.members != 0) break;
+        if (partial and phase == .genesis_pending) break;
     }
     daemon.beginStop(0);
     for (0..10_000) |_| {
@@ -1312,7 +1338,7 @@ test "native continuity daemon materializes an admitted import across restart" {
     var admitted = try importBundle(&to, &destination, bundle.value);
     admitted.deinit(a);
     destination.detach();
-    try std.testing.expectEqual(.members_pending, try daemonImport(&to, &destination, true));
+    try std.testing.expectEqual(.genesis_pending, try daemonImport(&to, &destination, true));
     try to.close();
     try to.open();
     destination.service = &to.service.?;
@@ -1320,7 +1346,9 @@ test "native continuity daemon materializes an admitted import across restart" {
     var index = try destination.rebuild(a);
     defer index.deinit();
     try std.testing.expectEqual(2, index.obligations.len);
-    try std.testing.expectEqual(2, index.imports.len);
+    for (index.obligations) |obligation| {
+        try std.testing.expect(index.record(obligation.task).?.input.genesis.imported != null);
+    }
     try std.testing.expect(!transfer.importPending(&index));
 }
 
@@ -1532,7 +1560,7 @@ test "native continuity import validates bindings after manifest admission" {
     try std.testing.expect(!try destination.importStep(a));
     var index = try destination.rebuild(a);
     defer index.deinit();
-    try std.testing.expectEqual(0, index.continuity_import.?.members);
+    try std.testing.expectEqual(0, index.continuity_import.?.materialized);
     try std.testing.expectEqual(0, index.obligations.len);
 }
 
@@ -1876,10 +1904,14 @@ test "native continuity snapshot during partial control mapping keeps source ord
     try finish(&to, mapped.admitted.?);
     var second = try transfer.capture(&middle, a, source(&to), .snapshot);
     defer second.deinit();
-    const keys = second.value.lineages.items[0].pending_controls.items;
-    try std.testing.expectEqual(2, keys.len);
-    const leading = continuity.member(second.value, keys[0]).?;
-    try std.testing.expectEqualDeep(second.value.source.namespace, leading.data.source.namespace);
+    const controls = (try onlyObligation(second.value)).controls;
+    try std.testing.expectEqual(2, controls.items.len);
+    try std.testing.expect(try continuity.equal(
+        a,
+        @TypeOf(controls),
+        (try onlyObligation(first.value)).controls,
+        controls,
+    ));
     middle.detach();
     try to.close();
     try third.init();
@@ -1917,12 +1949,12 @@ test "native continuity import skips cancelled lineages and binds identity rathe
     moved.repository.id += 1;
     try std.testing.expectError(
         error.ContinuityResourceMismatch,
-        transfer.validateBindings(a, bundle.value, configuration.bindings(moved)),
+        transfer.validateBindings(bundle.value, configuration.bindings(moved)),
     );
     var renamed = config();
     renamed.repository.owner = "renamed-owner";
     renamed.repository.name = "renamed-name";
-    try transfer.validateBindings(a, bundle.value, configuration.bindings(renamed));
+    try transfer.validateBindings(bundle.value, configuration.bindings(renamed));
     original.detach();
     try from.close();
     try to.init();
@@ -2000,58 +2032,9 @@ test "native continuity import renders a digest over untold imported batches" {
     try std.testing.expectEqual(1, published.links.items.len);
 }
 
-const HeadEdit = fn (
-    std.mem.Allocator,
-    *t.Head,
-    *t.ContinuityData,
-    continuity.Member,
-) anyerror!void;
-
-fn reheaded(
-    a: std.mem.Allocator,
-    bundle: transfer.Bundle,
-    comptime edit: HeadEdit,
-    batch: continuity.Member,
-) !transfer.Bundle {
-    const changed = (try c.decodeOwned(
-        transfer.Bundle,
-        a,
-        try c.encodeOwned(transfer.Bundle, a, bundle),
-    )).value;
-    const root = &@constCast(changed.lineages.items)[0];
-    for (@constCast(changed.members.items)) |*item| {
-        if (!std.meta.eql(item.identity, root.head)) continue;
-        var head = (try continuity.decode(.head, a, item.data)).value;
-        try edit(a, &head, &item.data, batch);
-        item.data.payload.bytes = try c.encodeOwned(t.Head, a, head);
-        item.identity = try continuity.digest(a, t.ContinuityData, item.data);
-        root.head = item.identity;
-    }
-    return changed;
-}
-
-fn unlistBatch(
-    a: std.mem.Allocator,
-    head: *t.Head,
-    data: *t.ContinuityData,
-    batch: continuity.Member,
-) !void {
-    head.last_observation.?.batch = .{ .retained = batch.current };
-    data.dependencies.items = &.{};
-    data.references.items = try a.dupe(t.ContinuityBinding, &.{.{
-        .member = batch.identity,
-        .local = batch.current,
-    }});
-}
-
-fn foreignReport(
-    _: std.mem.Allocator,
-    head: *t.Head,
-    _: *t.ContinuityData,
-    _: continuity.Member,
-) !void {
+fn unvaluedDisposition(head: *t.Head) void {
     head.method_disposition = .{
-        .source = .{ .task = @splat(0xee), .digest = @splat(0xef) },
+        .source = .{ .task = @splat(0), .digest = @splat(0) },
         .source_digest = @splat(1),
         .reason = .{ .bytes = "missing" },
         .consecutive_faults = 1,
@@ -2060,7 +2043,7 @@ fn foreignReport(
     };
 }
 
-test "native continuity closure rejects unresolved or unlisted references before import admission" {
+test "native continuity member validation refuses attached references before import admission" {
     var repository: fake.Source = .{ .ahead = true };
     var from: GithubFixture = .{};
     defer from.deinit();
@@ -2083,26 +2066,20 @@ test "native continuity closure rejects unresolved or unlisted references before
     defer bundle.deinit();
     original.detach();
     try from.close();
-    const batch = for (bundle.value.members.items) |item| {
-        if (item.data.kind == .batch) break item;
-    } else return error.MissingContinuityBatch;
-    const unlisted = try reheaded(a, bundle.value, unlistBatch, batch);
-    try std.testing.expectError(
-        error.UnlistedContinuityReference,
-        continuity.validate(a, unlisted),
-    );
-    const dangling = try reheaded(a, bundle.value, foreignReport, batch);
-    try std.testing.expectError(
-        error.MissingContinuityReference,
-        continuity.validate(a, dangling),
-    );
+    const carried = (try onlyObligation(bundle.value)).state.head;
+    try std.testing.expectEqual(1, carried.batches.items.len);
+    try std.testing.expectEqual(carried.head.observed.sequence, carried.batches.items[0].sequence);
+    const dangling = try rehead(a, bundle.value, unvaluedDisposition, true);
+    try std.testing.expectError(error.InvalidContinuityMethod, continuity.validate(a, dangling));
+    const linked = try rehead(a, bundle.value, attached, true);
+    try std.testing.expectError(error.AttachedContinuityReference, continuity.validate(a, linked));
     try to.initWithGrants(&.{@import("../app/github_contract.zig").identity});
     var destination = githubDriver(&to, &clock);
     try destination.attach(a);
     defer destination.detach();
     try std.testing.expectError(
-        error.MissingContinuityReference,
-        importBundle(&to, &destination, dangling),
+        error.AttachedContinuityReference,
+        importBundle(&to, &destination, linked),
     );
     var index = try destination.rebuild(a);
     defer index.deinit();
@@ -2220,8 +2197,7 @@ fn importedReport(a: std.mem.Allocator, driver: *Driver) !t.Reference {
     var index = try driver.rebuild(a);
     defer index.deinit();
     for (index.records) |record| {
-        if (record.input != .continuity_member or
-            record.input.continuity_member.data.kind != .method_report) continue;
+        if (record.input != .continuity_member) continue;
         return .{ .task = record.task, .digest = record.result_digest.? };
     }
     return error.MissingImportedReport;
@@ -2269,6 +2245,21 @@ fn adoptedReport(a: std.mem.Allocator, driver: *Driver) !void {
     try std.testing.expectEqual(.source_registration, report.value.kind);
 }
 
+fn withoutReports(a: std.mem.Allocator, bundle: transfer.Bundle) !transfer.Bundle {
+    var members: std.ArrayList(continuity.Member) = .empty;
+    var manifest: std.ArrayList(t.Digest) = .empty;
+    for (bundle.members.items, bundle.manifest.items) |item, key| {
+        if (item == .report) continue;
+        try members.append(a, item);
+        try manifest.append(a, key);
+    }
+    try std.testing.expect(members.items.len < bundle.members.items.len);
+    var result = bundle;
+    result.members.items = members.items;
+    result.manifest.items = manifest.items;
+    return result;
+}
+
 test "native continuity re-exports a method adopted from an imported report across hops" {
     var experimenter: Fixture = .{};
     defer experimenter.deinit();
@@ -2297,7 +2288,7 @@ test "native continuity re-exports a method adopted from an imported report acro
     try carrier.init();
     var third = hopDriver(&carrier, &clock);
     try third.attach(carrier.arena.allocator());
-    _ = try importAll(&carrier, &third, adopted.value);
+    _ = try importAll(&carrier, &third, try withoutReports(a, adopted.value));
     try adoptedReport(a, &third);
     var carried = try transfer.capture(&third, a, source(&carrier), .snapshot);
     defer carried.deinit();
@@ -2311,4 +2302,99 @@ test "native continuity re-exports a method adopted from an imported report acro
     defer fourth.detach();
     _ = try importAll(&last, &fourth, carried.value);
     try adoptedReport(a, &fourth);
+}
+
+test "native continuity import refuses a bundle beyond its byte bound before admission" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    var to: Fixture = .{};
+    defer to.deinit();
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    const directory = try backup.path();
+    var bundle = try importFixture(&from, &to, backup.temporary.dir);
+    defer bundle.deinit();
+    const a = to.arena.allocator();
+    const file = try std.fs.path.join(a, &.{ directory, "handoff.paredros" });
+    const size = (try backup.temporary.dir.statFile(std.testing.io, "handoff.paredros", .{})).size;
+    var clock: u8 = 0;
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(a);
+    defer destination.detach();
+    try std.testing.expectError(error.Capacity, continuity_control.importBundle(
+        &destination,
+        a,
+        config(),
+        .{ .io = std.testing.io, .source = source(&to) },
+        "bounded-import",
+        origin,
+        .{
+            .path = .{ .bytes = file },
+            .digest = try cli.fileDigest(std.testing.io, file),
+            .bytes_max = size - 1,
+        },
+    ));
+    try std.testing.expectEqual(0, try recordCount(a, &destination));
+    var progress = try continuity_control.importBundle(
+        &destination,
+        a,
+        config(),
+        .{ .io = std.testing.io, .source = source(&to) },
+        "bounded-import",
+        origin,
+        .{
+            .path = .{ .bytes = file },
+            .digest = try cli.fileDigest(std.testing.io, file),
+            .bytes_max = size,
+        },
+    );
+    progress.deinit(a);
+}
+
+test "native continuity exports an obligation with live work from its latest head and controls" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    try from.init();
+    var to: Fixture = .{};
+    defer to.deinit();
+    const a = from.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try from.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original = hopDriver(&from, &clock);
+    try original.attach(a);
+    _ = try original.directive(a, "live-pause", origin, target, .{ .pause = {} });
+    const live = (try original.nextStep(a, target)).?;
+    var index = try original.rebuild(a);
+    const latest = index.head(index.obligation(target).?);
+    try std.testing.expect(index.record(live).?.result == null);
+    index.deinit();
+    var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer bundle.deinit();
+    const carried = try onlyObligation(bundle.value);
+    try std.testing.expectEqual(latest.sequence, carried.state.head.head.sequence);
+    try std.testing.expectEqual(1, carried.controls.items.len);
+    try std.testing.expect(carried.controls.items[0].body == .pause);
+    original.detach();
+    try from.close();
+    try to.init();
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, bundle.value);
+    try std.testing.expect(try destination.importedControls(a, imported));
+    try finish(&to, (try admittedDirective(a, &destination)).?);
+    try finish(&to, (try destination.nextStep(a, imported)).?);
+    var after = try destination.rebuild(a);
+    defer after.deinit();
+    try std.testing.expectEqual(.paused, after.head(after.obligation(imported).?).mode);
+}
+
+fn admittedDirective(a: std.mem.Allocator, driver: *Driver) !?t.Id {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    for (index.records) |record| {
+        if (record.input == .directive and record.result == null) return record.task;
+    }
+    return null;
 }

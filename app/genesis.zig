@@ -119,11 +119,7 @@ fn importedHead(
     return a.replace(c, b, t.Head, previous, .{
         .obligation = try c.literal(t.GenesisIdentity, .{ .self = {} }),
         .sequence = try b.constant(u64, 0),
-        .predecessor = try b.variant(
-            try c.schema(?t.Reference),
-            "some",
-            try b.field(imported, "source"),
-        ),
+        .predecessor = try c.literal(?t.Reference, null),
         .attempt = try b.constant(u32, 0),
         .superseded = try c.literal(?t.InputReference, null),
         .consumed = try c.literal(@FieldType(t.Head, "consumed"), .{ .items = &.{} }),

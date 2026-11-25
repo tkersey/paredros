@@ -4,7 +4,6 @@ const t = @import("application_types");
 const idx = @import("index.zig");
 const retained = @import("retained.zig");
 const admission = @import("admission.zig");
-const continuity = @import("continuity.zig");
 const measure = @import("render_measure.zig");
 
 pub fn step(
@@ -203,7 +202,7 @@ fn settlement(
     };
 }
 
-const BatchFact = @FieldType(t.Step, "batches").Child;
+pub const BatchFact = @FieldType(t.Step, "batches").Child;
 
 pub const Backlog = struct {
     untold_batches: u64,
@@ -223,22 +222,11 @@ pub fn backlog(
     const head = index.head(obligation);
     const count = try std.math.sub(u64, head.observed.sequence, head.told.sequence);
     if (count == 0) return .{ .untold_batches = 0 };
-    const wanted = head.told.sequence + 1;
-    for (obligation.chain) |position| {
-        const output = index.records[position].result.?;
-        if (output != .step) continue;
-        const batch = output.step.batch orelse continue;
-        if (batch.sequence == wanted)
-            return backlogWithEvidence(
-                count,
-                .{ .reference = index.reference(position), .value = batch },
-            );
-    }
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var imported: std.ArrayList(BatchFact) = .empty;
-    try importedBatches(arena.allocator(), index, obligation, wanted, &imported);
-    if (imported.items.len != 0) return backlogWithEvidence(count, imported.items[0]);
+    for (try candidates(arena.allocator(), index, obligation)) |fact| {
+        if (fact.value.sequence == head.told.sequence + 1) return backlogWithEvidence(count, fact);
+    }
     return .{ .untold_batches = count };
 }
 
@@ -251,29 +239,41 @@ fn backlogWithEvidence(count: u64, fact: BatchFact) Backlog {
     } };
 }
 
+pub fn candidates(
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    obligation: *const idx.Obligation,
+) ![]BatchFact {
+    var result: std.ArrayList(BatchFact) = .empty;
+    const genesis = obligation.chain[0];
+    if (index.records[genesis].input.genesis.imported) |imported| if (imported.carried) |carried| {
+        for (carried.batches.items) |batch|
+            try result.append(a, .{ .reference = index.reference(genesis), .value = batch });
+    };
+    for (obligation.chain) |position| {
+        const output = index.records[position].result.?;
+        if (output != .step) continue;
+        const batch = output.step.batch orelse continue;
+        try result.append(a, .{ .reference = index.reference(position), .value = batch });
+    }
+    std.mem.sort(BatchFact, result.items, {}, struct {
+        fn less(_: void, left: BatchFact, right: BatchFact) bool {
+            return left.value.sequence < right.value.sequence;
+        }
+    }.less);
+    return result.toOwnedSlice(a);
+}
+
 fn batches(
     a: std.mem.Allocator,
     index: *const idx.Index,
     obligation: *const idx.Obligation,
 ) ![]const @FieldType(t.Step, "batches").Child {
     const head = index.head(obligation);
-    var candidates: std.ArrayList(BatchFact) = .empty;
-    try importedBatches(a, index, obligation, null, &candidates);
-    for (obligation.chain) |position| {
-        const output = index.records[position].result.?;
-        if (output != .step) continue;
-        const batch = output.step.batch orelse continue;
-        try candidates.append(a, .{ .reference = index.reference(position), .value = batch });
-    }
-    std.mem.sort(BatchFact, candidates.items, {}, struct {
-        fn less(_: void, left: BatchFact, right: BatchFact) bool {
-            return left.value.sequence < right.value.sequence;
-        }
-    }.less);
     var result: std.ArrayList(BatchFact) = .empty;
     var prefix = try measure.Prefix.forHead(head);
     var sequence = head.told.sequence;
-    for (candidates.items) |fact| {
+    for (try candidates(a, index, obligation)) |fact| {
         const batch = fact.value;
         if (batch.sequence <= head.told.sequence) continue;
         if (batch.sequence > head.observed.sequence) return error.BatchBeyondObserved;
@@ -286,28 +286,4 @@ fn batches(
         if (!fits or batch.coverage != .complete) break;
     }
     return result.toOwnedSlice(a);
-}
-
-fn importedBatches(
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-    obligation: *const idx.Obligation,
-    wanted: ?u64,
-    result: *std.ArrayList(BatchFact),
-) !void {
-    const imported = continuity.findImport(index, obligation.task) orelse return;
-    const head = index.head(obligation);
-    for (imported.bundle.members.items) |member| {
-        if (member.data.kind != .batch or !std.meta.eql(member.data.lineage, head.lineage))
-            continue;
-        const reference = try continuity.binding(imported.bindings, member.identity);
-        const source = try continuity.resolve(index, obligation.task, reference, .batch);
-        var decoded = try continuity.decode(.batch, a, source);
-        if (wanted) |sequence| if (sequence != decoded.value.sequence) {
-            decoded.deinit();
-            continue;
-        };
-        try result.append(a, .{ .reference = reference, .value = decoded.value });
-        if (wanted != null) return;
-    }
 }

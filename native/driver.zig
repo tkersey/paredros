@@ -200,15 +200,10 @@ pub fn Driver(comptime Types: type) type {
             defer index.deinit();
             const transfer = @import("transfer.zig");
             if (transfer.importPending(&index)) return transfer.advanceImport(self, a, &index);
-            if (index.transferred() or index.portable.len == 0) return false;
-            const manifest = index.record(index.portable[0].metadata.manifest.task) orelse
-                return error.MissingContinuityManifest;
-            if (manifest.input != .continuity_cut) return error.InvalidContinuityManifest;
-            const progress = try transfer.admitPendingTurns(
-                self,
-                a,
-                manifest.input.continuity_cut.envelope.origin,
-            );
+            if (index.transferred()) return false;
+            const view = index.continuity_import orelse return false;
+            const manifest = index.records[view.position].input.continuity_cut;
+            const progress = try transfer.admitPendingTurns(self, a, manifest.envelope.origin);
             return progress.admitted != null;
         }
 

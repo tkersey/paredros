@@ -3,7 +3,7 @@ const c = @import("protean_contracts");
 const t = @import("application_types");
 const continuity = @import("continuity.zig");
 
-pub const Phase = enum { manifest_pending, members_pending, genesis_pending, materialized };
+pub const Phase = enum { manifest_pending, values_pending, genesis_pending, materialized };
 
 pub const View = struct {
     position: usize,
@@ -11,34 +11,8 @@ pub const View = struct {
     phase: Phase = .manifest_pending,
     bundle: ?continuity.Bundle = null,
     manifest: ?t.Reference = null,
-    local: []const ?usize = &.{},
-    positions: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
-    members: u64 = 0,
-    metadata: ?t.ContinuityImport = null,
-    bindings: []const t.ContinuityBinding = &.{},
-
-    pub fn reference(self: *const View, index: anytype, identity: t.Digest) ?t.Reference {
-        const position = self.local[self.positions.get(identity) orelse return null] orelse
-            return null;
-        const record = index.records[position];
-        return .{ .task = record.task, .digest = record.result_digest orelse return null };
-    }
+    materialized: u64 = 0,
 };
-
-pub fn mappedOperation(
-    a: std.mem.Allocator,
-    kind: enum { member, genesis, directive, turn },
-    bundle: t.Digest,
-    identity: t.Digest,
-) ![]u8 {
-    const key = try continuity.digest(a, struct { bundle: t.Digest, identity: t.Digest }, .{
-        .bundle = bundle,
-        .identity = identity,
-    });
-    return std.fmt.allocPrint(a, "continuity-{s}:{s}", .{
-        @tagName(kind), std.fmt.bytesToHex(key, .lower),
-    });
-}
 
 pub fn bundleSource(a: std.mem.Allocator, bytes: []const u8) !continuity.Source {
     const Prefix = struct { version: u32, source: continuity.Source };
@@ -53,8 +27,7 @@ pub fn importedLineage(index: anytype, identity: t.Digest, bundle: t.Digest) !?u
     const position = index.lineages.get(identity) orelse return null;
     const imported = index.records[position].input.genesis.imported orelse
         return error.ContinuityLineageConflict;
-    const metadata = imported.continuity orelse return error.ContinuityLineageConflict;
-    if (!std.meta.eql(metadata.bundle, bundle)) return error.ContinuityLineageConflict;
+    if (!std.meta.eql(imported.continuity.bundle, bundle)) return error.ContinuityLineageConflict;
     return position;
 }
 
@@ -72,13 +45,25 @@ pub fn prepare(a: std.mem.Allocator, index: anytype) !?View {
         return error.ContinuityDigestMismatch;
     view.bundle = (try c.decodeBorrowed(continuity.Bundle, a, cut.bytes.bytes)).value;
     view.manifest = .{ .task = record.task, .digest = record.result_digest.? };
-    try mapMembers(a, index, &view);
-    view.phase = if (view.metadata == null)
-        .members_pending
-    else if (try lineagesComplete(a, index, view))
-        .materialized
-    else
-        .genesis_pending;
+    var missing = false;
+    for (try continuity.values(a, view.bundle.?)) |value| {
+        if (try continuity.localReport(a, index, view.digest, value.report) == null) {
+            missing = true;
+        } else view.materialized += 1;
+    }
+    if (missing) {
+        view.phase = .values_pending;
+        return view;
+    }
+    var complete = true;
+    for (view.bundle.?.members.items) |item| {
+        if (item != .obligation) continue;
+        const local = try importedLineage(index, item.obligation.lineage, view.digest);
+        if (local != null and index.records[local.?].result != null) {
+            view.materialized += 1;
+        } else complete = false;
+    }
+    view.phase = if (complete) .materialized else .genesis_pending;
     return view;
 }
 
@@ -98,88 +83,4 @@ fn manifest(a: std.mem.Allocator, index: anytype) !?usize {
         found = position;
     }
     return found;
-}
-
-fn mapMembers(a: std.mem.Allocator, index: anytype, view: *View) !void {
-    const bundle = view.bundle.?;
-    const local = try a.alloc(?usize, bundle.members.items.len);
-    const mappings = try a.alloc(t.ContinuityBinding, bundle.members.items.len);
-    view.local = local;
-    for (bundle.members.items, local, mappings, 0..) |item, *slot, *mapping, i| {
-        try view.positions.put(a, item.identity, i);
-        slot.* = try memberRecord(a, index, view.digest, item);
-        const position = slot.* orelse continue;
-        const record = index.records[position];
-        const result = record.result_digest orelse continue;
-        try verifyBindings(index, view, item, record.input.continuity_member);
-        mapping.* = .{
-            .member = item.identity,
-            .local = .{ .task = record.task, .digest = result },
-        };
-        view.members += 1;
-    }
-    if (view.members != bundle.members.items.len) return;
-    view.bindings = mappings;
-    view.metadata = .{
-        .bundle = view.digest,
-        .manifest = view.manifest.?,
-        .source_namespace = bundle.source.namespace,
-        .source_cut = bundle.cut_digest,
-        .members = try continuity.digest(
-            a,
-            c.Vector(t.ContinuityBinding, null),
-            .{ .items = mappings },
-        ),
-    };
-}
-
-fn memberRecord(
-    a: std.mem.Allocator,
-    index: anytype,
-    bundle: t.Digest,
-    item: continuity.Member,
-) !?usize {
-    const operation = try mappedOperation(a, .member, bundle, item.identity);
-    const position = index.operations.get(operation) orelse return null;
-    const record = index.records[position];
-    if (record.input != .continuity_member) return error.InvalidContinuityMember;
-    const input = record.input.continuity_member;
-    if (!std.meta.eql(input.bundle, bundle) or
-        !std.meta.eql(input.envelope.stable_request, item.identity) or
-        !std.meta.eql(try continuity.digest(a, t.ContinuityData, input.data), item.identity))
-        return error.InvalidContinuityMember;
-    if (record.result) |output| {
-        if (output != .continuity_member or
-            !std.meta.eql(output.continuity_member.envelope.stable_request, item.identity))
-            return error.InvalidContinuityMember;
-    }
-    return position;
-}
-
-fn verifyBindings(
-    index: anytype,
-    view: *const View,
-    item: continuity.Member,
-    input: t.ContinuityMember,
-) !void {
-    const dependencies = item.data.dependencies.items;
-    if (input.bindings.items.len != dependencies.len) return error.InvalidContinuityMember;
-    for (input.bindings.items, dependencies) |bound, dependency| {
-        const expected = view.reference(index, dependency) orelse
-            return error.ContinuityBindingMismatch;
-        if (!std.meta.eql(bound.member, dependency) or !std.meta.eql(bound.local, expected))
-            return error.ContinuityBindingMismatch;
-    }
-}
-
-fn lineagesComplete(a: std.mem.Allocator, index: anytype, view: View) !bool {
-    var complete = true;
-    for (try continuity.rootLineages(a, view.bundle.?)) |identity| {
-        const position = try importedLineage(index, identity, view.digest) orelse {
-            complete = false;
-            continue;
-        };
-        if (index.records[position].result == null) complete = false;
-    }
-    return complete;
 }

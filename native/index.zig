@@ -65,8 +65,6 @@ pub const Index = struct {
     operations: std.StringHashMapUnmanaged(usize) = .empty,
     lineages: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
     continuity_import: ?continuity.ImportView = null,
-    imports: []const continuity.Imported = &.{},
-    portable: []const continuity.Portable = &.{},
     transfer_marker: ?usize = null,
 
     pub fn transferred(self: *const Index) bool {
@@ -149,8 +147,7 @@ pub const Index = struct {
         try validateOperations(self, scratch);
         self.transfer_marker = try transfer_marker.inspect(scratch, self);
         self.continuity_import = try continuity.prepareImport(scratch, self);
-        self.imports = try continuity.prepareImports(scratch, self);
-        self.portable = try continuity.preparePortable(scratch, self);
+        try continuity.validateImports(scratch, self);
         try validateTurns(self, cancellations);
         const successors = try stepSuccessors(self);
         for (self.records, 0..) |item, position| {
@@ -490,11 +487,8 @@ fn validateGenesis(record: Record, initial: t.Head) !void {
     if (initial.version != 1 or initial.sequence != 0 or initial.obligation != .self or
         initial.attempt != 0 or initial.superseded != null or
         !std.meta.eql(initial.lineage, input.lineage)) return error.InvalidGenesisHead;
-    const carried = if (input.imported) |imported| imported.carried else null;
-    const predecessor: ?t.Reference = if (carried) |value| value.source else null;
-    if (!std.meta.eql(initial.predecessor, predecessor) or
-        initial.folded_directive_ordinal != 0 or initial.last_directive != null)
-        return error.InvalidGenesisHead;
+    if (initial.predecessor != null or initial.folded_directive_ordinal != 0 or
+        initial.last_directive != null) return error.InvalidGenesisHead;
 }
 
 fn restrict(mode: t.Mode, body: t.DirectiveBody) t.Mode {
@@ -685,7 +679,7 @@ fn validateBatches(self: *Index, step: t.Step, chain: *const Chain) !void {
     const a = self.arena.allocator();
     var sequence = step.previous.told.sequence;
     for (step.batches.items) |copied| {
-        const batch = try selectedBatch(self, step.obligation, copied.reference, chain);
+        const batch = try selectedBatch(self, step.obligation, copied, chain);
         if (!try sameValue(a, t.Batch, batch, copied.value)) return error.CopiedBatchMismatch;
         sequence = try std.math.add(u64, sequence, 1);
         if (batch.sequence != sequence or sequence > step.previous.observed.sequence)
@@ -696,23 +690,30 @@ fn validateBatches(self: *Index, step: t.Step, chain: *const Chain) !void {
 fn selectedBatch(
     self: *Index,
     obligation: t.Id,
-    reference: t.Reference,
+    copied: @FieldType(t.Step, "batches").Child,
     chain: *const Chain,
 ) !t.Batch {
-    const source = self.record(reference.task) orelse return error.MissingBatch;
-    const output = source.result orelse return error.MissingBatch;
-    if (source.result_digest == null or !std.meta.eql(source.result_digest.?, reference.digest))
+    const source = self.record(copied.reference.task) orelse return error.MissingBatch;
+    if (source.result_digest == null or
+        !std.meta.eql(source.result_digest.?, copied.reference.digest))
         return error.BatchReferenceMismatch;
-    if (output == .continuity_member) {
-        const data = try continuity.resolve(self, obligation, reference, .batch);
-        const decoded = try continuity.decode(.batch, self.arena.allocator(), data);
-        return decoded.value;
+    if (!chain.members.contains(self.tasks.get(source.task).?)) return error.UnselectedBatch;
+    switch (source.input) {
+        .genesis => |genesis| {
+            const imported = genesis.imported orelse return error.MissingBatch;
+            const carried = imported.carried orelse return error.MissingBatch;
+            for (carried.batches.items) |batch| {
+                if (batch.sequence == copied.value.sequence) return batch;
+            }
+            return error.MissingBatch;
+        },
+        .step => |step| {
+            if (!std.meta.eql(step.obligation, obligation)) return error.ForeignBatch;
+            const output = source.result orelse return error.MissingBatch;
+            return output.step.batch orelse error.MissingBatch;
+        },
+        else => return error.ForeignBatch,
     }
-    if (output != .step or source.input != .step or
-        !std.meta.eql(source.input.step.obligation, obligation)) return error.ForeignBatch;
-    const position = self.tasks.get(source.task).?;
-    if (!chain.members.contains(position)) return error.UnselectedBatch;
-    return output.step.batch orelse error.MissingBatch;
 }
 
 fn validateFacts(self: *Index, step: t.Step, chain: *const Chain) !void {

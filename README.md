@@ -365,22 +365,17 @@ Exports write only into the configured protected `backup_directory`. Snapshot
 export captures an immutable cut while the original responsibility continues.
 Transfer export durably marks the source namespace as transferred, folds a
 `transfer` directive into a final `transferred` head for every obligation, and
-dispatches no further work there. A bundle carries the live
-application closure and the imported members it still depends on, once; it never
-contains an earlier bundle, so repeated snapshots and transfer chains do not grow
-with prior cuts. Export refuses a namespace whose own import is incomplete, and
-refuses a filename that already exists before it takes a cut or fences the source;
+dispatches no further work there. Export refuses a namespace whose own import is
+incomplete, and refuses a filename that already exists before it takes a cut or
+fences the source;
 existing files are never overwritten. While an admitted `monitor add` has not run,
 snapshot export refuses with `ContinuityGenesisPending` and transfer export keeps
 finalizing. A `monitor add` this build can never run (its task is blocked, or
 pinned to another program, profile, or runtime) is carried by both snapshot and
-transfer bundles as a pending monitor: its admitted request travels as a member,
-and import admits it as a fresh monitor in the destination with the same lineage
+transfer bundles as a pending monitor: its admitted specification and request
+identity travel as an obligation member, and import admits it as a fresh monitor in the destination with the same lineage
 and a head at the import clock. Transfer finalization waits for an admitted
-`cancel` to fold rather than adding a `transfer` behind it. Every reference a
-carried record holds is recorded against the bundle member it names, so a bundle
-re-exported through any number of namespaces still resolves its methods,
-reports and batches.
+`cancel` to fold rather than adding a `transfer` behind it.
 
 Each snapshot export run takes a new cut, except that a run for a NAME whose cut
 is still pending resumes that cut. A namespace has one transfer: after the first
@@ -390,18 +385,37 @@ writes its committed cut under the requested NAME. Every export response reports
 the file is written, it prints that operation; rerun the same export command with
 `--operation OPERATION` to finish writing exactly that cut.
 
-Export and import check that the bundle is closed before reporting success or
-admitting anything: every head, control and turn reference to a batch or method
-report must name exactly one member of that kind listed in its dependencies.
-Otherwise the bundle is refused (`MissingContinuityReference`,
-`AmbiguousContinuityReference` or `UnlistedContinuityReference`). Validation
-indexes members by digest and runs in time linear in the bundle size. An
-exported method report carries the known and possible charges recorded for its
-experiment.
+A bundle is a closed value: a manifest listing the digest of every member,
+followed by the members themselves. Each obligation member carries by value
+everything needed to continue that obligation: its latest selected head, the
+source and comparison reports of its adopted method and the report its method
+disposition names, the batches it has observed but not yet told, its admitted
+controls not yet folded (with the reports an `adopt` names), and its unfinished
+targeted turns. A conversation member carries the latest 128 completed turns and
+the unfinished untargeted turns; report members carry every settled experiment
+report, each with the known and possible charges recorded for its experiment.
+No member names another member or a task of the source namespace, so there is
+nothing to resolve, rebase or close over. Export and import check each member on
+its own (its digest against the manifest, its schema and bounds, and that every
+task reference in it is cleared), in time linear in the bundle size, and refuse
+the bundle otherwise (`ContinuityDigestMismatch`, `AttachedContinuityReference`,
+`InvalidContinuityMethod`). Import creates fresh local records for the carried
+values: one record per distinct report and one genesis per obligation, whose
+head names those new records. Re-exporting an imported namespace produces an
+equivalent bundle that never contains an earlier one, so repeated snapshots and
+transfer chains do not grow with prior cuts.
+
+Carrying values duplicates them: a report adopted by several obligations is
+embedded in each obligation and again as a report member. This first release is a
+single-monitor deployment of one configured repository, so the copies are few; each
+member is bounded by the input bounds of the records it copies (a report's plan
+and report are at most 1 MiB each, a context tail at most 128 turns), and
+`transfer import --bytes-max N` refuses a larger file before admitting anything
+(`Capacity`).
 
 Import requires a fresh target namespace and matching configured resource
 bindings, checked on every import command. The first command admits the bundle's
-manifest; the daemon then materializes its members and lineages in bounded steps,
+manifest; the daemon then materializes its reports and obligations in bounded steps,
 including across a restart, while other control ingress waits. The client sends
 an absolute PATH byte for byte and joins a relative PATH onto its own working
 directory with one separator, without collapsing `.` or `..`, so the daemon opens

@@ -140,10 +140,14 @@ fn importedInput(desired: @FieldType(t.Head, "desired_mode"), asked: bool) t.Gen
     previous.question = if (asked) question else null;
     previous.accounting = .{ .known_calls = 7, .possible_charged_calls = 2 };
     input.clock_ms = 900;
-    input.imported = .{ .carried = .{
-        .source = .{ .task = @splat(8), .digest = @splat(9) },
-        .head = previous,
-    } };
+    input.imported = .{
+        .carried = .{ .head = previous, .batches = .{ .items = &.{} } },
+        .continuity = .{
+            .bundle = @splat(8),
+            .manifest = .{ .task = @splat(8), .digest = @splat(9) },
+            .member = 0,
+        },
+    };
     return input;
 }
 
@@ -164,7 +168,7 @@ test "native genesis import resumes the prior mode and emits a pending prompt ag
         var expected = input.imported.?.carried.?.head;
         expected.obligation = .{ .self = {} };
         expected.sequence = 0;
-        expected.predecessor = input.imported.?.carried.?.source;
+        expected.predecessor = null;
         expected.attempt = 0;
         expected.superseded = null;
         expected.consumed = .{ .items = &.{} };

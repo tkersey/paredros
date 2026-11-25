@@ -258,55 +258,19 @@ pub const Supersession = struct {
     cancellation: ControlReceipt,
     cause: enum { incompatible, unknown, rejected, failed, control },
 };
-pub const ContinuityKind = enum {
-    head,
-    batch,
-    directive,
-    turn,
-    settlement,
-    method_source,
-    method_report,
-    context,
-    genesis,
-};
-pub const ContinuityProvenance = struct {
-    namespace: Digest,
-    build: Digest,
-    task: Id,
-    revision: u64,
-    schema: Name,
-    digest: Digest,
-};
-pub const ContinuityData = struct {
-    version: u32 = 1,
-    lineage: Digest,
-    kind: ContinuityKind,
-    schema: Name,
-    source: ContinuityProvenance,
-    payload: c.Bytes(null),
-    dependencies: c.Vector(Digest, null),
-    references: c.Vector(ContinuityBinding, null),
-};
-pub const ContinuityBinding = struct { member: Digest, local: Reference };
+pub const ReportValue = struct { plan: c.Bytes(1024 * 1024), result: ExperimentResult };
 pub const ContinuityMember = struct {
     envelope: Envelope,
     bundle: Digest,
-    data: ContinuityData,
-    bindings: c.Vector(ContinuityBinding, null),
+    report: ReportValue,
 };
 pub const ContinuityCut = struct {
     envelope: Envelope,
     bundle_digest: Digest,
     bytes: c.Bytes(null),
 };
-pub const ContinuityImport = struct {
-    bundle: Digest,
-    manifest: Reference,
-    source_namespace: Digest,
-    source_cut: Digest,
-    members: Digest,
-};
-pub const CarriedHead = struct { source: Reference, head: Head };
+pub const ContinuityImport = struct { bundle: Digest, manifest: Reference, member: u32 };
+pub const CarriedHead = struct { head: Head, batches: c.Vector(Batch, null) };
 pub const TransferMarker = struct { envelope: Envelope };
 pub const ConfirmationReceipt = struct { envelope: Envelope, task: Id };
 pub const Genesis = struct {
@@ -316,7 +280,7 @@ pub const Genesis = struct {
     clock_ms: i64,
     imported: ?struct {
         carried: ?CarriedHead,
-        continuity: ?ContinuityImport = null,
+        continuity: ContinuityImport,
     },
 };
 pub const Step = struct {
@@ -354,9 +318,9 @@ pub const TurnReplacement = struct {
     owner_snapshot: c.Bytes(null),
 };
 pub const TurnContinuity = struct {
-    member: Reference,
-    original: RevisionReference,
-    source_namespace: Digest,
+    manifest: Reference,
+    member: u32,
+    turn: u32,
     continuation: enum { portable_import },
 };
 pub const Turn = struct {

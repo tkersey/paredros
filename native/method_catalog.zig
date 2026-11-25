@@ -4,7 +4,6 @@ const t = @import("application_types");
 const e = @import("../app/experiment_contract.zig");
 const idx = @import("index.zig");
 const method = @import("method_external.zig");
-const continuity = @import("continuity.zig");
 
 pub fn hash(bytes: []const u8) t.Digest {
     var result: t.Digest = undefined;
@@ -12,37 +11,39 @@ pub fn hash(bytes: []const u8) t.Digest {
     return result;
 }
 
+pub fn reportOf(record: idx.Record) !?t.ReportValue {
+    switch (record.input) {
+        .continuity_member => |input| return if (record.result != null) input.report else null,
+        .experiment => |input| {
+            const output = record.result orelse return null;
+            const result = output.experiment;
+            if (!std.meta.eql(input.campaign, result.campaign) or input.attempt != result.attempt)
+                return error.InvalidExperiment;
+            return .{ .plan = input.plan, .result = result };
+        },
+        else => return null,
+    }
+}
+
+pub fn reportValue(index: *const idx.Index, reference: t.Reference) !t.ReportValue {
+    const record = index.record(reference.task) orelse return error.MissingExperiment;
+    if (record.result_digest == null or !std.meta.eql(record.result_digest.?, reference.digest))
+        return error.InvalidExperiment;
+    return try reportOf(record.*) orelse error.InvalidExperiment;
+}
+
 pub fn report(
     a: std.mem.Allocator,
     index: *const idx.Index,
     reference: t.Reference,
 ) !c.Decoded(e.Report) {
-    const record = index.record(reference.task) orelse return error.MissingExperiment;
-    if (record.input == .continuity_member) {
-        const data = try continuity.resolve(index, null, reference, .method_report);
-        var fact = try continuity.decode(.method_report, a, data);
-        defer fact.deinit();
-        return decodedReport(a, fact.value.input, fact.value.result);
-    }
-    if (record.input != .experiment or record.result == null or
-        record.result.? != .experiment or record.result_digest == null or
-        !std.meta.eql(record.result_digest.?, reference.digest)) return error.InvalidExperiment;
-    return decodedReport(a, record.input.experiment, record.result.?.experiment);
-}
-
-fn decodedReport(
-    a: std.mem.Allocator,
-    input: t.Experiment,
-    output: t.ExperimentResult,
-) !c.Decoded(e.Report) {
-    if (!std.meta.eql(input.campaign, output.campaign) or input.attempt != output.attempt)
-        return error.InvalidExperiment;
-    var decoded = try c.decodeOwned(e.Report, a, output.report.bytes);
+    const value = try reportValue(index, reference);
+    var decoded = try c.decodeOwned(e.Report, a, value.result.report.bytes);
     errdefer decoded.deinit();
     const identity = decoded.value.identity;
-    if (decoded.value.version != 1 or !std.meta.eql(input.campaign, identity.campaign) or
-        input.attempt != identity.attempt or
-        !std.meta.eql(hash(input.plan.bytes), identity.plan_digest))
+    if (decoded.value.version != 1 or !std.meta.eql(value.result.campaign, identity.campaign) or
+        value.result.attempt != identity.attempt or
+        !std.meta.eql(hash(value.plan.bytes), identity.plan_digest))
         return error.InvalidExperimentReport;
     return decoded;
 }
@@ -86,14 +87,10 @@ pub fn qualified(
     if (value.kind != .comparison or value.rejection != null or value.cases.items.len == 0 or
         !std.meta.eql(selected.applicability, value.identity.plan_digest))
         return error.InvalidMethodQualification;
+    const local = index.record(selected.report.task).?.input == .experiment;
     var found: ?usize = null;
     for (value.candidates.items, 0..) |candidate, i| {
-        const candidate_source = if (index.record(selected.report.task).?.input ==
-            .continuity_member)
-            try continuity.rebaseFrom(index, selected.report, .method_report, candidate.source)
-        else
-            candidate.source;
-        if (!std.meta.eql(candidate_source, selected.source) or
+        if ((local and !std.meta.eql(candidate.source, selected.source)) or
             !std.meta.eql(candidate.source_digest, selected.source_digest) or
             !std.meta.eql(candidate.contract_digest, selected.contract_digest)) continue;
         if (found != null or candidate.disposition == .rejected or

@@ -184,44 +184,13 @@ fn offers(a: std.mem.Allocator, head: t.Head) ![]const @FieldType(t.Proposal, "b
     });
 }
 
-const ImportedTurn = struct {
-    member: continuity.Member,
-    local: t.Reference,
-    value: continuity.TurnFact,
-    source_snapshot: retained.Snapshot,
-};
-
-fn importedTurns(a: std.mem.Allocator, index: *const idx.Index) ![]ImportedTurn {
-    var result: std.ArrayList(ImportedTurn) = .empty;
-    var seen: std.AutoHashMapUnmanaged(t.Digest, void) = .empty;
-    for (index.portable) |imported| {
-        const catalog = try a.create(continuity.Catalog);
-        catalog.* = try continuity.Catalog.init(a, imported.bundle);
-        for (imported.bundle.members.items) |member| {
-            if (member.data.kind != .turn or seen.contains(member.identity)) continue;
-            try seen.put(a, member.identity, {});
-            const value = try continuity.decode(.turn, a, member.data);
-            if (value.value.result == null) continue;
-            try result.append(a, .{
-                .member = member,
-                .local = try continuity.binding(imported.bindings, member.identity),
-                .value = value.value,
-                .source_snapshot = (try @import("continuity_turn.zig").sourceFact(
-                    a,
-                    catalog,
-                    member,
-                )).snapshot,
-            });
-        }
+fn importedTurns(index: *const idx.Index) []const continuity.Turn {
+    const view = index.continuity_import orelse return &.{};
+    const bundle = view.bundle orelse return &.{};
+    for (bundle.members.items) |item| {
+        if (item == .conversation) return item.conversation.tail.items;
     }
-    std.mem.sort(ImportedTurn, result.items, {}, struct {
-        fn less(_: void, left: ImportedTurn, right: ImportedTurn) bool {
-            if (left.value.input.ordinal != right.value.input.ordinal)
-                return left.value.input.ordinal > right.value.input.ordinal;
-            return std.mem.order(u8, &left.member.identity, &right.member.identity) == .lt;
-        }
-    }.less);
-    return result.toOwnedSlice(a);
+    return &.{};
 }
 
 fn appendImportedTurns(
@@ -229,30 +198,24 @@ fn appendImportedTurns(
     index: *const idx.Index,
     remaining: usize,
 ) !void {
-    const turns = try importedTurns(builder.a, index);
-    builder.omitted = try std.math.add(
-        u64,
-        builder.omitted,
-        turns.len - @min(turns.len, remaining),
-    );
-    for (turns[0..@min(turns.len, remaining)]) |turn| {
-        const record = index.record(turn.local.task) orelse return error.MissingContinuityMember;
-        try builder.append(record.*, .{
+    const turns = importedTurns(index);
+    const shown = @min(turns.len, remaining);
+    builder.omitted = try std.math.add(u64, builder.omitted, turns.len - shown);
+    if (shown == 0) return;
+    const record = index.records[index.continuity_import.?.position];
+    for (0..shown) |offset| {
+        const turn = turns[turns.len - 1 - offset];
+        try builder.append(record, .{
             .kind = "imported_prior_turn",
             .authority = "historical_context_not_current_instruction",
-            .source_namespace = std.fmt.bytesToHex(turn.member.data.source.namespace, .lower),
-            .source_task = std.fmt.bytesToHex(turn.member.data.source.task, .lower),
-            .source_revision = turn.member.data.source.revision,
-            .source_digest = std.fmt.bytesToHex(turn.member.data.source.digest, .lower),
-            .source_ordinal = turn.value.input.ordinal,
-            .known_accounting = turn.source_snapshot.accounting,
-            .unknown_calls = turn.source_snapshot.unknown_calls.items,
-            .operator_text = turn.value.input.text.bytes,
-            .frozen_context = turn.value.input.context.bytes,
-            .original_context_references = turn.value.input.context_references.items,
-            .reply = turn.value.result.?.reply.bytes,
+            .source_namespace = std.fmt.bytesToHex(turn.namespace, .lower),
+            .source_ordinal = turn.input.ordinal,
+            .known_accounting = turn.accounting,
+            .operator_text = turn.input.text.bytes,
+            .frozen_context = turn.input.context.bytes,
+            .reply = turn.result.?.reply.bytes,
             .reply_authority = "assistant_output_unverified",
-            .proposals = turn.value.result.?.proposals.items,
+            .proposals = turn.result.?.proposals.items,
         });
     }
 }

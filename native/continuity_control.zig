@@ -250,7 +250,7 @@ fn storedBindings(
     const stored = index.records[view.position].input.continuity_cut.bytes.bytes;
     var bundle = try c.decodeBorrowed(transfer.Bundle, a, stored);
     defer bundle.deinit();
-    try transfer.validateBindings(a, bundle.value, configuration.bindings(config));
+    try transfer.validateBindings(bundle.value, configuration.bindings(config));
 }
 
 fn beginImport(

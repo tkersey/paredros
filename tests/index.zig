@@ -590,15 +590,17 @@ test "index rejects an imported head without a verified continuity manifest" {
     defer arena.deinit();
     const a = arena.allocator();
     var input = fixture.genesis();
-    input.imported = .{ .carried = .{
-        .source = .{ .task = @splat(9), .digest = @splat(9) },
-        .head = head(),
-    } };
-    var imported = head();
-    imported.predecessor = input.imported.?.carried.?.source;
-    const initial = try row(a, 1, .{ .genesis = input }, .{ .genesis = imported });
+    input.imported = .{
+        .carried = .{ .head = head(), .batches = .{ .items = &.{} } },
+        .continuity = .{
+            .bundle = @splat(9),
+            .manifest = .{ .task = @splat(9), .digest = @splat(9) },
+            .member = 0,
+        },
+    };
+    const initial = try row(a, 1, .{ .genesis = input }, .{ .genesis = head() });
     try std.testing.expectError(
-        error.UnprovenContinuityImport,
+        error.MissingContinuityManifest,
         idx.Index.init(Native, std.testing.allocator, &.{initial}, &.{}),
     );
 }
