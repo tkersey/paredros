@@ -28,8 +28,8 @@ pre-change `54ea153` plus the daemon-loop measurement), SHA-256
 `d12558cd0c284bad4fa46df6763185970519412163fa650e3ce41ff2415581d2`; the
 candidate from `48728a0`, SHA-256
 `02d9bbf32cc6b9aaeecf23a04f898e5cf8b8b5a9fede6ae53906e982fb5e2b4c`. Later
-commits change only the verification-only comparison, the measurement controller
-and documentation.
+commits change only the verification-only comparison, the measurement controller,
+tests and documentation.
 
 The daemon-loop workload seeds a history before the measured monitor: one genesis,
 one cancel directive folded by one step, and pause directives on that cancelled
