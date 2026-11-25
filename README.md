@@ -455,6 +455,17 @@ terminates the current worker under the native owner, and leaves unfinished work
 for the next `serve` to resume or replace. Namespace locking permits one local owner; it cannot fence
 a copied namespace on another machine.
 
+`serve` builds the driver's index of operations, head chains, directives and
+eligible steps once at startup by reading every retained task. It then keeps that
+index current in memory: each admission, cancellation and resume the daemon makes
+is applied to it, and each later use re-reads only those tasks and the tasks still
+running or awaiting cleanup, reloading a task only when its revision moved. The
+index is never stored; a restart builds it again from the namespace. With
+`PAREDROS_VERIFY_INDEX=1` in its environment, `serve` compares the maintained index
+with a full rebuild before every use and fails that use with `IndexDivergence` on
+any difference. Each use then costs a full rebuild, so the switch is for
+qualification and diagnosis; test builds always verify.
+
 Snapshots contain source and conversation data. Keep the original namespace as
 the historical archive; continuity files preserve the live application closure,
 not an unlimited native execution archive.
