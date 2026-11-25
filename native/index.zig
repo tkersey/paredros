@@ -323,6 +323,7 @@ fn validateOperations(self: *Index, a: std.mem.Allocator) !void {
             return error.UnsupportedEnvelope;
         const entry = try self.operations.getOrPut(a, envelope.operation.bytes);
         if (entry.found_existing) return error.OperationConflict;
+        entry.key_ptr.* = try a.dupe(u8, envelope.operation.bytes);
         entry.value_ptr.* = position;
         if (item.input == .genesis) try addLineage(self, a, position);
     }
