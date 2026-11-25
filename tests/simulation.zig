@@ -143,6 +143,7 @@ const Node = struct {
     ledger: std.StringHashMapUnmanaged(Entry) = .empty,
     operations: std.ArrayList([]const u8) = .empty,
     turns: std.ArrayList(t.Id) = .empty,
+    confirmed: std.ArrayList([]const u8) = .empty,
     listed: std.AutoHashMapUnmanaged(struct { t.Id, u64 }, t.Digest) = .empty,
     expectations: std.ArrayList(Expectation) = .empty,
     import_args: ?[]const []const u8 = null,
@@ -186,6 +187,7 @@ pub const Report = struct {
     hash: t.Digest,
     calls: world_module.Calls,
     hops: u32,
+    injected: u64,
     violation: ?oracle.Violation,
     at: usize,
 };
@@ -206,11 +208,21 @@ const Sim = struct {
     pending_export: ?ExportState = null,
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
     profile: Profile = .{},
+    faults: std.Random.DefaultPrng = .init(0),
+    injected_faults: u64 = 0,
     records: usize = 0,
 
     fn now(context: *anyopaque) !i64 {
         const self: *Sim = @ptrCast(@alignCast(context));
         return self.wall_ms;
+    }
+
+    fn injected(context: *anyopaque, _: @import("../native/driver.zig").Key) bool {
+        const self: *Sim = @ptrCast(@alignCast(context));
+        if (self.world.calm) return false;
+        if (self.faults.random().uintLessThan(u8, 100) >= 4) return false;
+        self.injected_faults += 1;
+        return true;
     }
 
     fn allocator(self: *Sim) std.mem.Allocator {
@@ -315,6 +327,7 @@ fn openNode(sim: *Sim, label: u8) !*Node {
         .bindings = configuration.bindings(value.config),
     };
     verifyIndex(&value.driver);
+    value.driver.injection = .{ .context = sim, .fails = Sim.injected };
     try sim.nodes.append(sim.allocator(), value);
     try startDaemon(sim, value);
     return value;
@@ -662,6 +675,7 @@ fn ask(sim: *Sim, value: *Node) !void {
 }
 
 fn confirm(sim: *Sim, value: *Node) !void {
+    if (value.confirmed.items.len != 0 and sim.chance(40)) return reconfirm(sim, value);
     if (value.turns.items.len == 0) return;
     const turn = value.turns.items[sim.below(value.turns.items.len)];
     const shown = try dispatchBytes(sim, value, (try encodeArgs(sim, &.{
@@ -672,7 +686,18 @@ fn confirm(sim: *Sim, value: *Node) !void {
     if (items.len == 0) return;
     const identity = try native.json.text(items[sim.below(items.len)].object.get("identity").?);
     const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
-    _ = try mutate(sim, value, .confirm, args);
+    const response = (try mutate(sim, value, .confirm, args)) orelse return;
+    if (responseTask(response) != null)
+        try value.confirmed.append(sim.allocator(), try sim.allocator().dupe(u8, identity));
+}
+
+fn reconfirm(sim: *Sim, value: *Node) !void {
+    const identity = value.confirmed.items[sim.below(value.confirmed.items.len)];
+    const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
+    const response = (try mutate(sim, value, .confirm, args)) orelse return;
+    if (responseTask(response) == null) return;
+    const operation = args[args.len - 1];
+    try replayChanged(sim, value, operation, value.ledger.get(operation).?);
 }
 
 fn answer(sim: *Sim, value: *Node) !void {
@@ -684,6 +709,17 @@ fn answer(sim: *Sim, value: *Node) !void {
             try open.append(sim.allocator(), obligation.task);
     if (open.items.len == 0) return;
     const target = open.items[sim.below(open.items.len)];
+    if (sim.chance(50)) {
+        const revision = index.head(index.obligation(target).?).specification.revision;
+        const id = try idText(sim, target);
+        const wording = "Amended while a question is open.";
+        const fields = [_][]const u8{ "monitor", "amend", id, try number(sim, revision) };
+        const args = try std.mem.concat(sim.allocator(), []const u8, &.{
+            &fields, &.{ "--wording", wording },
+        });
+        const amend = try withOperation(sim, args, "amend");
+        _ = try mutate(sim, value, .directive, amend);
+    }
     const page = try messagePage(sim, value, &index, target, null, 64);
     for (page.messages.items) |item| for (item.choices.items) |choice| {
         const line = (choice.command orelse continue).bytes;
@@ -734,6 +770,10 @@ fn replay(sim: *Sim, value: *Node) !void {
     const entry = value.ledger.get(operation).?;
     if (entry.kind == .transfer) return;
     if (sim.chance(70)) return replayIdentical(sim, value, operation, entry);
+    return replayChanged(sim, value, operation, entry);
+}
+
+fn replayChanged(sim: *Sim, value: *Node, operation: []const u8, entry: Entry) !void {
     var index = try rebuild(sim, value);
     defer index.deinit();
     const target = pickObligation(sim, &index) orelse return;
@@ -821,6 +861,13 @@ fn regressClock(sim: *Sim) !void {
     const delta = sim.random().intRangeAtMost(i64, 60_000, 3_600_000);
     sim.wall_ms -= delta;
     try sim.note("regress", "-{d} ms -> {d}", .{ delta, sim.wall_ms });
+}
+
+fn earlyRegression(sim: *Sim, value: *Node) !void {
+    try monitorAdd(sim, value);
+    try polls(sim, value, sim.random().intRangeAtMost(usize, 4, 12));
+    try regressClock(sim);
+    try polls(sim, value, sim.random().intRangeAtMost(usize, 8, 24));
 }
 
 fn jumpClock(sim: *Sim) !void {
@@ -989,7 +1036,8 @@ fn act(sim: *Sim) !void {
         0...28 => try polls(sim, value, sim.random().intRangeAtMost(usize, 2, 24)),
         29...38 => try advanceTime(sim),
         39...41 => try regressClock(sim),
-        42...43 => try jumpClock(sim),
+        42 => try jumpClock(sim),
+        43 => try earlyRegression(sim, value),
         44...49 => try monitorAdd(sim, value),
         50...67 => try directive(sim, value),
         68...72 => try ask(sim, value),
@@ -1221,7 +1269,7 @@ fn comparePending(
     }
 }
 
-fn nextInstant(sim: *Sim, index: *const idx.Index) i64 {
+fn nextInstant(sim: *Sim, value: *Node, index: *const idx.Index) i64 {
     var best: i64 = sim.wall_ms + 60_000;
     for (index.obligations) |*obligation| {
         const current = index.head(obligation);
@@ -1229,9 +1277,10 @@ fn nextInstant(sim: *Sim, index: *const idx.Index) i64 {
             const instant = @field(current.schedule, name);
             if (instant > sim.wall_ms and instant < best) best = instant;
         }
-        if (obligation.fault) |fault| if (fault.retry_ms > sim.wall_ms and fault.retry_ms < best) {
-            best = fault.retry_ms;
-        };
+    }
+    var faults = value.driver.faults.items.valueIterator();
+    while (faults.next()) |fault| {
+        if (fault.retry_ms > sim.wall_ms and fault.retry_ms < best) best = fault.retry_ms;
     }
     return best;
 }
@@ -1260,7 +1309,7 @@ fn quiesce(sim: *Sim) !void {
             return;
         }
         var index = try rebuild(sim, sim.node());
-        sim.wall_ms = @max(sim.wall_ms + 1, nextInstant(sim, &index));
+        sim.wall_ms = @max(sim.wall_ms + 1, nextInstant(sim, sim.node(), &index));
         index.deinit();
     }
     if (!try rested(sim, sim.node(), true)) return error.Violation;
@@ -1343,6 +1392,7 @@ pub fn run(seed: u64, events: usize) !Report {
         .arena = .init(gpa),
         .seed = seed,
         .prng = .init(seed),
+        .faults = .init(seed ^ 0x5bd1e995),
         .io = Entropy.io(seed),
     };
     defer sim.arena.deinit();
@@ -1362,6 +1412,7 @@ pub fn run(seed: u64, events: usize) !Report {
         .hash = sim.hasher.finalResult(),
         .calls = sim.world.calls,
         .hops = @intCast(sim.nodes.items.len - 1),
+        .injected = sim.injected_faults,
         .violation = if (sim.violation) |found| .{
             .invariant = try gpa.dupe(u8, found.invariant),
             .detail = try gpa.dupe(u8, found.detail),
@@ -1461,10 +1512,11 @@ pub fn free(report: Report) void {
     }
 }
 
-const pinned: []const u64 = &.{};
+const Pin = struct { seed: u64, events: usize };
+const pinned: []const Pin = &.{};
 
-fn pinnedSeed(position: usize) u64 {
-    for (pinned, 0..) |seed, at| if (at == position) return seed;
+fn pinnedSeed(position: usize) Pin {
+    for (pinned, 0..) |pin, at| if (at == position) return pin;
     unreachable;
 }
 
@@ -1493,27 +1545,33 @@ test "simulation holds every invariant across the selected seeds" {
     const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
     var calls: world_module.Calls = .{};
     var hops: u64 = 0;
+    var injected: u64 = 0;
     const seeds = setting("PAREDROS_SIMULATION_SEEDS", options.seeds);
     const first = setting("PAREDROS_SIMULATION_FIRST", options.first);
     const count = (if (first == options.first) pinned.len else 0) + seeds;
     const pins = count - seeds;
     for (0..count) |position| {
-        const seed = if (position < pins) pinnedSeed(position) else first + position - pins;
+        const pin: Pin = if (position < pins)
+            pinnedSeed(position)
+        else
+            .{ .seed = first + position - pins, .events = events };
+        const seed = pin.seed;
         const begun = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
-        const report = try expectClean(seed, events);
+        const report = try expectClean(seed, pin.events);
         if (options.progress) std.debug.print("seed {d}: {d} ms, {d} hops\n", .{
             seed, std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - begun, report.hops,
         });
         calls.github += report.calls.github;
         calls.model += report.calls.model;
         calls.faults += report.calls.faults;
+        injected += report.injected;
         hops += report.hops;
         free(report);
     }
     const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
     std.debug.print("simulation: {d} seeds x {d} events in {d} ms; github {d}, model {d}, " ++
-        "provider faults {d}, hops {d}\n", .{
-        count, events, elapsed, calls.github, calls.model, calls.faults, hops,
+        "provider faults {d}, injected faults {d}, hops {d}\n", .{
+        count, events, elapsed, calls.github, calls.model, calls.faults, injected, hops,
     });
 }
 

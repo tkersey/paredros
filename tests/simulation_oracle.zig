@@ -268,7 +268,8 @@ fn answered(check: Check, previous: t.Head, dispositions: []const t.DirectiveDis
                 }
                 return;
             },
-            .amend, .cancel, .transfer, .adopt, .revert => return,
+            .amend => |amend| if (amend.repository_route != null) return,
+            .cancel, .transfer, .adopt, .revert => return,
             else => {},
         }
     }
@@ -342,8 +343,19 @@ fn rebased(
     next: t.Head,
     dispositions: []const t.DirectiveDisposition,
 ) !void {
-    if (!regressed(previous, next) or !step.fold_only or step.supersession != null) return;
-    if (dispositions.len != 0) return;
+    if (!regressed(previous, next)) return;
+    if (!step.fold_only and next.phase == .render) {
+        const expected = schedule.rebased(
+            previous.schedule.provider_not_before_ms,
+            previous.clock_ms,
+            next.clock_ms,
+        ) catch return check.fail("I6", "rebase overflow", .{});
+        if (next.schedule.provider_not_before_ms != expected)
+            return check.fail("I6", "render head {d} provider deadline {d}, remaining gives {d}", .{
+                next.sequence, next.schedule.provider_not_before_ms, expected,
+            });
+    }
+    if (!step.fold_only or step.supersession != null or dispositions.len != 0) return;
     inline for (@typeInfo(t.Schedule).@"struct".field_names) |name| {
         const expected = schedule.rebased(
             @field(previous.schedule, name),
