@@ -123,20 +123,20 @@ pub const transfer_export: Table(Export, ExportEvent) = .{
 pub const Import = enum {
     absent,
     manifest_pending,
-    members_pending,
+    values_pending,
     genesis_pending,
     materialized,
 };
-pub const ImportEvent = enum { request, member, genesis, restart };
+pub const ImportEvent = enum { request, value, genesis, restart };
 pub const continuity_import: Table(Import, ImportEvent) = .{
     .resting = &.{ .absent, .materialized },
-    .ordinary = &.{ .request, .member, .genesis },
+    .ordinary = &.{ .request, .value, .genesis },
     .transitions = &.{
         .{ .from = .absent, .on = .request, .to = .manifest_pending },
-        .{ .from = .manifest_pending, .on = .request, .to = .members_pending },
-        .{ .from = .members_pending, .on = .member, .to = .genesis_pending },
-        .{ .from = .members_pending, .on = .request, .to = .members_pending },
-        .{ .from = .members_pending, .on = .restart, .to = .members_pending },
+        .{ .from = .manifest_pending, .on = .request, .to = .values_pending },
+        .{ .from = .values_pending, .on = .value, .to = .genesis_pending },
+        .{ .from = .values_pending, .on = .request, .to = .values_pending },
+        .{ .from = .values_pending, .on = .restart, .to = .values_pending },
         .{ .from = .genesis_pending, .on = .genesis, .to = .materialized },
         .{ .from = .genesis_pending, .on = .request, .to = .genesis_pending },
         .{ .from = .genesis_pending, .on = .restart, .to = .genesis_pending },

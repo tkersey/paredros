@@ -400,6 +400,12 @@ fn chargePoll(sim: *Sim, value: *Node, from: Sample) !void {
     entry.value_ptr.count += 1;
     entry.value_ptr.wall_ns += to.wall_ns - from.wall_ns;
     entry.value_ptr.cpu_us += to.cpu_us - from.cpu_us;
+    std.debug.print("poll {s} records {d} wall_us {d} cpu_us {d}\n", .{
+        kind,
+        index.records.len,
+        @divTrunc(to.wall_ns - from.wall_ns, std.time.ns_per_us),
+        to.cpu_us - from.cpu_us,
+    });
 }
 
 fn stopDaemon(sim: *Sim, value: *Node, mid_dispatch: bool) !void {
@@ -801,7 +807,7 @@ fn noncanonical(sim: *Sim, value: *Node) !void {
 
 fn advanceTime(sim: *Sim) !void {
     const roll = sim.below(100);
-    const delta: i64 = if (roll < 50)
+    const delta: i64 = if (roll < 35)
         sim.random().intRangeAtMost(i64, 1_000, 60_000)
     else if (roll < 85)
         sim.random().intRangeAtMost(i64, 60_000, 1_800_000)
@@ -935,6 +941,7 @@ fn hop(sim: *Sim, source: *Node, name: []const u8, carried: []Expectation, snaps
     var operations = source.ledger.iterator();
     while (operations.next()) |item| {
         const lineage = item.value_ptr.lineage orelse continue;
+        if (!carries(carried, lineage)) continue;
         try destination.ledger.put(sim.allocator(), item.key_ptr.*, .{
             .bytes = item.value_ptr.bytes,
             .kind = .monitor_add,
@@ -960,6 +967,11 @@ fn importing(sim: *Sim, value: *Node) !bool {
     return view.phase != .materialized;
 }
 
+fn carries(carried: []const Expectation, lineage: t.Digest) bool {
+    for (carried) |expected| if (std.meta.eql(expected.lineage, lineage)) return true;
+    return false;
+}
+
 fn importContinue(sim: *Sim, value: *Node) !void {
     const args = value.import_args orelse return;
     var index = try rebuild(sim, value);
@@ -974,7 +986,7 @@ fn act(sim: *Sim) !void {
     const value = sim.node();
     const roll = sim.below(100);
     switch (roll) {
-        0...28 => try polls(sim, value, sim.random().intRangeAtMost(usize, 1, 6)),
+        0...28 => try polls(sim, value, sim.random().intRangeAtMost(usize, 2, 24)),
         29...38 => try advanceTime(sim),
         39...41 => try regressClock(sim),
         42...43 => try jumpClock(sim),
