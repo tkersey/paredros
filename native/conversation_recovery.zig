@@ -13,6 +13,8 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) ![]t.Id {
     var admitted: std.ArrayList(t.Id) = .empty;
     errdefer admitted.deinit(a);
     for (indexed.index.records) |record| {
+        if (record.input == .turn and !recovery_status.recoverableTurn(record))
+            driver.settled(.{ .item = record.task, .work = .turn });
         if (!recovery_status.recoverableTurn(record)) continue;
         if (admitted.items.len == limit) break;
         const outcome = try driver.guarded(

@@ -10,7 +10,11 @@ pub fn advance(driver: anytype, a: std.mem.Allocator, limit: u32) !u32 {
     var resumed: u32 = 0;
     for (indexed.index.records) |record| {
         if (record.superseded or record.result != null or
-            record.input == .step or record.input == .turn) continue;
+            record.input == .step or record.input == .turn)
+        {
+            driver.settled(.{ .item = record.task, .work = .retained });
+            continue;
+        }
         if (resumed == limit) break;
         const outcome = try driver.guarded(
             .{ .item = record.task, .work = .retained },

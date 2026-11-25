@@ -85,6 +85,10 @@ pub fn Driver(comptime Types: type) type {
         page_limit: u32 = 128,
         attached: bool = false,
         faults: Faults = .{},
+        injection: ?struct {
+            context: *anyopaque,
+            fails: *const fn (*anyopaque, Key) bool,
+        } = null,
         after_rebuild: ?struct {
             context: *anyopaque,
             observe: *const fn (*anyopaque, std.mem.Allocator, *const idx.Index) anyerror!void,
@@ -271,12 +275,20 @@ pub fn Driver(comptime Types: type) type {
         ) Fatal!?T {
             const now_ms = self.clock.now(self.clock.context) catch return error.ClockOutOfRange;
             if (!self.faults.ready(key, now_ms)) return null;
+            if (self.injection) |hook| if (hook.fails(hook.context, key)) {
+                try self.faults.record(key, "InjectedFault", now_ms);
+                return null;
+            };
             const result: T = @call(.auto, work, args) catch |err| {
                 try self.faults.record(key, try split(err), now_ms);
                 return null;
             };
             _ = self.faults.items.remove(key);
             return result;
+        }
+
+        pub fn settled(self: *Self, key: Key) void {
+            _ = self.faults.items.remove(key);
         }
 
         pub fn recoverTurns(self: *Self, a: std.mem.Allocator, limit: u32) ![]t.Id {
