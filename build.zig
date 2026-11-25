@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const partition = b.option(
         NativePartition,
         "native-partition",
-        "Select a continuity, transitions or simulation partition",
+        "Select a continuity, transitions, providers or simulation partition",
     );
     if (partition != null and !native_tests)
         std.debug.panic("native-partition requires native-tests", .{});
@@ -192,12 +192,13 @@ fn nativeTests(
             std.debug.panic("native-partition cannot be combined with test-filter", .{});
         const single = if (selected) |groups| groups.len == 1 else false;
         const partitioned = single and switch (selected.?[0]) {
-            .continuity, .transitions => @backingInt(partition.?) < 3,
+            .continuity, .transitions, .providers => @backingInt(partition.?) < 3,
             .simulation => true,
             else => false,
         };
         if (!partitioned) std.debug.panic(
-            "native-partition requires one continuity, transitions or simulation native-group",
+            "native-partition requires one continuity, transitions, providers or " ++
+                "simulation native-group",
             .{},
         );
     }
@@ -308,6 +309,30 @@ fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []cons
                 "tests.native_revision.test.",
                 "tests.revision.test.",
                 "tests.native_genesis.test.",
+                "tests.contracts.test.",
+            },
+            .fourth, .fifth => unreachable,
+        },
+        .providers => switch (partition) {
+            .first => &.{
+                "native retained snapshot freezes",
+                "native retained load refuses",
+                "native retained snapshot counts terminal",
+                "native retained snapshot authenticates",
+                "native retained snapshot pages",
+                "native retained snapshot serialization",
+                "native retained snapshot evidence copy",
+                "tests.native_genesis.test.",
+            },
+            .second => &.{
+                "native retained snapshot counts capture usage",
+                "native retained snapshot keeps partial usage",
+                "native retained snapshot rejects projected usage",
+                "tests.native_model.test.",
+            },
+            .third => &.{
+                "tests.native_github.test.",
+                "tests.github_external.test.",
                 "tests.contracts.test.",
             },
             .fourth, .fifth => unreachable,

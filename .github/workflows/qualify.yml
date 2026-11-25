@@ -74,15 +74,39 @@ jobs:
           path: ${{ runner.temp }}/${{ matrix.lane }}.tar
           if-no-files-found: error
           retention-days: 1
-  build-providers:
+  build-providers-first:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       matrix:
         include:
-          - lane: providers
-            groups: providers
+          - lane: providers-first
+            groups: providers-first
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-providers-second:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - lane: providers-second
+            groups: providers-second
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-providers-third:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - lane: providers-third
+            groups: providers-third
     env:
       ZIG_DEBUG_CMD: '1'
     steps: *build-steps
@@ -142,16 +166,38 @@ jobs:
       - name: Show run logs
         if: ${{ !success() }}
         run: tail -n 40 zig-out/qualification/run-*/*.log
-  run-providers:
+  run-providers-first:
     name: Run / ${{ matrix.lane }} / linux-x86_64
-    needs: build-providers
+    needs: build-providers-first
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       matrix:
         include:
-          - lane: providers
-            groups: providers
+          - lane: providers-first
+            groups: providers-first
+    steps: *run-steps
+  run-providers-second:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers-second
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers-second
+            groups: providers-second
+    steps: *run-steps
+  run-providers-third:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers-third
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers-third
+            groups: providers-third
     steps: *run-steps
   run-product:
     name: Run / ${{ matrix.lane }} / linux-x86_64
@@ -206,8 +252,9 @@ jobs:
           zig build qualify -- --group simulation --budget-seconds 600
   native:
     name: native
-    needs: [tiger-style, simulation, build-source, build-providers, build-product, build-crash, run-source,
-      run-providers, run-product, run-crash]
+    needs: [tiger-style, simulation, build-source, build-providers-first, build-providers-second,
+      build-providers-third, build-product, build-crash, run-source, run-providers-first, run-providers-second,
+      run-providers-third, run-product, run-crash]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
