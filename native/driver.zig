@@ -117,7 +117,8 @@ pub fn Driver(comptime Types: type) type {
                 return error.CorruptState;
             };
             errdefer index.deinit();
-            for (index.obligations) |*obligation| obligation.fault = self.faults.latest(obligation.task);
+            for (index.obligations) |*obligation|
+                obligation.fault = self.faults.latest(obligation.task);
             if (self.after_rebuild) |observer| {
                 self.after_rebuild = null;
                 try observer.observe(observer.context, a, &index);
@@ -387,7 +388,8 @@ pub fn needsStep(index: *const idx.Index, obligation: *const idx.Obligation, clo
     }
     if (!obligation.ordinaryDispatch()) return false;
     const schedule = head.schedule;
-    const scheduled = clock_ms >= schedule.next_due_ms and clock_ms >= schedule.source_not_before_ms;
+    const scheduled = clock_ms >= schedule.next_due_ms and
+        clock_ms >= schedule.source_not_before_ms;
     if ((head.check_requested or scheduled) and clock_ms >= schedule.provider_not_before_ms)
         return true;
     return head.observed.sequence > head.told.sequence and

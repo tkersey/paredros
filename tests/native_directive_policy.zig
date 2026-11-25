@@ -115,9 +115,10 @@ test "native directive policy composes modes coalesced checks and refuses final 
     var expected = selected(head(), again);
     expected.mode = .paused;
     expected.desired_mode = .paused;
-    expected.schedule.next_due_ms = expected.clock_ms;
+    expected.check_requested = true;
     try std.testing.expectEqualDeep(expected, paused.head);
-    for (0..3) |i| try expectApplied(paused, i);
+    try expectApplied(paused, 0);
+    for (1..3) |i| try std.testing.expect(paused.dispositions.items[i].outcome == .requested);
     var stopped = head();
     stopped.mode = .paused;
     stopped.desired_mode = .paused;
@@ -135,7 +136,7 @@ test "native directive policy composes modes coalesced checks and refuses final 
     expected.mode = .cancelled;
     expected.desired_mode = .cancelled;
     try std.testing.expectEqualDeep(expected, final.head);
-    for (1..3) |i| try expectRejected(final, i, "final_head");
+    for (1..3) |i| try expectRejected(final, i, "obligation_final");
     const transfer = directive(10, 1, null, .{ .transfer = {} });
     const transferred = try execute(&f, "transfer", head(), &.{transfer});
     expected = selected(head(), transfer);
@@ -229,7 +230,7 @@ test "native directive policy records source gaps preserving earlier owed record
         .provider_date = null,
         .commit_count = 0,
     };
-    expected.schedule.next_due_ms = previous.clock_ms;
+    expected.check_requested = true;
     try std.testing.expectEqualDeep(expected, value.head);
     try std.testing.expectEqualDeep(gap, value.gap.?);
     try expectApplied(value, 0);
@@ -239,7 +240,6 @@ test "native directive policy records source gaps preserving earlier owed record
 const AnswerCase = enum {
     identity,
     choice,
-    revision,
     epoch,
     base,
     no_tip,
@@ -255,7 +255,6 @@ fn changedQuestion(
     switch (case) {
         .identity => answer.question = @splat(99),
         .choice => answer.choice = .{ .bytes = "not offered" },
-        .revision => previous.question.?.specification_revision = 5,
         .epoch => previous.question.?.source_condition.?.epoch = 1,
         .base => previous.question.?.source_condition.?.base = @splat('z'),
         .no_tip => previous.observed.tip = null,
@@ -283,7 +282,7 @@ test "native directive policy refuses stale or unbound answers and exhausted sou
         const value = try execute(&f, @tagName(case), previous, &.{fact});
         try std.testing.expectEqualDeep(selected(previous, fact), value.head);
         const code = switch (case) {
-            .identity, .choice, .revision => "question_binding_mismatch",
+            .identity, .choice => "question_binding_mismatch",
             else => "source_condition_changed",
         };
         try expectRejected(value, 0, code);
@@ -301,6 +300,78 @@ test "native directive policy refuses stale or unbound answers and exhausted sou
     expected.question = null;
     try std.testing.expectEqualDeep(expected, closed.head);
     try std.testing.expect(closed.gap == null);
+}
+
+test "native directive policy answers a question across amendments unless its route moves" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    var previous = head();
+    previous.question = question();
+    const amend = directive(2, 1, null, .{ .amend = amendment() });
+    const answer = directive(3, 2, amend.reference, .{ .answer = .{
+        .question = question().identity,
+        .choice = .{ .bytes = "accept_gap" },
+    } });
+    const answered = try execute(&f, "amend-answer", previous, &.{ amend, answer });
+    try expectApplied(answered, 0);
+    try expectApplied(answered, 1);
+    try std.testing.expect(answered.head.question == null);
+    try std.testing.expect(answered.gap != null);
+    var moved = amendment();
+    moved.repository_route = .{ .owner = .{ .bytes = "elsewhere" }, .name = .{ .bytes = "repo" } };
+    const route = directive(4, 1, null, .{ .amend = moved });
+    const late = directive(5, 2, route.reference, answer.value.body);
+    const closed = try execute(&f, "route-answer", previous, &.{ route, late });
+    try expectApplied(closed, 0);
+    try std.testing.expect(closed.head.question == null);
+    try expectRejected(closed, 1, "question_missing");
+    var same = amendment();
+    same.repository_route = .{
+        .owner = previous.specification.repository.owner,
+        .name = previous.specification.repository.name,
+    };
+    const kept = try execute(&f, "same-route", previous, &.{directive(6, 1, null, .{
+        .amend = same,
+    })});
+    try std.testing.expectEqualDeep(previous.question, kept.head.question);
+}
+
+test "native directive policy disposes every admitted directive once in ordinal order" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    try f.init();
+    const bodies = [_]t.DirectiveBody{
+        .{ .pause = {} },
+        .{ .@"resume" = {} },
+        .{ .cancel = {} },
+        .{ .check = {} },
+        .{ .transfer = {} },
+    };
+    var buffer: [3]t.DirectiveFact = undefined;
+    for (0..bodies.len * bodies.len * bodies.len) |code| {
+        var rest = code;
+        var final: ?usize = null;
+        for (&buffer, 0..) |*fact, position| {
+            const body = bodies[rest % bodies.len];
+            rest /= bodies.len;
+            const previous = if (position == 0) null else buffer[position - 1].reference;
+            fact.* = directive(@intCast(10 + 2 * position), position + 1, previous, body);
+            if (final == null and (body == .cancel or body == .transfer)) final = position;
+        }
+        const operation = try std.fmt.allocPrint(f.arena.allocator(), "law-{d}", .{code});
+        const value = try execute(&f, operation, head(), &buffer);
+        try std.testing.expectEqual(buffer.len, value.dispositions.items.len);
+        try std.testing.expectEqual(buffer.len, value.head.folded_directive_ordinal);
+        for (value.dispositions.items, buffer, 0..) |disposition, fact, position| {
+            try std.testing.expectEqualDeep(fact.reference, disposition.directive);
+            try std.testing.expectEqual(fact.value.ordinal, disposition.ordinal);
+            if (final) |boundary| if (position > boundary)
+                try expectRejected(value, position, "obligation_final");
+        }
+        const mode = value.head.mode;
+        if (final != null) try std.testing.expect(mode == .cancelled or mode == .transferred);
+    }
 }
 
 const ExcessGaps = struct {

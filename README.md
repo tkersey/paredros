@@ -50,7 +50,7 @@ Run `zig build qualify` with Zig 0.17.1, Node, and uv installed. It runs the
 essential set within one 600-second budget measured from the `zig build`
 invocation: TigerStyle over every tracked Zig file, the source contracts, the
 emitted-application check, the native `providers` owner group, the installed
-product's smoke checks, and ten process-death cases. On macOS one build compiles
+product's smoke checks, and eight process-death cases. On macOS one build compiles
 every essential artifact concurrently. The product and native tests embed the committed emitted application in
 `app/emitted/`, so they compile alongside Protean's emitter instead of after it.
 Qualification runs `check-emitted`, which requires those bytes to equal a fresh
@@ -169,39 +169,79 @@ policies are bounded as follows, and a value outside them is refused with
 | `notification_interval_ms`, `clock_regression_tolerance_ms` | 0 to 31622400000 |
 | `phase_attempts` | 1 to 20 |
 | `method_faults` | 1 to 1000 |
-| `render_input_bytes` | 256 to 1048576 |
-| `context_bytes` | 256 to 253952 |
+| `render_input_bytes` | 1024 to 1048576 |
+| `context_bytes` | 1024 to 253952 |
+
+The same table bounds the operator wording: 256 bytes of fixed render prelude plus
+the wording and the repository ref must fit in half of the render limit (the
+smaller of `render_input_bytes` and `context_bytes`), so every render has room
+for commit records. A longer wording is refused with `WordingTooLong`.
 
 The check runs when a monitor is added, when an amendment folds (an out-of-bound
-amendment is rejected with the reason `invalid_interval` or
+amendment is rejected with the reason `invalid_interval`, `invalid_wording` or
 `invalid_policy_NAME` and the head keeps its specification), when a bundle is
 imported, and when the configuration loads. A configuration whose `interval_ms`
 exceeds the bound fails to load with `IntervalMsExceedsMaximum`; one with an
 out-of-bound policy fails with `PolicyOutOfBounds`. An amendment that changes the
 interval moves a check that is not yet due to the first slot after the step's
-clock observation on the original anchor; a check that is already due stays due.
+clock observation on the original anchor; a check that is already due stays due,
+and the slots it already missed are counted on the old interval.
 
-Every identifier, digest and cursor in a reply uses the form its command accepts:
-task IDs and digests are lowercase hex, proposal identities are
-`REQUEST_DIGEST:ATTEMPT:ORDINAL`, and ordinals are decimal. Copy `data.next` from
-`status` into `status --after` until it is null.
+`monitor amend ID REVISION` changes the interval (`--interval-ms N`), the wording
+(`--wording TEXT`) or the policies (`--policies-json JSON`). The policies object
+replaces the whole `Policies` value, so it names every policy. An amendment that
+moves the monitored repository closes a pending source question, because its
+condition no longer applies; any other amendment leaves the question open and
+answerable.
 
-If one obligation cannot advance (for example its fold-only replacement failed),
-the daemon records the failure as that obligation's `fault`, shown by `status`
-and `monitor show`, and stops scheduling and dispatching only that obligation.
-Every other obligation and every control continue. Only namespace-wide failures
-(storage unavailable, a corrupt store, exhausted memory, or a wall clock outside
-years 1970 to 9999) stop `serve`. A fault is held by the running daemon; a restart
-retries the obligation and records the fault again if it recurs.
+Every identifier, digest and cursor in a reply uses the form its command accepts,
+and that is the only spelling accepted: task IDs and digests are lowercase hex,
+proposal identities are `REQUEST_DIGEST:ATTEMPT:ORDINAL`, and numbers are decimal
+digits without a sign, separators or leading zeros. Copy `data.next` from
+`status` into `status --after` until it is null; it is null as soon as no later
+obligation exists.
+
+`monitor check ID` records a requested check; its disposition is `requested`, not
+`applied`, and `head.check_requested` stays true until a step performs the check.
+That step is the first one whose provider deadline has passed: the request does
+not wait for the monitor's own retry pacing or the next slot, but it does wait
+for a `Retry-After` or rate-limit reset. A replaced check or an unattributed
+failure ends the request. Once a `cancel` (or the system's `transfer`) is
+admitted, every later directive for that obligation is refused with
+`FinalObligation`, and the step that folds the final directive rejects any
+directive after it with `obligation_final`, so every admitted directive has
+exactly one disposition. A proposal confirmed again under a new operation ID
+records that operation, so its repeat returns the same task and the ID cannot be
+reused for another request.
+
+Every per-item task of the daemon (an obligation's controls or step, a turn
+recovery, a retained resume, the import of transferred turns) runs through one
+boundary. A failure there is an observation, not a fence: the item's `fault`
+(reason, time, consecutive failures, next retry), shown by `status` and `monitor
+show`, records the latest failure; the item is retried with a backoff from one
+second to one minute; the next success clears it. A fault never stops admitted
+directives from being folded. A fold-only step that failed is replaced by another
+fold-only step after a backoff derived from its attempt number (one minute,
+doubling, at most an hour), or at once when a directive it did not fold has been
+admitted since; a cancelled fold-only step is replaced at once. Only
+namespace-wide failures (storage unavailable, a corrupt store, including any
+record the index cannot rebuild, exhausted memory, or a wall clock outside years
+1970 to 9999) stop `serve`. Faults are held by the running daemon.
 
 A head records `clock_regressions` and the last regression it observed
 (`last_clock_regression`). When a step observes the wall clock more than
 `clock_regression_tolerance_ms` behind the previous head, every schedule instant
-(`schedule.next_due_ms`, `schedule.source_not_before_ms` and
-`schedule.render_not_before_ms`) keeps its remaining duration from the corrected
-clock. A provider deadline from `Retry-After` or a rate-limit reset
-(`provider_not_before_ms`) is never shortened. `skipped_slots` counts coalesced
-slots, including those observed by a check that failed and was replaced.
+(`schedule.next_due_ms`, `schedule.source_not_before_ms`,
+`schedule.render_not_before_ms`, and the provider deadline from `Retry-After` or a
+rate-limit reset, `schedule.provider_not_before_ms`) keeps its remaining duration
+from the corrected clock: the regression neither shortens nor extends it.
+`skipped_slots` counts the anchored slots that passed without a check of their
+own. The due slot moves only when a check completes, when a check is rejected for a
+reason that waits for the next slot or exhausts its retries, or when an amendment
+changes the interval, and each of those moves counts the anchored slots strictly
+between the owed slot and the step's clock. A failed or replaced check, including
+a replaced step that never reached the provider, keeps the owed slot and retries
+with the phase backoff.
 
 Under a pause, a step that already captured its provider response finishes from
 that capture instead of being cancelled and repeated after resume; any step that

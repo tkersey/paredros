@@ -32,55 +32,31 @@ pub fn advance(
         !obligation.ordinaryDispatch(),
         record.input.step.fold_only,
     );
-    const selected: recovery_status.Action = switch (decision) {
+    const cause: @FieldType(t.Supersession, "cause") = switch (decision) {
         .none => return null,
-        .failed_fold => {
-            if (!foldRetryReady(index, obligation, record.input.step, clock_ms))
-                return error.FoldStepFailed;
-            return try replace(
+        .failed_fold => if (foldRetryReady(index, obligation, record.input.step, clock_ms))
+            .failed
+        else
+            return error.FoldStepFailed,
+        .replace => |reason| reason,
+        .resume_captured, .resume_parked => blk: {
+            const selected: recovery_status.Action = if (decision == .resume_captured)
+                .{ .resume_captured = {} }
+            else
+                .{ .resume_parked = {} };
+            const resumed = try recovery_status.resumeSelected(
                 service,
                 a,
-                record,
-                obligation.task,
-                clock_ms,
-                model,
-                page_limit,
-                .failed,
+                record.task,
+                saved.value.revision,
+                selected,
+                saved.value.current_occurrence,
             );
+            if (resumed != .incompatible) return null;
+            break :blk .incompatible;
         },
-        .replace => |reason| return try replace(
-            service,
-            a,
-            record,
-            obligation.task,
-            clock_ms,
-            model,
-            page_limit,
-            reason,
-        ),
-        .resume_captured => .{ .resume_captured = {} },
-        .resume_parked => .{ .resume_parked = {} },
     };
-    const resumed = try recovery_status.resumeSelected(
-        service,
-        a,
-        record.task,
-        saved.value.revision,
-        selected,
-        saved.value.current_occurrence,
-    );
-    if (resumed == .incompatible)
-        return try replace(
-            service,
-            a,
-            record,
-            obligation.task,
-            clock_ms,
-            model,
-            page_limit,
-            .incompatible,
-        );
-    return null;
+    return try replace(service, a, record, obligation.task, clock_ms, model, page_limit, cause);
 }
 
 pub const fold_retry_max_ms: i64 = 3_600_000;

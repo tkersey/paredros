@@ -2,15 +2,15 @@ const group = (count, ...filters) => ({count, filters});
 
 const suites = {
   authority: {
-    driver: group(20, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
+    driver: group(21, 'native_authority_test.', 'tests.native_driver.', 'tests.native_daemon.'),
     proposal: group(2, 'control proposal consumer shows and confirms maximal retained body',
       'control proposal consumer confirms each proposal once'),
-    controls: group(74, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control reads messages', 'control protocol freezes',
+    controls: group(75, 'tests.native_session.', 'control CLI preserves', 'control CLI repeats', 'control reads messages', 'control protocol freezes',
       'control pages pending', 'control malformed and unsupported', 'control task show reports', 'tests.control_socket.', 'tests.index.',
       'tests.messages.', 'tests.contracts.', 'tests.native_genesis.', 'tests.application.'),
   },
   providers: 31,
-  'transitions-first': 11,
+  'transitions-first': 13,
   'transitions-second': 17,
   'transitions-third': 12,
   rendering: {
@@ -19,7 +19,7 @@ const suites = {
     escaping: group(2, 'native render frame budgets hostile escaping', 'native render frame neutralizes'),
     proposal: group(1, 'native conversation retains maximal exact proposal body'),
     multibyte: group(1, 'native conversation retains full multibyte'),
-    publication: group(14, 'native render frame keeps Unicode', 'native render frame empty evidence',
+    publication: group(15, 'native render frame keeps Unicode', 'native render frame empty evidence',
       'native conversation describes exact hostile Unicode', 'native conversation describes neutralized',
       'tests.native_check_publish.', 'tests.native_step.'),
     bytes: group(4, 'native ordinary render chooses an exact', 'native ordinary render bounds its exact',

@@ -114,6 +114,37 @@ test "control CLI preserves exact revisions and rejects ambiguous arguments" {
     );
 }
 
+test "control CLI preserves one canonical spelling for every number and identifier" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const frame = arena.allocator();
+    for ([_][]const u8{ "1_6", "+3", "007", "", "-1", "0x10", "99999999999" }) |text| {
+        try std.testing.expectError(
+            error.InvalidNumber,
+            cli.request(frame, &.{ "status", "--limit", text }, "id"),
+        );
+    }
+    _ = try cli.request(frame, &.{ "status", "--limit", "16" }, "id");
+    _ = try cli.request(frame, &.{ "status", "--limit", "0" }, "id");
+    const upper = "00112233445566778899AABBCCDDEEFF";
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        cli.request(frame, &.{ "monitor", "show", upper }, "id"),
+    );
+    const upper_digest = "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB";
+    try std.testing.expectError(error.InvalidIdentity, wire.parse(t.Digest, upper_digest));
+    try std.testing.expectError(error.InvalidIdentity, wire.parse(t.Oid, upper_digest[0..40]));
+    const digest = "abababababababababababababababababababababababababababababababab";
+    _ = try wire.parse(@import("../native/commands.zig").ProposalIdentity, digest ++ ":0:1");
+    for ([_][]const u8{ ":+0:1", ":0:01", ":0:1_0" }) |suffix| try std.testing.expectError(
+        error.InvalidIdentity,
+        wire.parse(
+            @import("../native/commands.zig").ProposalIdentity,
+            try std.mem.concat(frame, u8, &.{ digest, suffix }),
+        ),
+    );
+}
+
 test "control CLI preserves the caller's directory for a relative import path" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -608,6 +639,7 @@ pub const ConsumerApplication = struct {
         const initial = try b.caseOf(input, "genesis");
         const converse = try b.caseOf(input, "turn");
         const directive = try b.caseOf(input, "directive");
+        const receipt = try b.caseOf(input, "confirmation");
         const output = try context.schema(t.Output);
         const failure = try context.literal(t.Failure, .{
             .code = .{ .bytes = "unsupported_consumer_test" },
@@ -636,6 +668,11 @@ pub const ConsumerApplication = struct {
             ),
             .continuity_cut = try (try b.caseOf(input, "continuity_cut")).fail(output, failure),
             .transfer = try (try b.caseOf(input, "transfer")).fail(output, failure),
+            .confirmation = try receipt.ret(try receipt.body().variant(
+                try context.schema(t.Output),
+                "confirmation",
+                receipt.payload(),
+            )),
         });
         try context.author.define(function, try b.ret(result));
         return context.author.module(function, try context.schema(t.Failure));
@@ -850,6 +887,50 @@ test "control proposal consumer shows and confirms maximal retained body by auth
     try consumerResolution(&driver, frame, turn_id, input, token);
 }
 
+fn expectReusedConfirmation(
+    frame: std.mem.Allocator,
+    driver: *Driver,
+    genesis: t.Turn,
+    directive: t.Turn,
+) !void {
+    const offered_tokens = [_][]const u8{
+        try std.fmt.allocPrint(frame, "{s}:0:0", .{&std.fmt.bytesToHex(
+            genesis.envelope.stable_request,
+            .lower,
+        )}),
+        try std.fmt.allocPrint(frame, "again-{s}", .{&std.fmt.bytesToHex(
+            directive.envelope.stable_request,
+            .lower,
+        )}),
+    };
+    const reused = try consumerOperation(
+        frame,
+        driver,
+        "confirm",
+        offered_tokens[0],
+        offered_tokens[1],
+    );
+    try std.testing.expectEqualStrings(
+        "OperationConflict",
+        try native.json.text(reused.object.get("error").?),
+    );
+}
+
+fn expectConfirmationRecords(index: anytype) !void {
+    var geneses: usize = 0;
+    var directives: usize = 0;
+    var receipts: usize = 0;
+    for (index.records) |record| switch (record.input) {
+        .genesis => geneses += 1,
+        .directive => directives += 1,
+        .confirmation => receipts += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(2, geneses);
+    try std.testing.expectEqual(1, directives);
+    try std.testing.expectEqual(2, receipts);
+}
+
 test "control proposal consumer confirms each proposal once across operations" {
     var fixture: ConsumerFixture = .{};
     defer fixture.deinit();
@@ -884,7 +965,11 @@ test "control proposal consumer confirms each proposal once across operations" {
             task.* = try taskId(try consumerOperation(frame, &driver, "confirm", token, operation));
         }
         try std.testing.expectEqualDeep(tasks[0], tasks[1]);
+        const again = try std.fmt.allocPrint(frame, "again-{s}", .{&request});
+        const repeated = try consumerOperation(frame, &driver, "confirm", token, again);
+        try std.testing.expectEqualDeep(tasks[0], try taskId(repeated));
     }
+    try expectReusedConfirmation(frame, &driver, genesis, directive);
     driver.detach();
     for ([_]t.Turn{ directive, genesis }) |offered| {
         const request = std.fmt.bytesToHex(offered.envelope.stable_request, .lower);
@@ -898,15 +983,7 @@ test "control proposal consumer confirms each proposal once across operations" {
     }
     var index = try driver.rebuild(frame);
     defer index.deinit();
-    var geneses: usize = 0;
-    var directives: usize = 0;
-    for (index.records) |record| switch (record.input) {
-        .genesis => geneses += 1,
-        .directive => directives += 1,
-        else => {},
-    };
-    try std.testing.expectEqual(2, geneses);
-    try std.testing.expectEqual(1, directives);
+    try expectConfirmationRecords(&index);
 }
 
 fn consumerResolution(
@@ -1199,9 +1276,13 @@ test "control pages pending status with the widest next cursor within one frame"
     };
     try driver.attach(frame);
     defer driver.detach();
-    const add = try cli.request(frame, &.{ "monitor", "add" }, "widest-monitor");
-    const id = try taskId(try dispatch(frame, &driver, add, 501));
-    try finish(&fixture, id);
+    var ids: [2]t.Id = undefined;
+    for (&ids, [_][]const u8{ "widest-monitor", "widest-later" }) |*slot, operation| {
+        const add = try cli.request(frame, &.{ "monitor", "add" }, operation);
+        slot.* = try taskId(try dispatch(frame, &driver, add, 501));
+        try finish(&fixture, slot.*);
+    }
+    const id = if (std.mem.order(u8, &ids[0], &ids[1]) == .lt) ids[0] else ids[1];
     const hex_id = std.fmt.bytesToHex(id, .lower);
     for ([_][]const u8{ "pause", "resume" }) |verb| {
         const operation = try std.fmt.allocPrint(frame, "widest-{s}", .{verb});
@@ -1367,7 +1448,9 @@ test "control pages pending status through printed next cursors" {
     }
     var seen: std.ArrayList(t.Id) = .empty;
     var after: ?[]const u8 = null;
+    var pages: usize = 0;
     for (0..ids.len + 1) |_| {
+        pages += 1;
         const args: []const []const u8 = if (after) |cursor|
             &.{ "status", "--limit", "1", "--after", cursor }
         else
@@ -1388,6 +1471,14 @@ test "control pages pending status through printed next cursors" {
         if (next == .null) break;
         after = try wire.printed(frame, next);
     }
+    try std.testing.expectEqual(ids.len, pages);
+    const full = (try dispatch(frame, &driver, try cli.request(
+        frame,
+        &.{ "status", "--limit", "3" },
+        "x",
+    ), 501)).object.get("data").?;
+    try std.testing.expectEqual(3, full.object.get("obligations").?.array.items.len);
+    try std.testing.expect(full.object.get("next").? == .null);
     std.mem.sort(t.Id, &ids, {}, struct {
         fn less(_: void, left: t.Id, right: t.Id) bool {
             return std.mem.order(u8, &left, &right) == .lt;

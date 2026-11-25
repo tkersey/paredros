@@ -526,7 +526,10 @@ fn status(
     var stopped = false;
     for (ordered) |obligation| {
         if (after) |previous| if (std.mem.order(u8, &obligation.task, &previous) != .gt) continue;
-        if (items.items.len == limit) break;
+        if (items.items.len == limit) {
+            stopped = true;
+            break;
+        }
         const gap: Extent = if (items.items.len == 0) .{ .bytes = 0, .tokens = 0 } else separator;
         const entry = if (room.less(used.plus(gap))) |available|
             try monitor(a, index, obligation.task, clock_ms, available)
@@ -542,7 +545,7 @@ fn status(
         next = obligation.task;
     }
     try native.json.put(a, &result, "obligations", .{ .array = items });
-    try native.json.put(a, &result, "next", if (items.items.len == limit or stopped)
+    try native.json.put(a, &result, "next", if (stopped)
         try wire.toJson(?t.Id, a, next)
     else
         .null);

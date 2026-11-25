@@ -309,7 +309,8 @@ fn selectPhase(
         try b.field(schedule, "provider_not_before_ms"),
     ));
     const scheduled = try b.select(check_due, source_ready, no);
-    const wanted = try b.select(try b.field(head, "check_requested"), try b.constant(bool, true), scheduled);
+    const requested = try b.field(head, "check_requested");
+    const wanted = try b.select(requested, try b.constant(bool, true), scheduled);
     const checking = try b.select(wanted, provider_ready, no);
     const rendering = try b.select(
         try b.less(try b.constant(u64, 0), try b.sequenceLength(try b.field(input, "batches"))),

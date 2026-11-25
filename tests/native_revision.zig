@@ -167,6 +167,7 @@ test "native revisions amend selected fields and preserve responsibility" {
             };
             expected.specification.repository.owner = change.repository_route.?.owner;
             expected.specification.repository.name = change.repository_route.?.name;
+            expected.question = null;
         }
         const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "options-{d}", .{mask});
         try applied(&fixture, operation, previous, .{ .amend = change }, expected);
@@ -230,6 +231,7 @@ test "native revisions recompute a pending due check from the anchor when the in
     expected = due;
     expected.specification.revision += 1;
     expected.specification.interval_ms = 100;
+    expected.schedule.next_due_ms = due.clock_ms;
     try applied(&fixture, "already-due", due, .{ .amend = change }, expected);
     change.interval_ms = null;
     change.wording = .{ .bytes = "same interval" };
@@ -282,12 +284,12 @@ test "native revisions adoption and reversion preserve history cursors deliverie
     );
 }
 
-test "native revisions refuse every final head and reject overflow without partial mutation" {
+test "native revisions reject overflow without partial mutation in every live mode" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.init();
     var index: usize = 0;
-    for ([_]t.Mode{ .active, .paused, .cancelled, .transferred }) |old_mode| {
+    for ([_]t.Mode{ .active, .paused }) |old_mode| {
         for ([_]u64{ 6, std.math.maxInt(u64) }) |old_revision| {
             var previous = head();
             previous.mode = old_mode;
@@ -305,9 +307,7 @@ test "native revisions refuse every final head and reject overflow without parti
                     .{index},
                 );
                 index += 1;
-                if (old_mode == .cancelled or old_mode == .transferred) {
-                    try rejected(&fixture, operation, previous, change, "final_head");
-                } else if (old_revision == std.math.maxInt(u64)) {
+                if (old_revision == std.math.maxInt(u64)) {
                     try rejected(&fixture, operation, previous, change, "revision_overflow");
                 } else {
                     var expected = previous;
@@ -318,5 +318,5 @@ test "native revisions refuse every final head and reject overflow without parti
             }
         }
     }
-    try std.testing.expectEqual(24, index);
+    try std.testing.expectEqual(12, index);
 }

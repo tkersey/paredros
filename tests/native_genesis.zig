@@ -170,7 +170,6 @@ test "native genesis import resumes the prior mode and emits a pending prompt ag
         expected.consumed = .{ .items = &.{} };
         expected.mode = case.mode;
         expected.clock_ms = input.clock_ms;
-        expected.schedule.next_due_ms = input.clock_ms;
         expected.message = if (case.asked) .{
             .specification_revision = question.specification_revision,
             .text = question.prompt,

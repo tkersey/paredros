@@ -54,5 +54,5 @@ test "application source has finite schemas for every task boundary" {
     inline for (.{ t.Input, t.Output, t.Failure, t.Message }) |T| {
         _ = c.native.info(T);
     }
-    try std.testing.expectEqual(8, @typeInfo(t.Input).@"union".field_names.len);
+    try std.testing.expectEqual(9, @typeInfo(t.Input).@"union".field_names.len);
 }

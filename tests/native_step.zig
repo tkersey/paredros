@@ -240,7 +240,8 @@ test "native bounded step counts coalesced slots once whichever transition moves
         .{ .phase = .check, .cause = .control },
     };
     for (cases, 0..) |case, index| {
-        const operation = try std.fmt.allocPrint(fixture.arena.allocator(), "replaced-{d}", .{index});
+        const frame = fixture.arena.allocator();
+        const operation = try std.fmt.allocPrint(frame, "replaced-{d}", .{index});
         const fold = try fixture.output(try fixture.execute(
             operation,
             replaced(head, case.phase, case.cause),

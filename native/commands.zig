@@ -53,8 +53,8 @@ pub const ProposalIdentity = struct {
         if (parts.next() != null) return error.InvalidIdentity;
         return .{
             .request = try wire.parse(t.Digest, request),
-            .attempt = std.fmt.parseInt(u32, attempt, 10) catch return error.InvalidIdentity,
-            .ordinal = std.fmt.parseInt(u32, ordinal, 10) catch return error.InvalidIdentity,
+            .attempt = wire.number(u32, attempt) catch return error.InvalidIdentity,
+            .ordinal = wire.number(u32, ordinal) catch return error.InvalidIdentity,
         };
     }
 };
@@ -392,24 +392,45 @@ pub fn confirmed(
     confirmation: Confirmation,
 ) !?t.Id {
     try authenticate(driver, origin);
-    if (try driver.service.operationLookup(a, operation)) |saved| {
-        var receipt = saved;
-        receipt.deinit();
-        return null;
-    }
+    if (index.operations.get(operation)) |position|
+        if (index.records[position].input != .confirmation) return null;
     const selected = try proposal(index, confirmation);
     const digest = try proposalDigest(a, confirmation, selected);
-    return switch (selected.body) {
+    const prior = switch (selected.body) {
         .genesis => confirmedGenesis(index, digest),
-        .directive => |body| confirmedDirective(
+        .directive => |body| try confirmedDirective(
             a,
             index,
             selected.target orelse return error.InvalidProposalTarget,
             body,
             digest,
         ),
+    } orelse return null;
+    const request: admission.Request = .{
+        .operation = operation,
+        .kind = .confirmation,
+        .target = null,
+        .origin = origin,
+        .digest = digest,
     };
+    _ = try admission.admit(driver.service, a, request, Receipt{ .task = prior });
+    return prior;
 }
+
+const Receipt = struct {
+    task: t.Id,
+
+    pub fn materialize(self: Receipt, _: std.mem.Allocator, request: admission.Request) !t.Input {
+        return .{ .confirmation = .{
+            .envelope = .{
+                .operation = .{ .bytes = request.operation },
+                .stable_request = request.digest,
+                .origin = request.origin,
+            },
+            .task = self.task,
+        } };
+    }
+};
 
 fn confirmedGenesis(index: *const idx.Index, digest: t.Digest) ?t.Id {
     for (index.records) |record| switch (record.input) {

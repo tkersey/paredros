@@ -12,7 +12,11 @@ pub fn emit(c: protean.Context) !Function {
     const b = try c.author.body(function);
     const specification = try b.parameter("specification");
     const policies = try b.field(specification, "policies");
-    var result = try c.literal(?t.Name, null);
+    var result = try b.select(
+        try b.less(try half(c, b, policies), try prelude(c, b, specification)),
+        try c.literal(?t.Name, .{ .bytes = "invalid_wording" }),
+        try c.literal(?t.Name, null),
+    );
     inline for (@typeInfo(t.Policies).@"struct".field_names) |name| {
         const bound = @field(bounds.policies, name);
         result = try outside(c, b, @FieldType(t.Policies, name), try b.field(policies, name), .{
@@ -21,11 +25,6 @@ pub fn emit(c: protean.Context) !Function {
             .reason = "invalid_policy_" ++ name,
         }, result);
     }
-    result = try b.select(
-        try b.less(try half(c, b, policies), try prelude(c, b, specification)),
-        try c.literal(?t.Name, .{ .bytes = "invalid_wording" }),
-        result,
-    );
     result = try outside(c, b, i64, try b.field(specification, "anchor_ms"), .{
         .min = 0,
         .max = bounds.instant_ms_max,

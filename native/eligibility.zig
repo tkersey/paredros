@@ -26,6 +26,7 @@ pub fn permits(
         .continuity_member,
         .continuity_cut,
         .transfer,
+        .confirmation,
         => false,
     };
 }

@@ -97,6 +97,7 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
     const member = try b.caseOf(input, "continuity_member");
     const cut = try b.caseOf(input, "continuity_cut");
     const marker = try b.caseOf(input, "transfer");
+    const receipt = try b.caseOf(input, "confirmation");
     try envelope(c, directive.body(), directive.payload());
     const result = try b.match(input, .{
         .genesis = try initial.ret(try invoke(c, initial, functions.genesis, "genesis")),
@@ -111,6 +112,7 @@ fn dispatch(c: protean.Context, functions: Functions, effects: anytype) !Functio
         .continuity_member = try member.ret(try preserve(c, member, "continuity_member")),
         .continuity_cut = try cut.ret(try preserve(c, cut, "continuity_cut")),
         .transfer = try marker.ret(try preserve(c, marker, "transfer")),
+        .confirmation = try receipt.ret(try preserve(c, receipt, "confirmation")),
     });
     try c.author.define(function, try b.ret(result));
     return function;

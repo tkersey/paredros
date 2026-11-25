@@ -134,6 +134,7 @@ pub fn factTarget(record: idx.Record) ?t.Id {
         .continuity_member,
         .continuity_cut,
         .transfer,
+        .confirmation,
         => null,
     };
 }

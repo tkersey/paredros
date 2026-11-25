@@ -216,7 +216,7 @@ const Builder = struct {
                     .result = result,
                 });
             },
-            .genesis, .continuity_member, .continuity_cut, .transfer => {},
+            .genesis, .continuity_member, .continuity_cut, .transfer, .confirmation => {},
         }
     }
 };

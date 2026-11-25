@@ -305,6 +305,7 @@ pub const ContinuityImport = struct {
     members: c.Vector(ContinuityBinding, null),
 };
 pub const TransferMarker = struct { envelope: Envelope };
+pub const ConfirmationReceipt = struct { envelope: Envelope, task: Id };
 pub const Genesis = struct {
     envelope: Envelope,
     lineage: Digest,
@@ -399,6 +400,7 @@ pub const Input = union(enum) {
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     transfer: TransferMarker,
+    confirmation: ConfirmationReceipt,
 };
 pub const Output = union(enum) {
     genesis: Head,
@@ -409,6 +411,7 @@ pub const Output = union(enum) {
     continuity_member: ContinuityMember,
     continuity_cut: ContinuityCut,
     transfer: TransferMarker,
+    confirmation: ConfirmationReceipt,
 };
 pub const Failure = struct { code: Name };
 pub const Message = union(enum) { pause: struct { directive: InputReference } };

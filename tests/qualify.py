@@ -38,6 +38,7 @@ def exact_line(expected):
 
 ESSENTIAL_GROUPS = ("providers",)
 BUDGET_SECONDS = 600
+SOURCE_TESTS = 69
 
 
 def set_budget(seconds):
@@ -55,7 +56,7 @@ def inventory(zig, system, install, output, full):
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
-        counts = {"authority": 96, "providers": 31, "transitions": 38, "rendering": 61, "continuity": 48}
+        counts = {"authority": 98, "providers": 31, "transitions": 40, "rendering": 62, "continuity": 48}
         matrix = [dict(name=name, part=name, count=n) for name, n in counts.items()] + [
             row for row in matrix if row["part"] in ("methods", "product", "crash")
         ]
@@ -66,9 +67,10 @@ def inventory(zig, system, install, output, full):
     def build(*args):
         return [zig, "build", *args, "-Doptimize=safe", f"-j{build_jobs()}", "--summary", "all", "--prefix", install]
 
-    def source_tests(log):
-        require(any(line.startswith("Build Summary:") and line.endswith("; 68/68 tests passed")
-                    for line in log.read_text(errors="replace").splitlines()), "expected 66 passing source tests")
+    def source_tests(log, count=SOURCE_TESTS):
+        require(any(line.startswith("Build Summary:") and line.endswith(f"; {count}/{count} tests passed")
+                    for line in log.read_text(errors="replace").splitlines()),
+                f"expected {count} passing source tests")
 
     target = ["-Dtarget=x86_64-linux-musl"] if linux else []
     assets = "-Demitted-application=app/emitted"

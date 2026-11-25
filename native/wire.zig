@@ -36,19 +36,23 @@ pub fn hex(value: anytype) [@sizeOf(@TypeOf(value)) * 2]u8 {
 pub fn parse(comptime T: type, bytes: []const u8) error{InvalidIdentity}!T {
     if (comptime objectName(T)) return parseObjectName(bytes);
     if (comptime !identifier(T)) return T.parseText(bytes);
-    if (bytes.len != @sizeOf(T) * 2) return error.InvalidIdentity;
+    if (bytes.len != @sizeOf(T) * 2 or !lowerHex(bytes)) return error.InvalidIdentity;
     var value: T = undefined;
     _ = std.fmt.hexToBytes(&value, bytes) catch return error.InvalidIdentity;
     return value;
 }
 
 fn parseObjectName(bytes: []const u8) error{InvalidIdentity}![40]u8 {
-    if (bytes.len != 40) return error.InvalidIdentity;
+    if (bytes.len != 40 or !lowerHex(bytes)) return error.InvalidIdentity;
+    return bytes[0..40].*;
+}
+
+fn lowerHex(bytes: []const u8) bool {
     for (bytes) |byte| switch (byte) {
         '0'...'9', 'a'...'f' => {},
-        else => return error.InvalidIdentity,
+        else => return false,
     };
-    return bytes[0..40].*;
+    return true;
 }
 
 pub fn format(comptime T: type, a: std.mem.Allocator, value: T) std.mem.Allocator.Error![]u8 {
@@ -197,6 +201,8 @@ pub fn argument(comptime T: type, a: std.mem.Allocator, bytes: []const u8) !T {
 }
 
 pub fn number(comptime T: type, bytes: []const u8) error{InvalidNumber}!T {
+    if (bytes.len == 0 or (bytes[0] == '0' and bytes.len != 1)) return error.InvalidNumber;
+    for (bytes) |byte| if (byte < '0' or byte > '9') return error.InvalidNumber;
     return std.fmt.parseInt(T, bytes, 10) catch error.InvalidNumber;
 }
 

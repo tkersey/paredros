@@ -85,6 +85,35 @@ test {
     _ = @import("application.zig").NativeTests(native);
 }
 
+test "native driver refuses a directive admitted behind a pending final directive" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.init();
+    const a = fixture.arena.allocator();
+    const initial = fixture_values.genesis();
+    const target = try fixture.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    var clock: Clock = .{};
+    var driver: Driver = .{
+        .service = &fixture.service.?,
+        .clock = .{ .context = &clock, .now = Clock.now },
+    };
+    try driver.attach(a);
+    defer driver.detach();
+    const origin: t.Origin = .{ .local = .{ .uid = 501 } };
+    const cancel = try driver.directive(a, "pending-cancel", origin, target, .{ .cancel = {} });
+    try std.testing.expectError(
+        error.FinalObligation,
+        driver.directive(a, "behind-cancel", origin, target, .{ .pause = {} }),
+    );
+    try std.testing.expectEqualDeep(
+        cancel,
+        try driver.directive(a, "pending-cancel", origin, target, .{ .cancel = {} }),
+    );
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expectEqual(1, index.obligation(target).?.directives.len);
+}
+
 test "native driver replaces a fenced live step with a receipt bound fold" {
     var fixture: Fixture = .{};
     defer fixture.deinit();

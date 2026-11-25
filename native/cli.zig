@@ -14,7 +14,7 @@ pub const help =
     \\  monitor add [--wording TEXT] [--interval-ms N]
     \\  monitor list | show ID | check ID | pause ID | resume ID | cancel ID
     \\  monitor directives ID [--after ORDINAL] [--limit N]
-    \\  monitor amend ID REVISION [--interval-ms N] [--wording TEXT]
+    \\  monitor amend ID REVISION [--interval-ms N] [--wording TEXT] [--policies-json JSON]
     \\  messages ID [--after ORDINAL] [--limit N]  Read local updates
     \\  question answer ID QUESTION_DIGEST CHOICE
     \\  proposal show | confirm REQUEST_DIGEST:ATTEMPT:ORDINAL
