@@ -46,6 +46,9 @@ jobs:
           - lane: providers
             groups: providers
             budget: 600
+          - lane: simulation
+            groups: simulation
+            budget: 600
     env:
       ZIG_DEBUG_CMD: '1'
     steps: &lane-steps

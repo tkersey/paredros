@@ -1,6 +1,14 @@
 const std = @import("std");
 const protean_build = @import("protean");
-const NativeGroup = enum { authority, providers, transitions, rendering, methods, continuity };
+const NativeGroup = enum {
+    authority,
+    providers,
+    transitions,
+    rendering,
+    methods,
+    continuity,
+    simulation,
+};
 const NativePartition = enum { first, second, third };
 
 pub fn build(b: *std.Build) void {
@@ -195,6 +203,7 @@ fn nativeTests(
         const name = @tagName(group);
         const path = b.fmt("native_{s}_test.zig", .{name});
         const root = nativeTestRoot(b, dependency, optimize, assets, path);
+        if (group == .simulation) root.addOptions("simulation_options", simulationOptions(b));
         const checks = addPlatformTest(b, .{
             .filters = if (partition) |part|
                 nativePartitionFilters(group, part)
@@ -215,6 +224,34 @@ fn nativeTests(
         );
         compile.dependOn(&install.step);
     }
+}
+
+fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
+    const values = b.addOptions();
+    values.addOption(?u64, "seed", b.option(u64, "simulation-seed", "Replay one simulation seed"));
+    values.addOption(u64, "seeds", b.option(
+        u64,
+        "simulation-seeds",
+        "Run this many consecutive simulation seeds",
+    ) orelse 24);
+    values.addOption(u64, "first", b.option(
+        u64,
+        "simulation-first",
+        "First consecutive simulation seed",
+    ) orelse 1);
+    values.addOption(u64, "events", b.option(
+        u64,
+        "simulation-events",
+        "Events generated per simulation seed",
+    ) orelse 150);
+    values.addOption(bool, "progress", b.option(
+        bool,
+        "simulation-progress",
+        "Print each simulation seed's timing",
+    ) orelse false);
+    values.addOption(u64, "hops_max", 2);
+    values.addOption(u64, "rest_rounds", 96);
+    return values;
 }
 
 fn nativePartitionFilters(group: NativeGroup, partition: NativePartition) []const []const u8 {

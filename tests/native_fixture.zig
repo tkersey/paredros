@@ -96,6 +96,7 @@ pub fn Fixture(comptime Types: type, comptime Application: type) type {
         handlers: ?native.Registry = null,
         namespace: ?native.Namespace = null,
         service: ?native.tasks.Service(Types) = null,
+        io: std.Io = std.testing.io,
         profile: native.tasks.Profile = .{
             .id = "native-test",
             .runtime_identity = @splat(42),
@@ -186,12 +187,12 @@ pub fn Fixture(comptime Types: type, comptime Application: type) type {
         pub fn open(self: *Self) !void {
             self.namespace = try native.Namespace.open(
                 std.testing.allocator,
-                std.testing.io,
+                self.io,
                 self.path,
             );
             self.service = try native.tasks.Service(Types).init(
                 std.testing.allocator,
-                std.testing.io,
+                self.io,
                 &self.namespace.?,
                 self.assets,
                 &self.application.?,

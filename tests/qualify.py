@@ -56,7 +56,8 @@ def inventory(zig, system, install, output, full):
     require(linux or system == ("Darwin", "arm64"), f"unsupported host: {system}")
     matrix = json.loads(subprocess.check_output(["node", ".github/native-execution.mjs"]))["include"]
     if not linux:
-        counts = {"authority": 102, "providers": 31, "transitions": 40, "rendering": 62, "continuity": 53}
+        counts = {"authority": 102, "providers": 31, "transitions": 40, "rendering": 62, "continuity": 53,
+                  "simulation": 5}
         matrix = [dict(name=name, part=name, count=n) for name, n in counts.items()] + [
             row for row in matrix if row["part"] in ("methods", "product", "crash")
         ]
@@ -101,7 +102,8 @@ def inventory(zig, system, install, output, full):
             recipe = ["build-native-tests", "-Dnative-tests=true", f"-Dnative-group={group}"]
             if partition:
                 recipe.append(f"-Dnative-partition={partition}")
-            recipe.append(assets if group in ("authority", "continuity") else "-Dtest-product-assets=false")
+            recipe.append(assets if group in ("authority", "continuity", "simulation")
+                          else "-Dtest-product-assets=false")
         builder = "build" if combined else "build-" + part
         if not combined:
             jobs.append(Job(builder, build(*recipe), ("setup",)))
