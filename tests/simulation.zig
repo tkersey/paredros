@@ -679,9 +679,9 @@ fn confirm(sim: *Sim, value: *Node) !void {
         const identity = try proposalOf(sim, value, turn) orelse continue;
         const args = try withOperation(sim, &.{ "proposal", "confirm", identity }, "confirm");
         const response = (try mutate(sim, value, .confirm, args)) orelse return;
-        if (responseTask(response) != null)
-            try value.confirmed.append(sim.allocator(), try sim.allocator().dupe(u8, identity));
-        return;
+        if (responseTask(response) == null) return;
+        try value.confirmed.append(sim.allocator(), try sim.allocator().dupe(u8, identity));
+        return reconfirm(sim, value);
     }
     try sim.note("confirm", "none of {d} turns offers a proposal", .{count});
 }
