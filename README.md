@@ -238,8 +238,9 @@ from the corrected clock: the regression neither shortens nor extends it.
 `skipped_slots` counts the anchored slots that passed without a check of their
 own. The due slot moves only when a check completes, when a check is rejected for a
 reason that waits for the next slot or exhausts its retries, or when an amendment
-changes the interval, and each of those moves counts the anchored slots strictly
-between the owed slot and the step's clock. A failed or replaced check, including
+changes the interval, and each of those moves counts the anchored slots after the
+owed slot up to and including the step's clock; a lattice position before the
+monitor's anchor is not one of its slots. A failed or replaced check, including
 a replaced step that never reached the provider, keeps the owed slot and retries
 with the phase backoff.
 

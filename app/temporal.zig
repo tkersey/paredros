@@ -160,11 +160,12 @@ pub fn advanceDue(c: protean.Context) !AdvanceDue {
         interval,
         .{ .overflow = overflow, .division_by_zero = invalid },
     );
+    const anchor = try passed.field(input, "anchor_ms");
     var slots: [2]a.Value(u64) = undefined;
     for (&slots, [_]a.Value(i64){ now, due }) |*slot, instant| {
         const offset = try passed.checked(
             .subtract,
-            try passed.call(shift, .{ .value = instant }),
+            try passed.call(shift, .{ .value = try anchored(c, passed, anchor, instant) }),
             phase,
             .{ .overflow = overflow },
         );
@@ -194,6 +195,18 @@ pub fn advanceDue(c: protean.Context) !AdvanceDue {
         try passed.ret(advanced),
     )));
     return function;
+}
+
+fn anchored(
+    c: protean.Context,
+    b: anytype,
+    anchor: a.Value(i64),
+    instant: a.Value(i64),
+) !a.Value(i64) {
+    const before = try b.checked(.subtract, anchor, try b.constant(i64, 1), .{
+        .overflow = try a.failure(c, "schedule_anchor_overflow"),
+    });
+    return b.select(try b.less(instant, anchor), before, instant);
 }
 
 pub fn advance(c: protean.Context) !Advance {
