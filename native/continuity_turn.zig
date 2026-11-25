@@ -58,20 +58,21 @@ fn previousTurn(
     return try historicalMember(a, catalog, imported);
 }
 
-fn originalEnvelope(
+fn originate(
     a: std.mem.Allocator,
     catalog: *const Catalog,
+    originated: *Replaced,
     item: continuity.Member,
-) !t.Envelope {
+) !void {
+    var walked: std.ArrayList(t.Digest) = .empty;
+    defer walked.deinit(a);
     var current = item;
-    for (0..catalog.bundle.members.items.len) |_| {
-        const previous = try previousTurn(a, catalog, current) orelse {
-            const value = try continuity.decode(.turn, a, current.data);
-            return value.value.input.envelope;
-        };
-        current = previous;
-    }
-    return error.CyclicContinuityAncestry;
+    for (0..catalog.bundle.members.items.len + 1) |_| {
+        if (originated.contains(current.identity)) break;
+        try walked.append(a, current.identity);
+        current = try previousTurn(a, catalog, current) orelse break;
+    } else return error.CyclicContinuityAncestry;
+    for (walked.items) |identity| try originated.put(a, identity, {});
 }
 
 pub fn replacedTurns(a: std.mem.Allocator, catalog: *const Catalog) !Replaced {
@@ -87,9 +88,10 @@ pub fn replacedTurns(a: std.mem.Allocator, catalog: *const Catalog) !Replaced {
 pub fn validateBundle(a: std.mem.Allocator, catalog: *const Catalog) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
+    var originated: Replaced = .empty;
     for (catalog.bundle.members.items) |item| {
         if (item.data.kind != .turn) continue;
-        _ = try originalEnvelope(arena.allocator(), catalog, item);
+        try originate(arena.allocator(), catalog, &originated, item);
     }
     for (try pendingTurns(arena.allocator(), catalog)) |item| {
         try validateTarget(arena.allocator(), catalog, item);
@@ -110,7 +112,7 @@ pub fn pendingTurns(a: std.mem.Allocator, catalog: *const Catalog) ![]continuity
 fn validateTarget(a: std.mem.Allocator, catalog: *const Catalog, item: continuity.Member) !void {
     const value = try continuity.decode(.turn, a, item.data);
     const target = value.value.input.target orelse return;
-    if (catalog.lineage(item.data.lineage) == null) return error.MissingContinuityTarget;
+    if (!catalog.rooted(item.data.lineage)) return error.MissingContinuityTarget;
     const position = catalog.task_facts.get(.{
         .namespace = item.data.source.namespace,
         .task = target,
@@ -161,7 +163,7 @@ fn mappedInput(
 ) !t.Turn {
     const decoded = try continuity.decode(.turn, a, item.data);
     if (decoded.value.result != null) return error.CompletedContinuityTurn;
-    const local = try continuity.binding(portable.metadata.members.items, item.identity);
+    const local = try continuity.binding(portable.bindings, item.identity);
     const current = index.record(local.task) orelse return error.MissingContinuityMember;
     const fact = try sourceFact(a, catalog, item);
     var result = decoded.value.input;

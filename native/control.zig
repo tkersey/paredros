@@ -307,11 +307,13 @@ fn admitCommand(
             value,
             configuration.template(config),
         ),
-        .directive => |value| {
-            if (value.body == .cancel and try commands.unrunGenesis(driver, a, value.target))
-                return commands.abandon(driver, a, operation_id, origin, value.target);
-            return driver.directive(a, operation_id, origin, value.target, value.body.widen());
-        },
+        .directive => |value| return driver.directive(
+            a,
+            operation_id,
+            origin,
+            value.target,
+            value.body.widen(),
+        ),
         .ask => |value| return driver.turn(
             a,
             operation_id,
@@ -352,7 +354,7 @@ fn continuityCommand(
     const context = environment orelse return error.ContinuityEnvironmentUnavailable;
     switch (command) {
         .transfer_export => |value| {
-            const outcome = try continuity_control.exportBundle(
+            const result = try continuity_control.exportBundle(
                 driver,
                 a,
                 config,
@@ -361,20 +363,6 @@ fn continuityCommand(
                 origin,
                 value,
             );
-            const result = switch (outcome) {
-                .progress => |progress| progress,
-                .stranded => |tasks| {
-                    var refused = try rejected(a, error.StrandedGenesis);
-                    var data = native.json.object();
-                    try native.json.put(a, &data, "stranded", try wire.toJson(
-                        c.Vector(t.Id, null),
-                        a,
-                        .{ .items = tasks },
-                    ));
-                    try native.json.put(a, &refused, "data", data);
-                    return refused;
-                },
-            };
             return reply(
                 a,
                 if (result.phase == .written) "observed" else "admitted",

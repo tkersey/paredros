@@ -590,12 +590,12 @@ test "index rejects an imported head without a verified continuity manifest" {
     defer arena.deinit();
     const a = arena.allocator();
     var input = fixture.genesis();
-    input.imported = .{
+    input.imported = .{ .carried = .{
         .source = .{ .task = @splat(9), .digest = @splat(9) },
         .head = head(),
-    };
+    } };
     var imported = head();
-    imported.predecessor = input.imported.?.source;
+    imported.predecessor = input.imported.?.carried.?.source;
     const initial = try row(a, 1, .{ .genesis = input }, .{ .genesis = imported });
     try std.testing.expectError(
         error.UnprovenContinuityImport,

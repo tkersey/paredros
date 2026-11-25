@@ -5,7 +5,11 @@ const continuity = @import("continuity.zig");
 const Bundle = continuity.Bundle;
 const Member = continuity.Member;
 
-pub const Rule = union(enum) { member: t.ContinuityKind, ancestry: void };
+pub const Rule = union(enum) {
+    member: t.ContinuityKind,
+    cited: t.ContinuityKind,
+    ancestry: void,
+};
 const Entry = struct { Owner: type, field: []const u8, rule: Rule };
 const rules = [_]Entry{
     .{ .Owner = t.Head, .field = "predecessor", .rule = .ancestry },
@@ -24,8 +28,10 @@ const rules = [_]Entry{
     .{ .Owner = t.TurnReplacement, .field = "input", .rule = .ancestry },
     .{ .Owner = t.TurnReplacement, .field = "reference", .rule = .ancestry },
     .{ .Owner = t.Turn, .field = "context_references", .rule = .ancestry },
-    .{ .Owner = t.Experiment, .field = "evidence", .rule = .ancestry },
+    .{ .Owner = t.Experiment, .field = "evidence", .rule = .{ .cited = .method_report } },
     .{ .Owner = continuity.ContextFact, .field = "references", .rule = .ancestry },
+    .{ .Owner = t.CarriedHead, .field = "source", .rule = .ancestry },
+    .{ .Owner = t.ContinuityImport, .field = "manifest", .rule = .ancestry },
 };
 const Retained = @FieldType(t.Method, "retained");
 const Derived = @FieldType(t.Origin, "derived");
@@ -75,7 +81,8 @@ pub inline fn visit(comptime T: type, value: T, context: anytype) !void {
             if (comptime !contains(F)) continue;
             if (comptime classified(T, name)) |rule| switch (rule) {
                 .ancestry => {},
-                .member => |kind| try each(F, @field(value, name), kind, context),
+                .member => |kind| try each(F, @field(value, name), kind, true, context),
+                .cited => |kind| try each(F, @field(value, name), kind, false, context),
             } else try visit(F, @field(value, name), context);
         },
         .@"union" => switch (value) {
@@ -88,25 +95,31 @@ pub inline fn visit(comptime T: type, value: T, context: anytype) !void {
     }
 }
 
-inline fn each(comptime T: type, value: T, kind: t.ContinuityKind, context: anytype) !void {
+inline fn each(
+    comptime T: type,
+    value: T,
+    kind: t.ContinuityKind,
+    required: bool,
+    context: anytype,
+) !void {
     @setEvalBranchQuota(1_000_000);
     if (T == t.PublicationReference) {
         switch (value) {
             .current => {},
-            .retained => |retained| try context.reference(kind, retained),
+            .retained => |retained| try context.reference(kind, retained, required),
         }
         return;
     }
     if (comptime reference(T)) return context.reference(kind, .{
         .task = value.task,
         .digest = value.digest,
-    });
+    }, required);
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |name, F| {
-            if (comptime contains(F)) try each(F, @field(value, name), kind, context);
+            if (comptime contains(F)) try each(F, @field(value, name), kind, required, context);
         },
-        .optional => if (value) |inner| try each(@TypeOf(inner), inner, kind, context),
-        .pointer => |info| for (value) |item| try each(info.child, item, kind, context),
+        .optional => if (value) |inner| try each(@TypeOf(inner), inner, kind, required, context),
+        .pointer => |info| for (value) |item| try each(info.child, item, kind, required, context),
         else => @compileError("unsupported continuity reference carrier " ++ @typeName(T)),
     }
 }
@@ -125,6 +138,7 @@ pub const Catalog = struct {
     bundle: Bundle,
     identities: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
     lineages: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
+    pending: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
     references: std.AutoHashMapUnmanaged(ReferenceKey, Found) = .empty,
     facts: std.AutoHashMapUnmanaged(SourceKey, usize) = .empty,
     task_facts: std.AutoHashMapUnmanaged(TaskKey, usize) = .empty,
@@ -140,6 +154,10 @@ pub const Catalog = struct {
         const scratch = self.arena.allocator();
         for (bundle.lineages.items, 0..) |root, position| {
             const entry = try self.lineages.getOrPut(scratch, root.identity);
+            if (!entry.found_existing) entry.value_ptr.* = position;
+        }
+        for (bundle.pending.items, 0..) |root, position| {
+            const entry = try self.pending.getOrPut(scratch, root.lineage);
             if (!entry.found_existing) entry.value_ptr.* = position;
         }
         for (bundle.members.items, 0..) |item, position| {
@@ -163,6 +181,10 @@ pub const Catalog = struct {
         return self.bundle.lineages.items[self.lineages.get(identity) orelse return null];
     }
 
+    pub fn rooted(self: *const Catalog, identity: t.Digest) bool {
+        return self.lineages.contains(identity) or self.pending.contains(identity);
+    }
+
     pub fn producedBy(self: *const Catalog, task: t.Id) []const usize {
         return if (self.produced.get(task)) |list| list.items else &.{};
     }
@@ -180,7 +202,7 @@ pub const Catalog = struct {
         for (self.bundle.members.items) |item| {
             listed.clearRetainingCapacity();
             for (item.data.dependencies.items) |dependency| try listed.put(a, dependency, {});
-            const context: Closure = .{ .catalog = self, .listed = &listed };
+            const context: Closure = .{ .catalog = self, .item = item, .listed = &listed };
             switch (item.data.kind) {
                 inline else => |kind| {
                     var decoded = try continuity.decode(kind, a, item.data);
@@ -271,10 +293,26 @@ fn count(
 
 const Closure = struct {
     catalog: *const Catalog,
+    item: Member,
     listed: *const std.AutoHashMapUnmanaged(t.Digest, void),
 
-    fn reference(self: Closure, kind: t.ContinuityKind, value: t.Reference) !void {
-        const identity = try self.catalog.resolve(kind, value);
+    fn reference(self: Closure, kind: t.ContinuityKind, value: t.Reference, required: bool) !void {
+        const identity = try referenced(self.item, value) orelse {
+            if (required) return error.MissingContinuityReference;
+            return;
+        };
+        const target = self.catalog.member(identity) orelse return error.MissingContinuityReference;
+        if (target.data.kind != kind) return error.WrongContinuityKind;
         if (!self.listed.contains(identity)) return error.UnlistedContinuityReference;
     }
 };
+
+pub fn referenced(item: Member, value: t.Reference) !?t.Digest {
+    var found: ?t.Digest = null;
+    for (item.data.references.items) |entry| {
+        if (!std.meta.eql(entry.local, value)) continue;
+        if (found != null) return error.DuplicateContinuityBinding;
+        found = entry.member;
+    }
+    return found;
+}

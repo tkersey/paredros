@@ -113,25 +113,6 @@ pub fn authenticate(driver: anytype, origin: t.Origin) !void {
     if (!driver.attached or origin == .derived) return error.UnauthenticatedRequest;
 }
 
-pub fn unrunGenesis(driver: anytype, a: std.mem.Allocator, target: t.Id) !bool {
-    var index = try driver.rebuild(a);
-    defer index.deinit();
-    const record = index.record(target) orelse return false;
-    return record.input == .genesis and record.result == null;
-}
-
-pub fn abandon(
-    driver: anytype,
-    a: std.mem.Allocator,
-    operation: []const u8,
-    origin: t.Origin,
-    target: t.Id,
-) !t.Id {
-    try authenticate(driver, origin);
-    _ = try driver.service.requestCancel(a, operation, target, "operator cancelled unrun monitor");
-    return target;
-}
-
 pub fn genesis(
     driver: anytype,
     a: std.mem.Allocator,
@@ -243,9 +224,8 @@ fn importedGenesis(
 ) !?t.Id {
     const lineage = try admission.stableDigest(a, genesisEnvelope(request));
     const position = index.lineages.get(lineage) orelse {
-        const source = try continuity.sourceOperation(a, index, request.operation) orelse
-            return null;
-        if (source == .genesis) return error.OperationConflict;
+        if (try continuity.importedGenesis(a, index, request.operation))
+            return error.OperationConflict;
         return null;
     };
     const existing = index.records[position].input.genesis;

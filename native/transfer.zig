@@ -114,6 +114,7 @@ const Builder = struct {
                 value,
             ) },
             .dependencies = .{ .items = &.{} },
+            .references = .{ .items = &.{} },
         };
         return self.addData(current, data);
     }
@@ -144,27 +145,44 @@ const Builder = struct {
             .cut = .{ .items = &.{} },
             .cut_digest = @splat(0),
             .lineages = .{ .items = &.{} },
+            .pending = .{ .items = &.{} },
             .members = .{ .items = self.members.items },
             .archive_boundary = .{ .bytes = "" },
         });
         defer catalog.deinit();
+        var reached: std.AutoHashMapUnmanaged(t.Digest, std.ArrayList(t.Digest)) = .empty;
         for (self.members.items) |*item| {
-            if (item.data.kind == .head or
-                !std.meta.eql(item.data.source.namespace, self.source.namespace)) continue;
-            var linked: Linked = .{ .catalog = &catalog, .allocator = self.allocator };
-            switch (item.data.kind) {
-                inline else => |kind| {
-                    const decoded = try continuity.decode(kind, self.allocator, item.data);
-                    try continuity.visit(continuity.Payload(kind), decoded.value, &linked);
-                },
+            const lineage = try reached.getOrPut(self.allocator, item.data.lineage);
+            if (!lineage.found_existing) lineage.value_ptr.* = .empty;
+            if (std.meta.eql(item.data.source.namespace, self.source.namespace)) {
+                const prior = if (item.data.kind == .head) lineage.value_ptr.items else &.{};
+                try self.relink(&catalog, item, prior);
             }
-            if (linked.dependencies.items.len == 0) continue;
-            const old = item.identity;
-            item.data.dependencies = .{ .items = linked.dependencies.items };
-            item.identity = try continuity.digest(self.allocator, t.ContinuityData, item.data);
-            const position = self.seen.fetchRemove(old).?.value;
-            try self.seen.put(self.allocator, item.identity, position);
+            try lineage.value_ptr.append(self.allocator, item.identity);
         }
+    }
+
+    fn relink(
+        self: *Builder,
+        catalog: *const continuity.Catalog,
+        item: *continuity.Member,
+        prior: []const t.Digest,
+    ) !void {
+        var linked: Linked = .{ .catalog = catalog, .allocator = self.allocator };
+        try linked.dependencies.appendSlice(self.allocator, prior);
+        switch (item.data.kind) {
+            inline else => |kind| {
+                const decoded = try continuity.decode(kind, self.allocator, item.data);
+                try continuity.visit(continuity.Payload(kind), decoded.value, &linked);
+            },
+        }
+        if (linked.dependencies.items.len == 0) return;
+        const old = item.identity;
+        item.data.dependencies = .{ .items = linked.dependencies.items };
+        item.data.references = .{ .items = linked.references.items };
+        item.identity = try continuity.digest(self.allocator, t.ContinuityData, item.data);
+        const position = self.seen.fetchRemove(old).?.value;
+        try self.seen.put(self.allocator, item.identity, position);
     }
 
     fn appendRecord(self: *Builder, index: *const idx.Index, value: idx.Record) !void {
@@ -225,9 +243,20 @@ const Linked = struct {
     catalog: *const continuity.Catalog,
     allocator: std.mem.Allocator,
     dependencies: std.ArrayList(t.Digest) = .empty,
+    references: std.ArrayList(t.ContinuityBinding) = .empty,
 
-    pub fn reference(self: *Linked, kind: t.ContinuityKind, value: t.Reference) !void {
-        const identity = try self.catalog.resolve(kind, value);
+    pub fn reference(
+        self: *Linked,
+        kind: t.ContinuityKind,
+        value: t.Reference,
+        required: bool,
+    ) !void {
+        const identity = self.catalog.resolve(kind, value) catch |err| switch (err) {
+            error.MissingContinuityReference => if (required) return err else return,
+            else => return err,
+        };
+        for (self.references.items) |prior| if (std.meta.eql(prior.local, value)) return;
+        try self.references.append(self.allocator, .{ .member = identity, .local = value });
         for (self.dependencies.items) |prior| if (std.meta.eql(prior, identity)) return;
         try self.dependencies.append(self.allocator, identity);
     }
@@ -254,43 +283,59 @@ fn cutRows(a: std.mem.Allocator, index: *const idx.Index) ![]continuity.CutRow {
     return rows.toOwnedSlice(a);
 }
 
-fn addRoots(
-    builder: *Builder,
-    index: *const idx.Index,
-    mode: Mode,
-) ![]const continuity.Lineage {
-    const roots = try builder.allocator.alloc(continuity.Lineage, index.obligations.len);
-    for (roots, index.obligations) |*root, obligation| {
+fn addHeads(builder: *Builder, index: *const idx.Index, mode: Mode) ![]const usize {
+    const positions = try builder.allocator.alloc(usize, index.obligations.len);
+    for (positions, index.obligations) |*slot, obligation| {
         const head = index.head(&obligation);
         if (mode == .transfer and head.mode != .transferred and head.mode != .cancelled)
             return error.SourceNotTransferred;
         const position = obligation.chain[obligation.chain.len - 1];
         const current = index.reference(position);
-        _ = try builder.add(.head, head.lineage, index.records[position], current, head);
-        const selected = &builder.members.items[builder.members.items.len - 1];
-        var dependencies: std.ArrayList(t.Digest) = .empty;
-        for (builder.members.items[0 .. builder.members.items.len - 1]) |item| {
-            if (item.data.kind == .head and !std.meta.eql(
-                item.data.lineage,
-                head.lineage,
-            )) continue;
-            if (std.meta.eql(item.data.lineage, head.lineage) or
-                std.meta.eql(item.data.lineage, global()))
-                try dependencies.append(builder.allocator, item.identity);
-        }
-        selected.data.dependencies.items = try dependencies.toOwnedSlice(builder.allocator);
-        selected.identity = try continuity.digest(
-            builder.allocator,
-            t.ContinuityData,
-            selected.data,
-        );
+        const record = index.records[position];
+        const identity = try builder.add(.head, head.lineage, record, current, head);
+        slot.* = builder.seen.get(identity).?;
+    }
+    return positions;
+}
+
+fn addPending(builder: *Builder, index: *const idx.Index, stranded: []const t.Id) ![]const usize {
+    const positions = try builder.allocator.alloc(usize, stranded.len);
+    for (positions, stranded) |*slot, task| {
+        const record = index.record(task) orelse return error.MissingContinuityGenesis;
+        if (record.input != .genesis or record.result != null or
+            record.input.genesis.imported != null) return error.InvalidContinuityGenesis;
+        const genesis = record.input.genesis;
+        const current = try rowReference(record.*, false);
+        const identity = try builder.add(.genesis, genesis.lineage, record.*, current, genesis);
+        slot.* = builder.seen.get(identity).?;
+    }
+    return positions;
+}
+
+fn lineageRoots(
+    builder: *Builder,
+    index: *const idx.Index,
+    heads: []const usize,
+) ![]const continuity.Lineage {
+    const roots = try builder.allocator.alloc(continuity.Lineage, index.obligations.len);
+    for (roots, index.obligations, heads) |*root, obligation, position| {
+        const item = builder.members.items[position];
         root.* = .{
-            .identity = head.lineage,
+            .identity = item.data.lineage,
             .obligation = obligation.task,
-            .source_head = current,
-            .head = selected.identity,
+            .source_head = item.current,
+            .head = item.identity,
             .pending_controls = .{ .items = try pendingControlKeys(builder, index, obligation) },
         };
+    }
+    return roots;
+}
+
+fn pendingRoots(builder: *Builder, positions: []const usize) ![]const continuity.Pending {
+    const roots = try builder.allocator.alloc(continuity.Pending, positions.len);
+    for (roots, positions) |*root, position| {
+        const item = builder.members.items[position];
+        root.* = .{ .lineage = item.data.lineage, .member = item.identity };
     }
     return roots;
 }
@@ -335,6 +380,7 @@ pub fn prepare(
     index: *const idx.Index,
     source: Source,
     mode: Mode,
+    stranded: []const t.Id,
 ) !OwnedBundle {
     if (importPending(index)) return error.ContinuityImportPending;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -342,15 +388,17 @@ pub fn prepare(
     const scratch = arena.allocator();
     var builder: Builder = .{ .allocator = scratch, .source = source };
     for (index.records) |record| try builder.appendRecord(index, record);
+    const pending = try addPending(&builder, index, stranded);
+    const heads = try addHeads(&builder, index, mode);
     try builder.link(mode);
-    const roots = try addRoots(&builder, index, mode);
     const cut: @FieldType(Bundle, "cut") = .{ .items = try cutRows(scratch, index) };
     const bundle: Bundle = .{
         .source = source,
         .mode = mode,
         .cut = cut,
         .cut_digest = try continuity.digest(scratch, @TypeOf(cut), cut),
-        .lineages = .{ .items = roots },
+        .lineages = .{ .items = try lineageRoots(&builder, index, heads) },
+        .pending = .{ .items = try pendingRoots(&builder, pending) },
         .members = .{ .items = try ordered(scratch, builder.members.items) },
         .archive_boundary = .{ .bytes = "Portable application facts through this cut; " ++
             "the source namespace retains native execution and historical archive custody." },
@@ -366,8 +414,10 @@ pub fn capture(driver: anytype, a: std.mem.Allocator, source: Source, mode: Mode
     defer driver.service.dispatch_gate = gate;
     var index = try driver.rebuild(a);
     defer index.deinit();
-    if (try genesisPending(driver.service, a, &index)) return error.ContinuityGenesisPending;
-    return prepare(a, &index, source, mode);
+    const unrun = try unrunGeneses(driver.service, a, &index);
+    defer a.free(unrun.stranded);
+    if (unrun.pending) return error.ContinuityGenesisPending;
+    return prepare(a, &index, source, mode, unrun.stranded);
 }
 
 pub const ImportProgress = struct {
@@ -396,6 +446,13 @@ pub fn validateBindings(
         if (!bindings.admits(head.value.specification.repository))
             return error.ContinuityResourceMismatch;
     }
+    for (bundle.pending.items) |root| {
+        const item = continuity.member(bundle, root.member).?;
+        var genesis = try continuity.decode(.genesis, a, item.data);
+        defer genesis.deinit();
+        if (!bindings.admits(genesis.value.specification.repository))
+            return error.ContinuityResourceMismatch;
+    }
 }
 
 fn validateFresh(index: *const idx.Index, identity: t.Digest) !void {
@@ -416,14 +473,16 @@ fn validateFresh(index: *const idx.Index, identity: t.Digest) !void {
 }
 
 fn validateTarget(
+    a: std.mem.Allocator,
     index: *const idx.Index,
     namespace: t.Digest,
     bundle: Bundle,
     identity: t.Digest,
 ) !void {
     if (std.meta.eql(bundle.source.namespace, namespace)) return error.ImportTargetNotFresh;
-    for (bundle.lineages.items) |root|
-        _ = try continuity.importedLineage(index, root.identity, identity);
+    const roots = try continuity.rootLineages(a, bundle);
+    defer a.free(roots);
+    for (roots) |root| _ = try continuity.importedLineage(index, root, identity);
     const view = index.continuity_import orelse return validateFresh(index, identity);
     if (!std.meta.eql(view.digest, identity)) return error.ContinuityImportConflict;
 }
@@ -437,7 +496,7 @@ pub fn validateImport(
 ) !?t.Id {
     try continuity.validate(a, bundle);
     const identity = try continuity.digest(a, Bundle, bundle);
-    try validateTarget(index, namespace, bundle, identity);
+    try validateTarget(a, index, namespace, bundle, identity);
     try validateBindings(a, bundle, configuration.bindings(config));
     const view = index.continuity_import orelse return null;
     return index.records[view.position].task;
@@ -461,19 +520,17 @@ fn completedCut(a: std.mem.Allocator, record: idx.Record, identity: t.Digest) !?
 fn genesisInput(
     a: std.mem.Allocator,
     origin: t.Origin,
-    bundle: Bundle,
-    identity: t.Digest,
-    manifest: t.Reference,
-    mappings: []const t.ContinuityBinding,
+    view: *const continuity.ImportView,
     root: continuity.Lineage,
     clock_ms: i64,
 ) !t.Genesis {
-    var source = try continuity.decode(.head, a, continuity.member(bundle, root.head).?.data);
+    const item = continuity.member(view.bundle.?, root.head).?;
+    var source = try continuity.decode(.head, a, item.data);
     defer source.deinit();
-    const rebased = try continuity.rebaseHead(bundle, mappings, source.value);
-    const value: t.Genesis = .{
+    const rebased = try continuity.rebaseHead(item, view.bindings, source.value);
+    return frozen(a, .{
         .envelope = .{
-            .operation = .{ .bytes = try mappedOperation(a, .genesis, identity, root.identity) },
+            .operation = .{ .bytes = try mappedOperation(a, .genesis, view.digest, root.identity) },
             .stable_request = try continuity.digest(a, continuity.Lineage, root),
             .origin = origin,
         },
@@ -481,17 +538,36 @@ fn genesisInput(
         .specification = rebased.specification,
         .clock_ms = clock_ms,
         .imported = .{
-            .source = root.source_head,
-            .head = rebased,
-            .continuity = .{
-                .bundle = identity,
-                .manifest = manifest,
-                .source_namespace = bundle.source.namespace,
-                .source_cut = bundle.cut_digest,
-                .members = .{ .items = mappings },
-            },
+            .carried = .{ .source = root.source_head, .head = rebased },
+            .continuity = view.metadata.?,
         },
-    };
+    });
+}
+
+fn pendingInput(
+    a: std.mem.Allocator,
+    origin: t.Origin,
+    view: *const continuity.ImportView,
+    root: continuity.Pending,
+    clock_ms: i64,
+) !t.Genesis {
+    const item = continuity.member(view.bundle.?, root.member).?;
+    var source = try continuity.decode(.genesis, a, item.data);
+    defer source.deinit();
+    return frozen(a, .{
+        .envelope = .{
+            .operation = .{ .bytes = try mappedOperation(a, .genesis, view.digest, root.lineage) },
+            .stable_request = try continuity.digest(a, continuity.Pending, root),
+            .origin = origin,
+        },
+        .lineage = root.lineage,
+        .specification = source.value.specification,
+        .clock_ms = clock_ms,
+        .imported = .{ .carried = null, .continuity = view.metadata.? },
+    });
+}
+
+fn frozen(a: std.mem.Allocator, value: t.Genesis) !t.Genesis {
     const bytes = try c.encodeOwned(t.Genesis, a, value);
     return (try c.decodeOwned(t.Genesis, a, bytes)).value;
 }
@@ -504,8 +580,8 @@ pub fn importProgress(driver: anytype, a: std.mem.Allocator) !ImportProgress {
     const view = index.continuity_import orelse return error.MissingContinuityManifest;
     var obligations: std.ArrayList(t.Id) = .empty;
     errdefer obligations.deinit(a);
-    if (view.bundle) |bundle| for (bundle.lineages.items) |root| {
-        const position = try continuity.importedLineage(&index, root.identity, view.digest) orelse
+    if (view.bundle) |bundle| for (try continuity.rootLineages(arena.allocator(), bundle)) |root| {
+        const position = try continuity.importedLineage(&index, root, view.digest) orelse
             continue;
         try obligations.append(a, index.records[position].task);
     };
@@ -585,16 +661,13 @@ fn submitRoots(
     var submitted = false;
     for (bundle.lineages.items) |root| {
         if (try continuity.importedLineage(index, root.identity, view.digest) != null) continue;
-        const input = try genesisInput(
-            a,
-            origin,
-            bundle,
-            view.digest,
-            view.manifest.?,
-            view.metadata.?.members.items,
-            root,
-            clock_ms,
-        );
+        const input = try genesisInput(a, origin, view, root, clock_ms);
+        _ = try driver.service.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
+        submitted = true;
+    }
+    for (bundle.pending.items) |root| {
+        if (try continuity.importedLineage(index, root.lineage, view.digest) != null) continue;
+        const input = try pendingInput(a, origin, view, root, clock_ms);
         _ = try driver.service.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
         submitted = true;
     }
@@ -818,11 +891,8 @@ pub fn admitPendingControls(
         }
     }
     if (next) |key| {
-        var control = try continuity.decode(
-            .directive,
-            a,
-            continuity.member(imported.bundle, key).?.data,
-        );
+        const item = continuity.member(imported.bundle, key).?;
+        var control = try continuity.decode(.directive, a, item.data);
         defer control.deinit();
         const operation = try continuity.directiveOperation(a, imported.metadata.bundle, key);
         defer a.free(operation);
@@ -831,7 +901,7 @@ pub fn admitPendingControls(
             operation,
             origin,
             target,
-            try continuity.rebaseControl(imported, control.value.body),
+            try continuity.rebaseControl(imported, item, control.value.body),
             key,
         );
         result.remaining -= 1;
@@ -855,26 +925,30 @@ pub fn importPending(index: anytype) bool {
 }
 
 pub fn genesisPending(service: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
-    for (index.records) |record| {
-        if (record.input != .genesis or record.result != null) continue;
-        if (try genesisDisposition(service, a, record.task) == .runnable) return true;
-    }
-    return false;
+    const unrun = try unrunGeneses(service, a, index);
+    a.free(unrun.stranded);
+    return unrun.pending;
 }
 
-pub fn strandedGeneses(
-    service: anytype,
-    a: std.mem.Allocator,
-    index: *const idx.Index,
-) ![]const t.Id {
-    var result: std.ArrayList(t.Id) = .empty;
-    errdefer result.deinit(a);
+pub const Unrun = struct { pending: bool, stranded: []const t.Id };
+
+pub fn unrunGeneses(service: anytype, a: std.mem.Allocator, index: *const idx.Index) !Unrun {
+    var stranded: std.ArrayList(t.Id) = .empty;
+    errdefer stranded.deinit(a);
+    var pending = false;
     for (index.records) |record| {
         if (record.input != .genesis or record.result != null) continue;
-        if (try genesisDisposition(service, a, record.task) == .stranded)
-            try result.append(a, record.task);
+        switch (try genesisDisposition(service, a, record.task)) {
+            .settled => {},
+            .runnable => pending = true,
+            .stranded => if (record.input.genesis.imported == null) {
+                try stranded.append(a, record.task);
+            } else {
+                pending = true;
+            },
+        }
     }
-    return result.toOwnedSlice(a);
+    return .{ .pending = pending, .stranded = try stranded.toOwnedSlice(a) };
 }
 
 const GenesisDisposition = enum { runnable, stranded, settled };

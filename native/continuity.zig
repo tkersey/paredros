@@ -8,6 +8,7 @@ const admission = @import("admission.zig");
 const experiments = @import("experiments.zig");
 pub const Catalog = @import("continuity_catalog.zig").Catalog;
 pub const visit = @import("continuity_catalog.zig").visit;
+pub const referenced = @import("continuity_catalog.zig").referenced;
 
 pub const ImportView = import_view.View;
 pub const ImportPhase = import_view.Phase;
@@ -42,6 +43,7 @@ pub const Lineage = struct {
     head: t.Digest,
     pending_controls: c.Vector(t.Digest, null),
 };
+pub const Pending = struct { lineage: t.Digest, member: t.Digest };
 pub const Bundle = struct {
     version: u32 = 1,
     source: Source,
@@ -49,6 +51,7 @@ pub const Bundle = struct {
     cut: c.Vector(CutRow, null),
     cut_digest: t.Digest,
     lineages: c.Vector(Lineage, null),
+    pending: c.Vector(Pending, null),
     members: c.Vector(Member, null),
     archive_boundary: c.Text(1024),
 };
@@ -90,12 +93,14 @@ pub const SourceFact = struct {
 pub const Portable = struct {
     bundle: Bundle,
     metadata: t.ContinuityImport,
+    bindings: []const t.ContinuityBinding,
 };
 
 pub const Imported = struct {
     obligation: t.Id,
     bundle: Bundle,
     metadata: t.ContinuityImport,
+    bindings: []const t.ContinuityBinding,
 };
 
 pub fn hash(bytes: []const u8) t.Digest {
@@ -134,6 +139,7 @@ pub fn Payload(comptime kind: t.ContinuityKind) type {
         .method_source => t.RetainedMethodSource,
         .method_report => ExperimentFact,
         .context => ContextFact,
+        .genesis => t.Genesis,
     };
 }
 
@@ -193,8 +199,13 @@ pub fn validateData(a: std.mem.Allocator, data: t.ContinuityData) !void {
         inline else => |kind| {
             var parsed = try decode(kind, a, data);
             defer parsed.deinit();
-            if (kind == .head and !std.meta.eql(parsed.value.lineage, data.lineage))
+            if ((kind == .head or kind == .genesis) and
+                !std.meta.eql(parsed.value.lineage, data.lineage))
                 return error.ContinuityLineageMismatch;
+            if (kind == .genesis) {
+                if (parsed.value.imported != null) return error.InvalidContinuityGenesis;
+                try admission.specification(parsed.value.specification);
+            }
             if (kind == .settlement) try verifySourceFact(a, data, parsed.value);
             if (kind == .method_source and
                 !std.meta.eql(hash(parsed.value.bytes.bytes), parsed.value.source_digest))
@@ -370,10 +381,32 @@ fn validateLineages(a: std.mem.Allocator, catalog: *const Catalog) !void {
         try admission.specification(head.value.specification);
         try validatePending(a, catalog, root, head.value);
     }
+    for (bundle.pending.items) |root| {
+        const entry = try roots.getOrPut(a, root.lineage);
+        if (entry.found_existing) return error.DuplicateContinuityLineage;
+        const selected = catalog.member(root.member) orelse return error.MissingContinuityGenesis;
+        if (selected.data.kind != .genesis or !std.meta.eql(selected.data.lineage, root.lineage) or
+            !std.meta.eql(selected.data.source.namespace, bundle.source.namespace))
+            return error.ContinuityLineageMismatch;
+    }
     for (bundle.members.items) |item| {
         if (!std.meta.eql(item.data.lineage, @as(t.Digest, @splat(0))) and
             !roots.contains(item.data.lineage)) return error.OrphanContinuityMember;
     }
+}
+
+pub fn rootLineages(a: std.mem.Allocator, bundle: Bundle) ![]const t.Digest {
+    const result = try a.alloc(t.Digest, bundle.lineages.items.len + bundle.pending.items.len);
+    for (result[0..bundle.lineages.items.len], bundle.lineages.items) |*slot, root|
+        slot.* = root.identity;
+    for (result[bundle.lineages.items.len..], bundle.pending.items) |*slot, root|
+        slot.* = root.lineage;
+    return result;
+}
+
+pub fn pendingRoot(bundle: Bundle, identity: t.Digest) ?Pending {
+    for (bundle.pending.items) |item| if (std.meta.eql(item.lineage, identity)) return item;
+    return null;
 }
 
 pub fn binding(values: []const t.ContinuityBinding, identity: t.Digest) !t.Reference {
@@ -387,52 +420,30 @@ pub fn binding(values: []const t.ContinuityBinding, identity: t.Digest) !t.Refer
 }
 
 pub fn mapReference(
-    bundle: Bundle,
+    item: Member,
     mappings: []const t.ContinuityBinding,
-    kind: t.ContinuityKind,
     old: t.Reference,
 ) !t.Reference {
-    var found: ?t.Digest = null;
-    for (bundle.members.items) |item| {
-        if (item.data.kind != kind) continue;
-        const original: t.Reference = .{
-            .task = item.data.source.task,
-            .digest = item.data.source.digest,
-        };
-        if (!std.meta.eql(item.current, old) and !std.meta.eql(original, old)) continue;
-        if (found != null and !std.meta.eql(found.?, item.identity))
-            return error.AmbiguousContinuityReference;
-        found = item.identity;
-    }
-    return binding(mappings, found orelse return error.MissingContinuityReference);
+    const identity = try referenced(item, old) orelse return error.MissingContinuityReference;
+    return binding(mappings, identity);
 }
 
 pub fn rebaseHead(
-    bundle: Bundle,
+    item: Member,
     mappings: []const t.ContinuityBinding,
     original: t.Head,
 ) !t.Head {
     var head = original;
     if (head.last_observation) |*observation| if (observation.batch) |*batch| {
-        if (batch.* == .retained)
-            batch.retained = try mapReference(bundle, mappings, .batch, batch.retained);
+        if (batch.* == .retained) batch.retained = try mapReference(item, mappings, batch.retained);
     };
     if (head.method == .retained) {
-        head.method.retained.source = try mapReference(
-            bundle,
-            mappings,
-            .method_report,
-            head.method.retained.source,
-        );
-        head.method.retained.report = try mapReference(
-            bundle,
-            mappings,
-            .method_report,
-            head.method.retained.report,
-        );
+        const method = &head.method.retained;
+        method.source = try mapReference(item, mappings, method.source);
+        method.report = try mapReference(item, mappings, method.report);
     }
     if (head.method_disposition) |*disposition|
-        disposition.source = try mapReference(bundle, mappings, .method_report, disposition.source);
+        disposition.source = try mapReference(item, mappings, disposition.source);
     return head;
 }
 
@@ -443,28 +454,43 @@ pub fn prepareImports(a: std.mem.Allocator, index: anytype) ![]const Imported {
         const genesis = record.input.genesis;
         const imported = genesis.imported orelse continue;
         const metadata = imported.continuity orelse return error.UnprovenContinuityImport;
-        const bundle = try importedBundle(index, metadata);
-        const root = lineage(bundle, genesis.lineage) orelse
+        const portable = try importedBundle(index, metadata);
+        const carried = imported.carried orelse {
+            try freshImport(a, portable.bundle, genesis);
+            continue;
+        };
+        const root = lineage(portable.bundle, genesis.lineage) orelse
             return error.MissingContinuityLineage;
-        if (!std.meta.eql(root.source_head, imported.source))
+        if (!std.meta.eql(root.source_head, carried.source))
             return error.ContinuityAncestryMismatch;
-        var head = try decode(.head, a, member(bundle, root.head).?.data);
+        const item = member(portable.bundle, root.head).?;
+        var head = try decode(.head, a, item.data);
         defer head.deinit();
-        const rebased = try rebaseHead(bundle, metadata.members.items, head.value);
-        if (!try equal(a, t.Head, imported.head, rebased) or
+        const rebased = try rebaseHead(item, portable.bindings, head.value);
+        if (!try equal(a, t.Head, carried.head, rebased) or
             !try equal(a, t.Specification, genesis.specification, rebased.specification))
             return error.ContinuityHeadMismatch;
         if (record.result == null) continue;
         try result.append(a, .{
             .obligation = record.task,
-            .bundle = bundle,
+            .bundle = portable.bundle,
             .metadata = metadata,
+            .bindings = portable.bindings,
         });
     }
     return result.toOwnedSlice(a);
 }
 
-fn importedBundle(index: anytype, metadata: t.ContinuityImport) !Bundle {
+fn freshImport(a: std.mem.Allocator, bundle: Bundle, genesis: t.Genesis) !void {
+    const root = pendingRoot(bundle, genesis.lineage) orelse
+        return error.MissingContinuityLineage;
+    var source = try decode(.genesis, a, member(bundle, root.member).?.data);
+    defer source.deinit();
+    if (!try equal(a, t.Specification, genesis.specification, source.value.specification))
+        return error.ContinuityHeadMismatch;
+}
+
+fn importedBundle(index: anytype, metadata: t.ContinuityImport) !Portable {
     const view = index.continuity_import orelse return error.MissingContinuityManifest;
     const expected = view.metadata orelse return error.IncompleteContinuityImport;
     const bundle = view.bundle.?;
@@ -478,12 +504,8 @@ fn importedBundle(index: anytype, metadata: t.ContinuityImport) !Bundle {
         !std.meta.eql(record.result_digest.?, metadata.manifest.digest) or
         !std.meta.eql(record.input.continuity_cut.bundle_digest, view.digest))
         return error.InvalidContinuityManifest;
-    if (metadata.members.items.len != expected.members.items.len)
-        return error.IncompleteContinuityImport;
-    for (metadata.members.items, expected.members.items) |left, right| {
-        if (!std.meta.eql(left, right)) return error.ContinuityBindingMismatch;
-    }
-    return bundle;
+    if (!std.meta.eql(metadata.members, expected.members)) return error.ContinuityBindingMismatch;
+    return .{ .bundle = bundle, .metadata = metadata, .bindings = view.bindings };
 }
 
 pub fn findImport(index: anytype, obligation: t.Id) ?Imported {
@@ -491,8 +513,8 @@ pub fn findImport(index: anytype, obligation: t.Id) ?Imported {
     return null;
 }
 
-fn boundMember(value: Imported, local: t.Reference) ?Member {
-    for (value.metadata.members.items) |entry| {
+fn boundMember(value: Portable, local: t.Reference) ?Member {
+    for (value.bindings) |entry| {
         if (std.meta.eql(entry.local, local)) return member(value.bundle, entry.member);
     }
     return null;
@@ -504,8 +526,7 @@ pub fn resolve(
     local: t.Reference,
     kind: t.ContinuityKind,
 ) !t.ContinuityData {
-    for (index.imports) |entry| {
-        if (obligation) |target| if (!std.meta.eql(entry.obligation, target)) continue;
+    for (index.portable) |entry| {
         const selected = boundMember(entry, local) orelse continue;
         if (selected.data.kind != kind) return error.WrongContinuityKind;
         if (obligation) |target| {
@@ -524,9 +545,10 @@ pub fn rebaseFrom(
     kind: t.ContinuityKind,
     original: t.Reference,
 ) !t.Reference {
-    for (index.imports) |entry| {
-        if (boundMember(entry, container) == null) continue;
-        return mapReference(entry.bundle, entry.metadata.members.items, kind, original);
+    for (index.portable) |entry| {
+        const item = boundMember(entry, container) orelse continue;
+        if (item.data.kind != kind) return error.WrongContinuityKind;
+        return mapReference(item, entry.bindings, original);
     }
     return error.UnprovenContinuityMember;
 }
@@ -556,7 +578,7 @@ pub fn mappedControl(
     const item = member(imported.bundle, key) orelse return error.MissingContinuityControl;
     var original = try decode(.directive, a, item.data);
     defer original.deinit();
-    const body = try rebaseControl(imported, original.value.body);
+    const body = try rebaseControl(imported, item, original.value.body);
     const stable = try @import("admission.zig").stableDigest(a, .{
         .operation = t.OperationId{ .bytes = operation },
         .request = key,
@@ -576,13 +598,16 @@ pub fn mappedControl(
     return null;
 }
 
-pub fn rebaseControl(imported: Imported, original: t.DirectiveBody) !t.DirectiveBody {
+pub fn rebaseControl(
+    imported: Imported,
+    item: Member,
+    original: t.DirectiveBody,
+) !t.DirectiveBody {
     var body = original;
     if (body == .adopt and body.adopt.method == .retained) {
-        const mappings = imported.metadata.members.items;
         const method = &body.adopt.method.retained;
-        method.source = try mapReference(imported.bundle, mappings, .method_report, method.source);
-        method.report = try mapReference(imported.bundle, mappings, .method_report, method.report);
+        method.source = try mapReference(item, imported.bindings, method.source);
+        method.report = try mapReference(item, imported.bindings, method.report);
     }
     return body;
 }
@@ -681,6 +706,11 @@ fn producedPayload(
                 .input = input.experiment,
                 .result = experiments.accounted(output.?.experiment, snapshot.accounting),
             });
+        },
+        .genesis => {
+            if (input != .genesis or snapshot.result != null)
+                return error.ContinuityProducerMismatch;
+            try samePayload(a, item, .genesis, input.genesis);
         },
         .method_source, .context => return error.UnsupportedContinuityProducer,
         .settlement => return error.InvalidContinuityFact,
@@ -787,26 +817,31 @@ fn validatePending(
     if (count != root.pending_controls.items.len) return error.MissingContinuityControl;
 }
 
-pub fn sourceOperation(a: std.mem.Allocator, index: anytype, operation: []const u8) !?t.Input {
-    const view = index.continuity_import orelse return null;
-    const bundle = view.bundle orelse return null;
+pub fn importedGenesis(a: std.mem.Allocator, index: anytype, operation: []const u8) !bool {
+    const view = index.continuity_import orelse return false;
+    const bundle = view.bundle orelse return false;
+    const identities = try rootLineages(a, bundle);
+    defer a.free(identities);
     for (bundle.members.items) |item| {
         if (item.data.kind != .settlement) continue;
-        const fact = try decode(.settlement, a, item.data);
-        const input = try sourceInput(a, fact.value.input);
-        const envelope = switch (input) {
-            inline else => |value| value.envelope,
-        };
-        if (std.mem.eql(u8, envelope.operation.bytes, operation)) return input;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const fact = try decode(.settlement, arena.allocator(), item.data);
+        const input = try sourceInput(arena.allocator(), fact.value.input);
+        if (input != .genesis or
+            !std.mem.eql(u8, input.genesis.envelope.operation.bytes, operation)) continue;
+        for (identities) |identity| {
+            if (std.meta.eql(identity, input.genesis.lineage)) return true;
+        }
     }
-    return null;
+    return false;
 }
 
 pub fn preparePortable(a: std.mem.Allocator, index: anytype) ![]const Portable {
     const view = index.continuity_import orelse return &.{};
     const metadata = view.metadata orelse return &.{};
     const result = try a.alloc(Portable, 1);
-    result[0] = .{ .bundle = view.bundle.?, .metadata = metadata };
+    result[0] = .{ .bundle = view.bundle.?, .metadata = metadata, .bindings = view.bindings };
     return result;
 }
 
@@ -815,7 +850,7 @@ pub fn portableMember(index: anytype, local: t.Reference, kind: t.ContinuityKind
     member: Member,
 } {
     for (index.portable) |portable| {
-        for (portable.metadata.members.items) |mapping| {
+        for (portable.bindings) |mapping| {
             if (!std.meta.eql(mapping.local, local)) continue;
             const found = member(portable.bundle, mapping.member) orelse
                 return error.MissingContinuityMember;
@@ -827,11 +862,8 @@ pub fn portableMember(index: anytype, local: t.Reference, kind: t.ContinuityKind
 }
 
 pub fn importedTarget(index: anytype, portable: Portable, identity: t.Digest) !t.Id {
-    if (lineage(portable.bundle, identity) == null) return error.MissingContinuityTarget;
-    for (index.imports) |imported| {
-        if (std.meta.eql(imported.metadata.bundle, portable.metadata.bundle) and
-            std.meta.eql(index.record(imported.obligation).?.input.genesis.lineage, identity))
-            return imported.obligation;
-    }
-    return error.MissingContinuityTarget;
+    const position = try importedLineage(index, identity, portable.metadata.bundle) orelse
+        return error.MissingContinuityTarget;
+    if (index.records[position].result == null) return error.MissingContinuityTarget;
+    return index.records[position].task;
 }

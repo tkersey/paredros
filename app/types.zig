@@ -267,6 +267,7 @@ pub const ContinuityKind = enum {
     method_source,
     method_report,
     context,
+    genesis,
 };
 pub const ContinuityProvenance = struct {
     namespace: Digest,
@@ -284,6 +285,7 @@ pub const ContinuityData = struct {
     source: ContinuityProvenance,
     payload: c.Bytes(null),
     dependencies: c.Vector(Digest, null),
+    references: c.Vector(ContinuityBinding, null),
 };
 pub const ContinuityBinding = struct { member: Digest, local: Reference };
 pub const ContinuityMember = struct {
@@ -302,8 +304,9 @@ pub const ContinuityImport = struct {
     manifest: Reference,
     source_namespace: Digest,
     source_cut: Digest,
-    members: c.Vector(ContinuityBinding, null),
+    members: Digest,
 };
+pub const CarriedHead = struct { source: Reference, head: Head };
 pub const TransferMarker = struct { envelope: Envelope };
 pub const ConfirmationReceipt = struct { envelope: Envelope, task: Id };
 pub const Genesis = struct {
@@ -312,8 +315,7 @@ pub const Genesis = struct {
     specification: Specification,
     clock_ms: i64,
     imported: ?struct {
-        source: Reference,
-        head: Head,
+        carried: ?CarriedHead,
         continuity: ?ContinuityImport = null,
     },
 };

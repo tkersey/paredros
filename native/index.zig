@@ -490,12 +490,11 @@ fn validateGenesis(record: Record, initial: t.Head) !void {
     if (initial.version != 1 or initial.sequence != 0 or initial.obligation != .self or
         initial.attempt != 0 or initial.superseded != null or
         !std.meta.eql(initial.lineage, input.lineage)) return error.InvalidGenesisHead;
-    if (input.imported) |imported| {
-        if (!std.meta.eql(initial.predecessor, @as(?t.Reference, imported.source)) or
-            initial.folded_directive_ordinal != 0 or initial.last_directive != null)
-            return error.InvalidGenesisHead;
-    } else if (initial.predecessor != null or initial.folded_directive_ordinal != 0 or
-        initial.last_directive != null) return error.InvalidGenesisHead;
+    const carried = if (input.imported) |imported| imported.carried else null;
+    const predecessor: ?t.Reference = if (carried) |value| value.source else null;
+    if (!std.meta.eql(initial.predecessor, predecessor) or
+        initial.folded_directive_ordinal != 0 or initial.last_directive != null)
+        return error.InvalidGenesisHead;
 }
 
 fn restrict(mode: t.Mode, body: t.DirectiveBody) t.Mode {

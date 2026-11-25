@@ -300,7 +300,7 @@ fn importedBatches(
     for (imported.bundle.members.items) |member| {
         if (member.data.kind != .batch or !std.meta.eql(member.data.lineage, head.lineage))
             continue;
-        const reference = try continuity.binding(imported.metadata.members.items, member.identity);
+        const reference = try continuity.binding(imported.bindings, member.identity);
         const source = try continuity.resolve(index, obligation.task, reference, .batch);
         var decoded = try continuity.decode(.batch, a, source);
         if (wanted) |sequence| if (sequence != decoded.value.sequence) {

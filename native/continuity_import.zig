@@ -15,6 +15,7 @@ pub const View = struct {
     positions: std.AutoHashMapUnmanaged(t.Digest, usize) = .empty,
     members: u64 = 0,
     metadata: ?t.ContinuityImport = null,
+    bindings: []const t.ContinuityBinding = &.{},
 
     pub fn reference(self: *const View, index: anytype, identity: t.Digest) ?t.Reference {
         const position = self.local[self.positions.get(identity) orelse return null] orelse
@@ -74,7 +75,7 @@ pub fn prepare(a: std.mem.Allocator, index: anytype) !?View {
     try mapMembers(a, index, &view);
     view.phase = if (view.metadata == null)
         .members_pending
-    else if (try lineagesComplete(index, view))
+    else if (try lineagesComplete(a, index, view))
         .materialized
     else
         .genesis_pending;
@@ -118,12 +119,17 @@ fn mapMembers(a: std.mem.Allocator, index: anytype, view: *View) !void {
         view.members += 1;
     }
     if (view.members != bundle.members.items.len) return;
+    view.bindings = mappings;
     view.metadata = .{
         .bundle = view.digest,
         .manifest = view.manifest.?,
         .source_namespace = bundle.source.namespace,
         .source_cut = bundle.cut_digest,
-        .members = .{ .items = mappings },
+        .members = try continuity.digest(
+            a,
+            c.Vector(t.ContinuityBinding, null),
+            .{ .items = mappings },
+        ),
     };
 }
 
@@ -166,10 +172,10 @@ fn verifyBindings(
     }
 }
 
-fn lineagesComplete(index: anytype, view: View) !bool {
+fn lineagesComplete(a: std.mem.Allocator, index: anytype, view: View) !bool {
     var complete = true;
-    for (view.bundle.?.lineages.items) |root| {
-        const position = try importedLineage(index, root.identity, view.digest) orelse {
+    for (try continuity.rootLineages(a, view.bundle.?)) |identity| {
+        const position = try importedLineage(index, identity, view.digest) orelse {
             complete = false;
             continue;
         };

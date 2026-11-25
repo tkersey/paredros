@@ -204,7 +204,7 @@ fn importedTurns(a: std.mem.Allocator, index: *const idx.Index) ![]ImportedTurn 
             if (value.value.result == null) continue;
             try result.append(a, .{
                 .member = member,
-                .local = try continuity.binding(imported.metadata.members.items, member.identity),
+                .local = try continuity.binding(imported.bindings, member.identity),
                 .value = value.value,
                 .source_snapshot = (try @import("continuity_turn.zig").sourceFact(
                     a,

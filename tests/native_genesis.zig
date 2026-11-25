@@ -140,10 +140,10 @@ fn importedInput(desired: @FieldType(t.Head, "desired_mode"), asked: bool) t.Gen
     previous.question = if (asked) question else null;
     previous.accounting = .{ .known_calls = 7, .possible_charged_calls = 2 };
     input.clock_ms = 900;
-    input.imported = .{
+    input.imported = .{ .carried = .{
         .source = .{ .task = @splat(8), .digest = @splat(9) },
         .head = previous,
-    };
+    } };
     return input;
 }
 
@@ -161,10 +161,10 @@ test "native genesis import resumes the prior mode and emits a pending prompt ag
         const input = importedInput(case.desired, case.asked);
         const task = try fixture.execute(case.name, input);
         const result = try fixture.output(task);
-        var expected = input.imported.?.head;
+        var expected = input.imported.?.carried.?.head;
         expected.obligation = .{ .self = {} };
         expected.sequence = 0;
-        expected.predecessor = input.imported.?.source;
+        expected.predecessor = input.imported.?.carried.?.source;
         expected.attempt = 0;
         expected.superseded = null;
         expected.consumed = .{ .items = &.{} };

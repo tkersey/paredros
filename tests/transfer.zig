@@ -727,7 +727,7 @@ fn transferWritten(
 ) !transfer.OwnedBundle {
     const a = f.arena.allocator();
     for (0..16) |_| {
-        const progress = (try continuity_control.exportBundle(
+        const progress = try continuity_control.exportBundle(
             driver,
             a,
             settings,
@@ -735,7 +735,7 @@ fn transferWritten(
             "pending-transfer",
             origin,
             .{ .name = .{ .bytes = "handoff.paredros" } },
-        )).progress;
+        );
         var index = try driver.rebuild(a);
         defer index.deinit();
         if (progress.phase == .written) return transfer.committedBundle(a, &index, progress.cut.?);
@@ -799,12 +799,14 @@ test "native continuity import refuses a relative path sent to the daemon" {
     ));
 }
 
-fn finishExcept(f: *Fixture, driver: *Driver, skipped: t.Id) !void {
+fn finishExcept(f: *Fixture, driver: *Driver, skipped: []const t.Id) !void {
     var index = try driver.rebuild(f.arena.allocator());
     defer index.deinit();
     for (index.records) |record| {
-        if (record.result == null and !std.meta.eql(record.task, skipped))
-            try finish(f, record.task);
+        if (record.result != null) continue;
+        for (skipped) |task| {
+            if (std.meta.eql(record.task, task)) break;
+        } else try finish(f, record.task);
     }
 }
 
@@ -812,7 +814,7 @@ fn strandedExport(
     f: *Fixture,
     driver: *Driver,
     settings: configuration.Config,
-    stranded: t.Id,
+    stranded: []const t.Id,
     request: continuity_control.Export,
 ) !continuity_control.ExportProgress {
     const environment: continuity_control.Environment = .{
@@ -820,7 +822,7 @@ fn strandedExport(
         .source = source(f),
     };
     for (0..16) |_| {
-        const progress = (try continuity_control.exportBundle(
+        const progress = try continuity_control.exportBundle(
             driver,
             f.arena.allocator(),
             settings,
@@ -828,27 +830,62 @@ fn strandedExport(
             request.name.bytes,
             origin,
             request,
-        )).progress;
+        );
         if (progress.phase == .written) return progress;
         try finishExcept(f, driver, stranded);
     }
     return error.ExportDidNotComplete;
 }
 
-test "native continuity transfer refuses a genesis this build can never run until it is cancelled" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    try f.init();
+fn strandedBundle(
+    f: *Fixture,
+    driver: *Driver,
+    settings: configuration.Config,
+    stranded: []const t.Id,
+    request: continuity_control.Export,
+) !transfer.OwnedBundle {
     const a = f.arena.allocator();
+    const written = try strandedExport(f, driver, settings, stranded, request);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    var bundle = try transfer.committedBundle(a, &index, written.cut.?);
+    errdefer bundle.deinit();
+    try expectPending(a, bundle.value, index.record(stranded[0]).?.input.genesis);
+    try std.testing.expectEqual(null, index.record(stranded[0]).?.result);
+    return bundle;
+}
+
+fn expectPending(a: std.mem.Allocator, bundle: transfer.Bundle, genesis: t.Genesis) !void {
+    try std.testing.expectEqual(0, bundle.lineages.items.len);
+    try std.testing.expectEqual(1, bundle.pending.items.len);
+    const root = bundle.pending.items[0];
+    try std.testing.expectEqualDeep(genesis.lineage, root.lineage);
+    var carried = try continuity.decode(.genesis, a, continuity.member(bundle, root.member).?.data);
+    defer carried.deinit();
+    try std.testing.expect(try continuity.equal(a, t.Genesis, genesis, carried.value));
+}
+
+fn strandedSource(f: *Fixture) !t.Id {
+    try f.init();
     const genesis = contracts.genesis();
-    const stranded = (try f.service.?.submit(
-        a,
+    return (try f.service.?.submit(
+        f.arena.allocator(),
         genesis.envelope.operation.bytes,
         .{ .genesis = genesis },
     )).receipt.task;
+}
+
+fn editProfile(f: *Fixture) !void {
     try f.close();
     f.profile.bytes = "edited-native-test-profile";
     try f.open();
+}
+
+test "native continuity snapshot and transfer carry a genesis this build can never run" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    const stranded = try strandedSource(&f);
+    try editProfile(&f);
     var clock: u8 = 0;
     var driver = hopDriver(&f, &clock);
     try driver.attach(f.arena.allocator());
@@ -857,33 +894,79 @@ test "native continuity transfer refuses a genesis this build can never run unti
     defer backup.temporary.cleanup();
     var settings = config();
     settings.backup_directory = try backup.path();
-    _ = try strandedExport(&f, &driver, settings, stranded, .{
+    var snapshot = try strandedBundle(&f, &driver, settings, &.{stranded}, .{
         .name = .{ .bytes = "stranded.paredros" },
         .snapshot = true,
     });
-    const refused = try continuity_control.exportBundle(
+    defer snapshot.deinit();
+    var handoff = try strandedBundle(&f, &driver, settings, &.{stranded}, .{
+        .name = .{ .bytes = "handoff.paredros" },
+    });
+    defer handoff.deinit();
+    try std.testing.expectEqual(.transfer, handoff.value.mode);
+}
+
+fn fencedBeforeStranding(f: *Fixture, settings: configuration.Config) !t.Id {
+    var clock: u8 = 0;
+    var driver = hopDriver(f, &clock);
+    try driver.attach(f.arena.allocator());
+    defer driver.detach();
+    const progress = try continuity_control.exportBundle(
         &driver,
-        a,
+        f.arena.allocator(),
         settings,
-        .{ .io = std.testing.io, .source = source(&f) },
-        "handoff.paredros",
+        .{ .io = std.testing.io, .source = source(f) },
+        "fenced-handoff",
         origin,
         .{ .name = .{ .bytes = "handoff.paredros" } },
     );
-    try std.testing.expectEqualSlices(t.Id, &.{stranded}, refused.stranded);
-    var fenced = try driver.rebuild(a);
-    try std.testing.expect(fenced.transfer_marker == null);
-    fenced.deinit();
-    _ = try @import("../native/commands.zig").abandon(&driver, a, "abandon", origin, stranded);
-    const handoff = try strandedExport(&f, &driver, settings, stranded, .{
+    try std.testing.expectEqual(.finalizing, progress.phase);
+    var index = try driver.rebuild(f.arena.allocator());
+    defer index.deinit();
+    return index.records[index.transfer_marker orelse return error.MissingTransferMarker].task;
+}
+
+test "native continuity transfer carries a genesis stranded after the fence as a fresh import" {
+    var from: Fixture = .{};
+    defer from.deinit();
+    const stranded = try strandedSource(&from);
+    var backup = try Backup.init();
+    defer backup.temporary.cleanup();
+    var settings = config();
+    settings.backup_directory = try backup.path();
+    const marker = try fencedBeforeStranding(&from, settings);
+    try editProfile(&from);
+    const a = from.arena.allocator();
+    var clock: u8 = 0;
+    var original = hopDriver(&from, &clock);
+    try original.attach(a);
+    var snapshot = try transfer.capture(&original, a, source(&from), .snapshot);
+    defer snapshot.deinit();
+    const genesis = contracts.genesis();
+    try expectPending(a, snapshot.value, genesis);
+    var handoff = try strandedBundle(&from, &original, settings, &.{ stranded, marker }, .{
         .name = .{ .bytes = "handoff.paredros" },
     });
-    var index = try driver.rebuild(a);
+    defer handoff.deinit();
+    original.detach();
+    try from.close();
+    var to: Fixture = .{};
+    defer to.deinit();
+    try to.init();
+    var destination = hopDriver(&to, &clock);
+    try destination.attach(to.arena.allocator());
+    defer destination.detach();
+    const imported = try importAll(&to, &destination, handoff.value);
+    var index = try destination.rebuild(a);
     defer index.deinit();
-    var bundle = try transfer.committedBundle(a, &index, handoff.cut.?);
-    defer bundle.deinit();
-    try std.testing.expectEqual(0, bundle.value.lineages.items.len);
-    try std.testing.expectEqual(null, index.record(stranded).?.result);
+    const record = index.record(imported).?;
+    try std.testing.expectEqualDeep(genesis.lineage, record.input.genesis.lineage);
+    try std.testing.expect(record.input.genesis.imported.?.carried == null);
+    try std.testing.expect(continuity.findImport(&index, imported) == null);
+    const obligation = index.obligation(imported).?;
+    try std.testing.expect(obligation.ordinaryDispatch());
+    try std.testing.expectEqual(null, index.head(obligation).predecessor);
+    try std.testing.expect(try destination.nextStep(a, imported) != null);
 }
 
 test "native continuity export source names the stored image digest, not the program identity" {
@@ -1008,7 +1091,7 @@ fn exportWritten(
         .source = source(f),
     };
     for (0..16) |_| {
-        const progress = (try continuity_control.exportBundle(
+        const progress = try continuity_control.exportBundle(
             driver,
             a,
             settings,
@@ -1016,7 +1099,7 @@ fn exportWritten(
             operation,
             origin,
             .{ .name = .{ .bytes = name }, .snapshot = true },
-        )).progress;
+        );
         if (progress.phase == .written) return progress;
         try completeAdmissions(f, driver);
     }
@@ -1457,7 +1540,7 @@ fn exportAs(
     operation: []const u8,
     request: continuity_control.Export,
 ) !continuity_control.ExportProgress {
-    return (try continuity_control.exportBundle(
+    return try continuity_control.exportBundle(
         driver,
         f.arena.allocator(),
         settings,
@@ -1465,7 +1548,7 @@ fn exportAs(
         operation,
         origin,
         request,
-    )).progress;
+    );
 }
 
 test "native continuity export retries resume the pending cut for one name" {
@@ -1914,11 +1997,18 @@ test "native continuity import renders a digest over untold imported batches" {
     try std.testing.expectEqual(1, published.links.items.len);
 }
 
+const HeadEdit = fn (
+    std.mem.Allocator,
+    *t.Head,
+    *t.ContinuityData,
+    continuity.Member,
+) anyerror!void;
+
 fn reheaded(
     a: std.mem.Allocator,
     bundle: transfer.Bundle,
-    comptime edit: fn (*t.Head, *t.ContinuityData, t.Reference) void,
-    reference: t.Reference,
+    comptime edit: HeadEdit,
+    batch: continuity.Member,
 ) !transfer.Bundle {
     const changed = (try c.decodeOwned(
         transfer.Bundle,
@@ -1929,7 +2019,7 @@ fn reheaded(
     for (@constCast(changed.members.items)) |*item| {
         if (!std.meta.eql(item.identity, root.head)) continue;
         var head = (try continuity.decode(.head, a, item.data)).value;
-        edit(&head, &item.data, reference);
+        try edit(a, &head, &item.data, batch);
         item.data.payload.bytes = try c.encodeOwned(t.Head, a, head);
         item.identity = try continuity.digest(a, t.ContinuityData, item.data);
         root.head = item.identity;
@@ -1937,12 +2027,26 @@ fn reheaded(
     return changed;
 }
 
-fn unlistBatch(head: *t.Head, data: *t.ContinuityData, batch: t.Reference) void {
-    head.last_observation.?.batch = .{ .retained = batch };
+fn unlistBatch(
+    a: std.mem.Allocator,
+    head: *t.Head,
+    data: *t.ContinuityData,
+    batch: continuity.Member,
+) !void {
+    head.last_observation.?.batch = .{ .retained = batch.current };
     data.dependencies.items = &.{};
+    data.references.items = try a.dupe(t.ContinuityBinding, &.{.{
+        .member = batch.identity,
+        .local = batch.current,
+    }});
 }
 
-fn foreignReport(head: *t.Head, _: *t.ContinuityData, _: t.Reference) void {
+fn foreignReport(
+    _: std.mem.Allocator,
+    head: *t.Head,
+    _: *t.ContinuityData,
+    _: continuity.Member,
+) !void {
     head.method_disposition = .{
         .source = .{ .task = @splat(0xee), .digest = @splat(0xef) },
         .source_digest = @splat(1),
@@ -1977,7 +2081,7 @@ test "native continuity closure rejects unresolved or unlisted references before
     original.detach();
     try from.close();
     const batch = for (bundle.value.members.items) |item| {
-        if (item.data.kind == .batch) break item.current;
+        if (item.data.kind == .batch) break item;
     } else return error.MissingContinuityBatch;
     const unlisted = try reheaded(a, bundle.value, unlistBatch, batch);
     try std.testing.expectError(
@@ -2000,4 +2104,208 @@ test "native continuity closure rejects unresolved or unlisted references before
     var index = try destination.rebuild(a);
     defer index.deinit();
     try std.testing.expectEqual(0, index.records.len);
+}
+
+test "native continuity monitor add conflicts with a carried genesis operation across hops" {
+    var first: Fixture = .{};
+    defer first.deinit();
+    try first.init();
+    var second: Fixture = .{};
+    defer second.deinit();
+    var third: Fixture = .{};
+    defer third.deinit();
+    const a = first.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try first.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    var clock: u8 = 0;
+    var original = hopDriver(&first, &clock);
+    try original.attach(first.arena.allocator());
+    _ = try original.directive(a, "shared-operation", origin, target, .{ .pause = {} });
+    var failed = contracts.genesis();
+    failed.envelope.operation = .{ .bytes = "failed-operation" };
+    failed.lineage = @splat(0x5a);
+    failed.specification.revision = 1;
+    _ = try first.execute("failed-operation", .{ .genesis = failed });
+    var earliest = try transfer.capture(&original, a, source(&first), .snapshot);
+    defer earliest.deinit();
+    original.detach();
+    try first.close();
+    try second.init();
+    var middle = hopDriver(&second, &clock);
+    try middle.attach(second.arena.allocator());
+    try importDone(&second, &middle, earliest.value);
+    const spec = contracts.specification();
+    const request = monitorRequest(spec);
+    const local = try commands.monitor(&middle, a, "shared-operation", origin, request, spec);
+    try finish(&second, local);
+    var carried = try transfer.capture(&middle, a, source(&second), .snapshot);
+    defer carried.deinit();
+    middle.detach();
+    try second.close();
+    try third.init();
+    var last = hopDriver(&third, &clock);
+    try last.attach(third.arena.allocator());
+    defer last.detach();
+    try importDone(&third, &last, carried.value);
+    var different = spec;
+    different.wording = .{ .bytes = "watch something else" };
+    try std.testing.expectError(error.OperationConflict, commands.monitor(
+        &last,
+        a,
+        "shared-operation",
+        origin,
+        monitorRequest(different),
+        different,
+    ));
+    _ = try commands.monitor(&last, a, "failed-operation", origin, request, spec);
+}
+
+const method_contract = @import("../app/method_contract.zig");
+const experiment_contract = @import("../app/experiment_contract.zig");
+const method_external = @import("../native/method_external.zig");
+const method_catalog = @import("../native/method_catalog.zig");
+const Session = @import("protean_native").Session(app.Types);
+const registered_source = "registered method source";
+
+fn registration(f: *Fixture) !void {
+    try f.initWithGrants(&.{
+        method_contract.workspace_identity, method_contract.codec_identity,
+        experiment_contract.codec_identity, experiment_contract.clock_identity,
+    });
+    const a = f.arena.allocator();
+    const drafts = try a.alloc(experiment_contract.SourceDraft, 1);
+    drafts[0] = .{
+        .name = .{ .bytes = "registered" },
+        .bytes = .{ .bytes = registered_source },
+        .contract_digest = try method_external.contractDigest(a),
+        .provenance = .{ .items = &.{} },
+        .origin = .operator_supplied,
+    };
+    const plan: experiment_contract.Plan = .{ .construct = .{ .sources = .{ .items = drafts } } };
+    const admitted = try f.service.?.submit(a, "register-source", .{ .experiment = .{
+        .envelope = .{
+            .operation = .{ .bytes = "register-source" },
+            .stable_request = @splat(31),
+            .origin = origin,
+        },
+        .campaign = @splat(32),
+        .attempt = 0,
+        .plan = .{ .bytes = try c.encodeOwned(experiment_contract.Plan, a, plan) },
+        .evidence = .{ .items = &.{} },
+        .live_model = false,
+    } });
+    var session = try Session.init(&f.service.?);
+    defer session.deinit() catch @panic("registration session left busy");
+    try driveRegistration(f, &session, admitted.receipt.task);
+    try session.park(a);
+}
+
+fn driveRegistration(f: *Fixture, session: *Session, task: t.Id) !void {
+    const a = f.arena.allocator();
+    for (0..10_000) |_| {
+        _ = try session.collect(a, false);
+        var status = try f.service.?.task(a, task);
+        defer status.deinit();
+        if (status.value.terminal()) return;
+        _ = try session.advance(a);
+        if (session.busy()) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.RegistrationDidNotComplete;
+}
+
+fn importedReport(a: std.mem.Allocator, driver: *Driver) !t.Reference {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    for (index.records) |record| {
+        if (record.input != .continuity_member or
+            record.input.continuity_member.data.kind != .method_report) continue;
+        return .{ .task = record.task, .digest = record.result_digest.? };
+    }
+    return error.MissingImportedReport;
+}
+
+fn adoptImported(f: *Fixture, driver: *Driver) !t.Id {
+    const a = f.arena.allocator();
+    const genesis = contracts.genesis();
+    const target = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    const report = try importedReport(a, driver);
+    const digest = continuity.hash(registered_source);
+    _ = try f.execute("adopt-imported", .{ .directive = .{
+        .envelope = .{
+            .operation = .{ .bytes = "adopt-imported" },
+            .stable_request = @splat(33),
+            .origin = origin,
+        },
+        .obligation = target,
+        .ordinal = 1,
+        .predecessor = null,
+        .body = .{ .adopt = .{ .expected_revision = 0, .method = .{ .retained = .{
+            .source = report,
+            .source_digest = digest,
+            .contract_digest = try method_external.contractDigest(a),
+            .report = report,
+            .applicability = digest,
+            .state = .{ .bytes = "" },
+            .consecutive_faults = 0,
+        } } } },
+    } });
+    try finish(f, (try driver.nextStep(a, target)).?);
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    try std.testing.expect(index.head(index.obligation(target).?).method == .retained);
+    return target;
+}
+
+fn adoptedReport(a: std.mem.Allocator, driver: *Driver) !void {
+    var index = try driver.rebuild(a);
+    defer index.deinit();
+    const head = index.head(&index.obligations[0]);
+    try std.testing.expect(head.method == .retained);
+    var report = try method_catalog.report(a, &index, head.method.retained.report);
+    defer report.deinit();
+    try std.testing.expectEqual(.source_registration, report.value.kind);
+}
+
+test "native continuity re-exports a method adopted from an imported report across hops" {
+    var experimenter: Fixture = .{};
+    defer experimenter.deinit();
+    try registration(&experimenter);
+    const a = experimenter.arena.allocator();
+    var clock: u8 = 0;
+    var original = hopDriver(&experimenter, &clock);
+    try original.attach(experimenter.arena.allocator());
+    var reports = try transfer.capture(&original, a, source(&experimenter), .snapshot);
+    defer reports.deinit();
+    original.detach();
+    try experimenter.close();
+    var adopter: Fixture = .{};
+    defer adopter.deinit();
+    try adopter.init();
+    var middle = hopDriver(&adopter, &clock);
+    try middle.attach(adopter.arena.allocator());
+    try importDone(&adopter, &middle, reports.value);
+    _ = try adoptImported(&adopter, &middle);
+    var adopted = try transfer.capture(&middle, a, source(&adopter), .snapshot);
+    defer adopted.deinit();
+    middle.detach();
+    try adopter.close();
+    var carrier: Fixture = .{};
+    defer carrier.deinit();
+    try carrier.init();
+    var third = hopDriver(&carrier, &clock);
+    try third.attach(carrier.arena.allocator());
+    _ = try importAll(&carrier, &third, adopted.value);
+    try adoptedReport(a, &third);
+    var carried = try transfer.capture(&third, a, source(&carrier), .snapshot);
+    defer carried.deinit();
+    third.detach();
+    try carrier.close();
+    var last: Fixture = .{};
+    defer last.deinit();
+    try last.init();
+    var fourth = hopDriver(&last, &clock);
+    try fourth.attach(last.arena.allocator());
+    defer fourth.detach();
+    _ = try importAll(&last, &fourth, carried.value);
+    try adoptedReport(a, &fourth);
 }

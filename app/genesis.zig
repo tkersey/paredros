@@ -22,7 +22,7 @@ pub fn emit(c: protean.Context) !Function {
     const restored = try b.caseOf(imported, "some");
     const result = try b.match(imported, .{
         .none = try fresh.ret(try freshHead(c, fresh.body(), input)),
-        .some = try restored.ret(try importedHead(c, restored.body(), input, restored.payload())),
+        .some = try restored.ret(try restoredHead(c, restored.body(), input, restored.payload())),
     });
     try a.require(c, b, try specification_bounds.valid(
         c,
@@ -83,11 +83,26 @@ fn freshHead(c: protean.Context, b: anytype, input: a.Value(t.Genesis)) !a.Value
     });
 }
 
-fn importedHead(
+fn restoredHead(
     c: protean.Context,
     b: anytype,
     input: a.Value(t.Genesis),
     imported: a.Value(@typeInfo(@FieldType(t.Genesis, "imported")).optional.child),
+) !a.Value(t.Head) {
+    const carried = try b.field(imported, "carried");
+    const fresh = try b.caseOf(carried, "none");
+    const kept = try b.caseOf(carried, "some");
+    return b.match(carried, .{
+        .none = try fresh.ret(try freshHead(c, fresh.body(), input)),
+        .some = try kept.ret(try importedHead(c, kept.body(), input, kept.payload())),
+    });
+}
+
+fn importedHead(
+    c: protean.Context,
+    b: anytype,
+    input: a.Value(t.Genesis),
+    imported: a.Value(t.CarriedHead),
 ) !a.Value(t.Head) {
     const previous = try b.field(imported, "head");
     const Desired = @FieldType(t.Head, "desired_mode");
