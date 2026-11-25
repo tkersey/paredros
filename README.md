@@ -121,13 +121,21 @@ Process death stays with the process-death controller. `native/lifecycle.zig` st
 and fails compilation when a state cannot reach rest through ordinary inputs.
 
 CI runs on GitHub-hosted Ubuntu x86-64 in two stages, each with a ten-minute
-budget. The BUILD stage runs four jobs in parallel: `source` (the source contract
-test executable and the emitted-application check), `providers`, `product` and
-`crash`. Each runs `zig build qualify -- --build-only` for its groups and uploads
-the artifact directory as a tar archive. Every Linux artifact targets baseline
-`x86_64-linux-musl`, so it runs on whichever hosted CPU picks it up. When its build
-finishes, each RUN stage lane downloads exactly that archive and runs
-`tests/qualify.py --prebuilt` for the same groups; the product smoke and the eight
+budget. The BUILD stage runs six jobs in parallel: `source` (the source contract
+test executable and the emitted-application check), `providers-first`,
+`providers-second`, `providers-third`, `product` and `crash`. Compiling a native
+test binary is single-threaded and grows with every task service it instantiates,
+so Linux qualification splits the `providers` group into three partitions that
+together hold its 31 tests; macOS builds it whole. Each job runs
+`zig build qualify -- --build-only` for its groups, prints its CPU and uploads
+the artifact directory as a tar archive. Hosted CPUs differ: the product build
+step takes about 440 seconds on an AMD EPYC 9V74 and 580 to 615 seconds on an
+AMD EPYC 7763 or Intel Xeon Platinum 8573C, so the BUILD stage meets its budget
+only when the product and process-death builds land on the faster CPUs. Every
+Linux artifact targets baseline `x86_64-linux-musl`, so it runs on whichever
+hosted CPU picks it up. When its build finishes, each RUN stage lane downloads
+exactly that archive and runs `tests/qualify.py --prebuilt` for the same groups;
+the product smoke and the eight
 process-death cases also require the binary they exercised to match its manifest
 digest. The `native` gate requires TigerStyle, every build and run job, and the
 simulation group with every pinned seed on the self-hosted macOS ARM64 runner
