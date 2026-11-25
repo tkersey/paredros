@@ -4,6 +4,146 @@ These measurements use synthetic provider responses and real native task storage
 They do not qualify GitHub service latency, paid inference, or deployment.
 The implementation and final dependency selection remain under qualification.
 
+## Maintained driver index, November 24
+
+Until this change the driver rebuilt its whole index from every retained task each
+time it needed one: once per daemon scheduling stage, once per gated dispatch and
+once per control request. It now builds the index once when `serve` attaches,
+using the same full rebuild, and afterwards maintains it in memory. Each
+admission, cancellation or resume the driver performs notes its task; each later
+use reads only those tasks and the tasks that are not yet terminal and disposed,
+reloads a task only when its native revision moved, and recomputes the derived
+obligation state in memory only when a record's input or result changes or a
+progressed task is referenced by a validation. Views are snapshots: an update made
+while a caller holds a view copies before it writes. Test builds, and `serve`
+under `PAREDROS_VERIFY_INDEX=1`, compare every view with a fresh rebuild.
+
+### Environment and method
+
+Both executables used Protean `798cd57`, Zig 0.17.1, LLVM and safe optimization
+on an Apple M2 Pro with 32 GiB RAM and macOS 27.3. Two other agents compiled on
+the same machine throughout; each row records the one-minute load average when
+its run finished. The baseline scale executable was built from `49e06e7` (the
+pre-change `54ea153` plus the daemon-loop measurement), SHA-256
+`d12558cd0c284bad4fa46df6763185970519412163fa650e3ce41ff2415581d2`; the
+candidate from `48728a0`, SHA-256
+`02d9bbf32cc6b9aaeecf23a04f898e5cf8b8b5a9fede6ae53906e982fb5e2b4c`. Later
+commits change only the verification-only comparison, the measurement controller
+and documentation.
+
+The daemon-loop workload seeds a history before the measured monitor: one genesis,
+one cancel directive folded by one step, and pause directives on that cancelled
+obligation, so every history task is terminal and never schedules work. The
+monitor genesis follows. The measurement then constructs the real `Daemon` with a
+control socket and drives `poll` until the check's step task is terminal, summing
+the owner time spent inside `poll`. The GitHub adapter answers from memory, so no
+network latency is included. One unscored check establishes the cursor; the
+reported checks follow it; 24 idle polls then run with no check due. The
+candidate also counts tasks probed, tasks reloaded and derivations.
+
+```sh
+zig build build-scale-tests -Dscale-tests=true -Doptimize=safe
+uv run --no-project python tests/measure.py zig-out/test-tools/paredros-scale /absolute/new-directory --mode daemon --history 100
+PAREDROS_SCALE_PATH=/absolute/fixture/state PAREDROS_SCALE_MODE=empty PAREDROS_EMPTY_PHASE=seed PAREDROS_EMPTY_HISTORY=10000 zig-out/test-tools/paredros-scale
+uv run --no-project python tests/measure.py zig-out/test-tools/paredros-scale /absolute/new-directory --mode daemon --fixture /absolute/fixture --history 10000 --samples 6
+```
+
+A namespace is bound to its directory, so a seeded fixture cannot be copied; the
+daemon mode consumes it in place. The baseline and candidate 10,000-task runs
+therefore used two fixtures seeded identically by the baseline executable.
+
+### Results
+
+| Measurement | History | Baseline | Candidate |
+|---|---:|---:|---:|
+| Owner time per empty check, median | 100 | 5.036 s; 4.749 s | 1.697 s; 1.689 s |
+| Owner time per empty check, sample p95 | 100 | 6.075 s; 5.982 s | 2.207 s; 1.700 s |
+| Owner time per empty check, median | 10,000 | 156.075 s | 1.686 s |
+| Owner time per empty check, sample p95 or maximum | 10,000 | 159.249 s (maximum) | 1.774 s |
+| Idle poll owner time, median | 100 | 51.030 ms; 51.681 ms | 0.6 µs; 0.7 µs |
+| Idle poll owner time, median | 10,000 | 1.791 s | 0.9 µs |
+| Index build when the daemon attaches | 100 | 20.4 ms; 16.0 ms | 18.6 ms; 17.6 ms |
+| Index build when the daemon attaches | 10,000 | 1.654 s | 1.837 s |
+| Daemon polls per empty check, median | both | 84 | 84 |
+| Database growth per empty check, median | both | 108–116 KiB | 110 KiB |
+| Tasks probed, reloaded, derivations per check | both | not counted | 81, 18, 2 |
+| Tasks probed or reloaded per idle poll | both | every task, every poll | 0 |
+
+The 100-task rows are two alternating runs of each executable (baseline, candidate,
+baseline, candidate) with 30 measured checks each; load averages were 10.2, 8.8,
+9.0 and 8.5. The 10,000-task baseline measured five checks after its unscored
+baseline, because each took about 2.6 minutes; the candidate measured 30. Their load
+averages were 10.6 and 7.2. Each p95 is the nearest-rank statistic of its samples,
+not a service tail estimate. Five baseline samples give no meaningful p95, so the
+table reports their maximum.
+
+Every daemon poll runs one scheduling stage; before this change each stage and
+each gated dispatch rebuilt the index, so an empty check, which spans 84 polls,
+paid about 84 rebuilds. With the maintained index a poll that finds nothing to do
+reads no task, and a check reads only its own live step: it probes that step 81
+times, reloads it 18 times as its native revision advances, and recomputes the
+derived obligation state twice (when the step is admitted and when its result is
+published). These counts are identical at 100 and 10,000 history tasks. The
+remaining 1.7 seconds per check is the native interpreter pumping the authored
+step, which the November 17 profile already identified; this change does not
+reach the 250 ms target. Database growth is unchanged, as expected.
+
+Attaching now also asks the native owner, for each terminal task, whether its
+associated work is disposed, so a task that may still change stays watched. That
+and the first derivation add roughly 0.2 seconds to the 10,000-task build in this
+noisy sample; startup remains a full rebuild by design.
+
+### First status after startup
+
+Each product executable served its own offline product namespace of one genesis
+and 9,999 pending pause directives, seeded by the baseline scale executable with
+`PAREDROS_SCALE_CONFIG` and `PAREDROS_SCALE_RUNTIME` set to that executable's
+configuration and SHA-256. The baseline product was built from `49e06e7`, SHA-256
+`5e4d5dc0f974a2a1d6717e0b6385a3524cf4967807ff4c173ca379b87039a48d`; the
+candidate from `8e0f04c`, SHA-256
+`29569a299e25ddc6a822376e7a4836f7d602fc6e9467411b80565cd6daa0e679`. Each fixture
+was served twice in alternating order; the second launch reopened the namespace
+the first left behind.
+
+```sh
+uv run --no-project python tests/measure.py /absolute/paredros /absolute/new-directory --mode status --fixture /absolute/fixture
+```
+
+| Launch | Executable | Socket | First status | First status from launch | Second status |
+|---|---|---:|---:|---:|---:|
+| First | Baseline | 3.463 s | 1.725 s | 5.188 s | 1.726 s |
+| First | Candidate | 2.949 s | 1.824 s | 4.773 s | 0.025 s |
+| Second | Baseline | 2.813 s | 1.621 s | 4.434 s | 1.641 s |
+| Second | Candidate | 2.791 s | 1.805 s | 4.596 s | 0.026 s |
+
+Load averages were 11.6, 11.1, 10.9 and 10.5. The control socket exists before the
+daemon attaches, so the first status waits for the startup rebuild in both
+executables and is answered from the index that rebuild produced; it is not
+faster. Every later status in the baseline rebuilt the index again, while the
+candidate answers from the maintained index.
+
+### Not measured
+
+A 100,000-task history was not seeded for this comparison. Seeding takes about an
+hour and a half on this machine, and one baseline empty check would take roughly
+84 rebuilds of about 17 seconds each. The candidate's per-poll and per-check task
+reads do not depend on the history size by construction and by the test below;
+its startup at 100,000 tasks remains one full rebuild, measured above at about 17
+seconds.
+
+### Regression checks
+
+`native daemon idle polls read a bounded number of tasks regardless of namespace
+size` drives the real daemon over histories of 1 and 16 folded directives and
+requires equal probe counts, no reload and no derivation across 12 idle polls.
+`native driver index matches rebuild across admissions results supersession
+restart` and every other test with an attached driver compare each view with a
+fresh rebuild; `native driver verification rejects a namespace change that
+bypasses the index` shows that comparison fails when a task is admitted behind
+the driver. `native mutations of the task service flow through the driver`
+rejects any native source that submits, cancels or resumes a task, or admits
+through the raw service, outside the driver.
+
 ## Threaded LLVM build on Apple Silicon, November 17
 
 PAREDROS `48a838c` used Protean `787e3ae` and Zig 0.17.1 with LLVM,
