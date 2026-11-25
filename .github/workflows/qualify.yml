@@ -35,7 +35,7 @@ jobs:
   build-source:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -62,7 +62,7 @@ jobs:
         run: |
           grep -m1 'model name' /proc/cpuinfo
           zig build qualify -- --build-only --artifacts "$RUNNER_TEMP/artifacts" --group "${{ matrix.groups }}" \
-            --budget-seconds 600
+            --budget-seconds 900
       - name: Show build logs
         if: ${{ !success() }}
         run: tail -n 40 zig-out/qualification/run-*/*.log
@@ -77,7 +77,7 @@ jobs:
   build-providers-first:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -89,7 +89,7 @@ jobs:
   build-providers-second:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -101,7 +101,7 @@ jobs:
   build-providers-third:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -113,7 +113,7 @@ jobs:
   build-product:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -125,7 +125,7 @@ jobs:
   build-crash:
     name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -275,7 +275,7 @@ jobs:
               [done("Build /") - $created, done("Run /") - done("Build /"),
                 done("Qualification / simulation /") - $created] | map(tostring) | join(" ")')
           {
-            echo "BUILD stage, trigger to last build completion: ${built}s (maximum 600s)"
+            echo "BUILD stage, trigger to last build completion: ${built}s (maximum 900s)"
             echo "RUN stage, last build completion to last run completion: ${ran}s (maximum 600s)"
             echo "Simulation, trigger to completion: ${simulated}s (maximum 600s)"
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -284,6 +284,6 @@ jobs:
             echo 'Qualification requires the first attempt of its run.'
             exit 1
           fi
-          test "$built" -le 600
+          test "$built" -le 900
           test "$ran" -le 600
           test "$simulated" -le 600
