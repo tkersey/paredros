@@ -1280,7 +1280,7 @@ fn daemonImport(f: *Fixture, driver: *Driver, partial: bool) !continuity.ImportP
     var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer frame.deinit();
     var context: u8 = 0;
-    var daemon = try Daemon.init(frame.allocator(), driver, &server, .{
+    var daemon = try Daemon.init(f.arena.allocator(), driver, &server, .{
         .context = &context,
         .call = NoControl.call,
     }, .{});

@@ -181,11 +181,12 @@ fn createCut(f: *Fixture, driver: *Driver) !void {
     const initial = examples.genesis();
     if (phase == .genesis_admitted) {
         const operation = initial.envelope.operation.bytes;
-        const admitted = try f.service.?.submit(a, operation, .{ .genesis = initial });
+        const admitted = try driver.submit(a, operation, .{ .genesis = initial });
         try remember(driver, admitted.receipt.task, admitted.receipt.task, null);
         return stopAt(.genesis_admitted);
     }
     const target = try f.execute(initial.envelope.operation.bytes, .{ .genesis = initial });
+    _ = try driver.submit(a, initial.envelope.operation.bytes, .{ .genesis = initial });
     const origin: t.Origin = .{ .local = .{ .uid = 501 } };
     if (models()) return createModelCut(f, driver, target);
     if (phase == .control_admitted) {
