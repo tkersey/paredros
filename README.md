@@ -105,10 +105,8 @@ seeds; `-Dsimulation-seed=N` replays one seed, and `-Dsimulation-seeds=N`,
 `-Dsimulation-first=N` and `-Dsimulation-events=N` add consecutive seeds.
 `PAREDROS_SIMULATION_SEED`, `PAREDROS_SIMULATION_SEEDS`, `PAREDROS_SIMULATION_FIRST`
 and `PAREDROS_SIMULATION_EVENTS` override them at run time, `PAREDROS_SIMULATION_TRACE`
-prints a clean seed's trace and `PAREDROS_SIMULATION_PROFILE` its per-poll cost. A
-configuration change while a handoff is unfinished strands its pure tasks, so it is
-generated only under `PAREDROS_SIMULATION_STRAND_CONTINUITY`. Process death stays with
-the process-death controller. `native/lifecycle.zig` states each lifecycle as a table
+prints a clean seed's trace and `PAREDROS_SIMULATION_PROFILE` its per-poll cost.
+Process death stays with the process-death controller. `native/lifecycle.zig` states each lifecycle as a table
 and fails compilation when a state cannot reach rest through ordinary inputs.
 
 CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
@@ -397,7 +395,11 @@ pinned to another program, profile, or runtime) is carried by both snapshot and
 transfer bundles as a pending monitor: its admitted specification and request
 identity travel as an obligation member, and import admits it as a fresh monitor in the destination with the same lineage
 and a head at the import clock. Transfer finalization waits for an admitted
-`cancel` to fold rather than adding a `transfer` behind it.
+`cancel` to fold rather than adding a `transfer` behind it. A build change while a handoff is
+unfinished does not strand it: an export cut, a carried value or an import genesis
+pinned to the earlier build is cancelled and resubmitted under this build as a
+numbered attempt of the same operation, and the index takes that attempt for its
+lineage.
 
 Each snapshot export run takes a new cut, except that a run for a NAME whose cut
 is still pending resumes that cut. A namespace has one transfer: after the first

@@ -401,10 +401,72 @@ pub fn importProgress(driver: anytype, a: std.mem.Allocator) !ImportProgress {
     };
 }
 
+pub const Attempt = struct { current: ?usize, stranded: ?usize, operation: []const u8 };
+
+pub fn currentAttempt(
+    driver: anytype,
+    a: std.mem.Allocator,
+    index: *const idx.Index,
+    base: []const u8,
+) !Attempt {
+    var stranded: ?usize = null;
+    for (0..continuity.attempts_max) |attempt| {
+        const operation = try continuity.attemptOperation(a, base, attempt);
+        const position = index.operations.get(operation) orelse
+            return .{ .current = null, .stranded = stranded, .operation = operation };
+        if (try abandoned(driver, a, index.records[position])) {
+            stranded = position;
+            continue;
+        }
+        return .{ .current = position, .stranded = null, .operation = operation };
+    }
+    return error.ContinuityAttemptsExhausted;
+}
+
+fn abandoned(driver: anytype, a: std.mem.Allocator, record: idx.Record) !bool {
+    if (record.result != null) return false;
+    switch (try taskDisposition(driver.service, a, record.task)) {
+        .runnable, .settled => return false,
+        .cancelled => return true,
+        .stranded => {},
+    }
+    const operation = try std.fmt.allocPrint(a, "abandon:{s}", .{
+        std.fmt.bytesToHex(record.task, .lower),
+    });
+    _ = try driver.requestCancel(a, operation, record.task, "stranded by a build change");
+    return true;
+}
+
+pub fn replaceAttempt(
+    driver: anytype,
+    a: std.mem.Allocator,
+    attempt: Attempt,
+    input: t.Input,
+) !t.Id {
+    var copy = input;
+    switch (copy) {
+        inline else => |*value| value.envelope.operation = .{ .bytes = attempt.operation },
+    }
+    const admitted = try driver.submit(a, attempt.operation, copy);
+    return admitted.receipt.task;
+}
+
+fn replaceManifest(driver: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
+    const view = index.continuity_import orelse return false;
+    const record = index.records[view.position];
+    const base = continuity.attemptBase(record.input.continuity_cut.envelope.operation.bytes);
+    const attempt = try currentAttempt(driver, a, index, base);
+    if (attempt.current != null) return false;
+    const stranded = attempt.stranded orelse return false;
+    _ = try replaceAttempt(driver, a, attempt, index.records[stranded].input);
+    return true;
+}
+
 pub fn advanceImport(driver: anytype, a: std.mem.Allocator, index: *const idx.Index) !bool {
     if (!driver.attached) return error.DriverDetached;
     const view = index.continuity_import orelse return false;
-    if (view.phase == .manifest_pending or view.phase == .materialized) return false;
+    if (view.phase == .manifest_pending) return replaceManifest(driver, a, index);
+    if (view.phase == .materialized) return false;
     const bindings = driver.bindings orelse return error.MissingResourceBindings;
     validateBindings(view.bundle.?, bindings) catch return false;
     const origin = index.records[view.position].input.continuity_cut.envelope.origin;
@@ -422,8 +484,10 @@ fn submitValues(
     var submitted: usize = 0;
     for (try continuity.values(a, view.bundle.?)) |value| {
         if (submitted == members_per_step) break;
-        const operation = try continuity.mappedOperation(a, .report, view.digest, value.identity);
-        if (index.operations.contains(operation)) continue;
+        const base = try continuity.mappedOperation(a, .report, view.digest, value.identity);
+        const attempt = try currentAttempt(driver, a, index, base);
+        if (attempt.current != null) continue;
+        const operation = attempt.operation;
         _ = try driver.submit(a, operation, .{ .continuity_member = .{
             .envelope = .{
                 .operation = .{ .bytes = operation },
@@ -450,12 +514,12 @@ fn submitGeneses(
     for (view.bundle.?.members.items, 0..) |item, member| {
         if (submitted == members_per_step) break;
         if (item != .obligation) continue;
-        if (try continuity.importedLineage(index, item.obligation.lineage, view.digest) != null)
-            continue;
         const position: u32 = @intCast(member);
         const input = try continuity.genesisInput(a, index, view, position, clock_ms, origin) orelse
             return error.MissingContinuityReport;
-        _ = try driver.submit(a, input.envelope.operation.bytes, .{ .genesis = input });
+        const attempt = try currentAttempt(driver, a, index, input.envelope.operation.bytes);
+        if (attempt.current != null) continue;
+        _ = try replaceAttempt(driver, a, attempt, .{ .genesis = input });
         submitted += 1;
     }
     return submitted != 0;
@@ -651,12 +715,23 @@ pub fn unrunGeneses(service: anytype, a: std.mem.Allocator, index: *const idx.In
 const GenesisDisposition = enum { runnable, stranded, settled };
 
 fn genesisDisposition(service: anytype, a: std.mem.Allocator, task: t.Id) !GenesisDisposition {
+    return switch (try taskDisposition(service, a, task)) {
+        .runnable => .runnable,
+        .stranded => .stranded,
+        .settled, .cancelled => .settled,
+    };
+}
+
+const TaskDisposition = enum { runnable, stranded, cancelled, settled };
+
+fn taskDisposition(service: anytype, a: std.mem.Allocator, task: t.Id) !TaskDisposition {
     var saved = try service.task(a, task);
     defer saved.deinit();
     const value = saved.value;
-    const unrun: GenesisDisposition = if (value.cancellation == null) .stranded else .settled;
+    const unrun: TaskDisposition = if (value.cancellation == null) .stranded else .cancelled;
     switch (try service.status(a, value)) {
-        .completed, .failed, .cancelled => return .settled,
+        .completed, .failed => return .settled,
+        .cancelled => return .cancelled,
         .blocked, .unknown => return unrun,
         .queued, .running, .waiting_input, .parked, .cancelling => {},
     }

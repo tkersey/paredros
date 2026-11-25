@@ -4,21 +4,27 @@ const lifecycle = @import("../native/lifecycle.zig");
 const continuity_control = @import("../native/continuity_control.zig");
 const continuity_import = @import("../native/continuity_import.zig");
 
-fn expectNames(comptime Table: type, comptime Code: type, comptime extra: []const u8) !void {
-    const table = std.meta.fieldNames(Table);
-    const code = std.meta.fieldNames(Code);
-    try std.testing.expectEqual(code.len + 1, table.len);
-    try std.testing.expectEqualStrings(extra, table[0]);
-    for (code, table[1..]) |left, right| try std.testing.expectEqualStrings(left, right);
+fn expectNames(
+    comptime Table: type,
+    comptime Code: type,
+    comptime extra: []const []const u8,
+) !void {
+    const table = comptime std.meta.fieldNames(Table);
+    const code = comptime std.meta.fieldNames(Code);
+    try std.testing.expectEqual(code.len + extra.len, table.len);
+    inline for (code) |name| try std.testing.expect(@hasField(Table, name));
+    inline for (extra) |name| try std.testing.expect(@hasField(Table, name));
 }
 
 test "lifecycle tables name exactly the production lifecycle states" {
     try expectNames(
         lifecycle.Export,
         @FieldType(continuity_control.ExportProgress, "phase"),
-        "idle",
+        &.{ "idle", "cut_stranded" },
     );
-    try expectNames(lifecycle.Import, continuity_import.Phase, "absent");
+    try expectNames(lifecycle.Import, continuity_import.Phase, &.{
+        "absent", "manifest_stranded", "values_stranded", "genesis_stranded",
+    });
     inline for (comptime std.enums.values(t.Mode)) |mode| {
         const final = mode == .cancelled or mode == .transferred;
         try std.testing.expectEqual(final, lifecycle.final(mode));

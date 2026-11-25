@@ -345,11 +345,23 @@ fn replayedLineage(
 ) !usize {
     const left = records[first].input.genesis;
     const right = records[second].input.genesis;
+    if (left.imported != null and right.imported != null)
+        return importAttempt(records, first, second);
     if ((left.imported == null) == (right.imported == null)) return error.DuplicateLineage;
     const local = if (left.imported == null) left else right;
     const derived = try admission.stableDigest(a, local.envelope);
     if (!std.meta.eql(derived, local.lineage)) return error.DuplicateLineage;
     return if (left.imported == null) second else first;
+}
+
+fn importAttempt(records: []const Record, first: usize, second: usize) !usize {
+    const left = records[first].input.genesis.imported.?.continuity;
+    const right = records[second].input.genesis.imported.?.continuity;
+    if (!std.meta.eql(left.bundle, right.bundle) or left.member != right.member)
+        return error.DuplicateLineage;
+    if (records[first].result != null and records[second].result != null)
+        return error.DuplicateLineage;
+    return if (records[second].result != null) second else first;
 }
 
 fn validateTurns(self: *Index, receipts: []const Cancellation) !void {

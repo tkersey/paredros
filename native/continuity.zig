@@ -215,6 +215,19 @@ pub fn mappedOperation(
     });
 }
 
+pub const attempts_max = 64;
+const attempt_marker = ":attempt-";
+
+pub fn attemptOperation(a: std.mem.Allocator, base: []const u8, attempt: usize) ![]u8 {
+    if (attempt == 0) return a.dupe(u8, base);
+    return std.fmt.allocPrint(a, "{s}{s}{d}", .{ base, attempt_marker, attempt });
+}
+
+pub fn attemptBase(operation: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, operation, attempt_marker) orelse return operation;
+    return operation[0..at];
+}
+
 pub const Value = struct { identity: t.Digest, report: t.ReportValue };
 
 pub fn values(a: std.mem.Allocator, bundle: Bundle) ![]const Value {
@@ -266,10 +279,23 @@ pub fn localReport(
     report: t.ReportValue,
 ) !?t.Reference {
     const identity = try digest(a, t.ReportValue, report);
-    const operation = try mappedOperation(a, .report, bundle, identity);
-    defer a.free(operation);
-    const position = index.operations.get(operation) orelse return null;
-    const record = index.records[position];
+    const base = try mappedOperation(a, .report, bundle, identity);
+    defer a.free(base);
+    for (0..attempts_max) |attempt| {
+        const operation = try attemptOperation(a, base, attempt);
+        defer a.free(operation);
+        const position = index.operations.get(operation) orelse return null;
+        if (try reportAttempt(a, index.records[position], bundle, identity)) |found| return found;
+    }
+    return null;
+}
+
+fn reportAttempt(
+    a: std.mem.Allocator,
+    record: anytype,
+    bundle: t.Digest,
+    identity: t.Digest,
+) !?t.Reference {
     if (record.input != .continuity_member) return error.InvalidContinuityMember;
     const input = record.input.continuity_member;
     if (!std.meta.eql(input.bundle, bundle) or
@@ -361,7 +387,7 @@ pub fn validateImports(a: std.mem.Allocator, index: anytype) !void {
         if (view.bundle == null or !std.meta.eql(metadata.bundle, view.digest) or
             !std.meta.eql(metadata.manifest, view.manifest.?))
             return error.ContinuityCutMismatch;
-        const expected = try genesisInput(
+        var expected = try genesisInput(
             a,
             index,
             view,
@@ -369,6 +395,9 @@ pub fn validateImports(a: std.mem.Allocator, index: anytype) !void {
             genesis.clock_ms,
             genesis.envelope.origin,
         ) orelse return error.ContinuityHeadMismatch;
+        const operation = genesis.envelope.operation;
+        if (std.mem.eql(u8, attemptBase(operation.bytes), expected.envelope.operation.bytes))
+            expected.envelope.operation = operation;
         if (!try equal(a, t.Genesis, expected, genesis)) return error.ContinuityHeadMismatch;
     }
 }

@@ -103,8 +103,8 @@ pub const controls: Table(Controls, ControlEvent) = .{
     },
 };
 
-pub const Export = enum { idle, finalizing, cut_pending, written };
-pub const ExportEvent = enum { request, finalize, cut, restart };
+pub const Export = enum { idle, finalizing, cut_pending, cut_stranded, written };
+pub const ExportEvent = enum { request, finalize, cut, restart, build_change };
 pub const transfer_export: Table(Export, ExportEvent) = .{
     .resting = &.{ .idle, .written },
     .ordinary = &.{ .request, .finalize, .cut },
@@ -116,6 +116,9 @@ pub const transfer_export: Table(Export, ExportEvent) = .{
         .{ .from = .cut_pending, .on = .request, .to = .written },
         .{ .from = .cut_pending, .on = .cut, .to = .written },
         .{ .from = .cut_pending, .on = .restart, .to = .cut_pending },
+        .{ .from = .cut_pending, .on = .build_change, .to = .cut_stranded },
+        .{ .from = .cut_stranded, .on = .request, .to = .cut_pending },
+        .{ .from = .cut_stranded, .on = .build_change, .to = .cut_stranded },
         .{ .from = .written, .on = .request, .to = .written },
     },
 };
@@ -123,23 +126,32 @@ pub const transfer_export: Table(Export, ExportEvent) = .{
 pub const Import = enum {
     absent,
     manifest_pending,
+    manifest_stranded,
     values_pending,
+    values_stranded,
     genesis_pending,
+    genesis_stranded,
     materialized,
 };
-pub const ImportEvent = enum { request, value, genesis, restart };
+pub const ImportEvent = enum { request, value, genesis, replace, restart, build_change };
 pub const continuity_import: Table(Import, ImportEvent) = .{
     .resting = &.{ .absent, .materialized },
-    .ordinary = &.{ .request, .value, .genesis },
+    .ordinary = &.{ .request, .value, .genesis, .replace },
     .transitions = &.{
         .{ .from = .absent, .on = .request, .to = .manifest_pending },
         .{ .from = .manifest_pending, .on = .request, .to = .values_pending },
+        .{ .from = .manifest_pending, .on = .build_change, .to = .manifest_stranded },
+        .{ .from = .manifest_stranded, .on = .replace, .to = .manifest_pending },
         .{ .from = .values_pending, .on = .value, .to = .genesis_pending },
         .{ .from = .values_pending, .on = .request, .to = .values_pending },
         .{ .from = .values_pending, .on = .restart, .to = .values_pending },
+        .{ .from = .values_pending, .on = .build_change, .to = .values_stranded },
+        .{ .from = .values_stranded, .on = .replace, .to = .values_pending },
         .{ .from = .genesis_pending, .on = .genesis, .to = .materialized },
         .{ .from = .genesis_pending, .on = .request, .to = .genesis_pending },
         .{ .from = .genesis_pending, .on = .restart, .to = .genesis_pending },
+        .{ .from = .genesis_pending, .on = .build_change, .to = .genesis_stranded },
+        .{ .from = .genesis_stranded, .on = .replace, .to = .genesis_pending },
         .{ .from = .materialized, .on = .request, .to = .materialized },
     },
 };

@@ -112,7 +112,8 @@ fn exportOperation(
     for (index.records) |record| {
         if (record.input != .continuity_cut or record.result != null) continue;
         const envelope = record.input.continuity_cut.envelope;
-        if (std.meta.eql(envelope.stable_request, stable)) return envelope.operation.bytes;
+        if (std.meta.eql(envelope.stable_request, stable))
+            return continuity.attemptBase(envelope.operation.bytes);
     }
     return operation;
 }
@@ -126,11 +127,12 @@ fn exportCut(
     snapshot: bool,
 ) !t.Id {
     var selected = request;
-    if (!snapshot) {
-        selected.operation = try derivedOperation(a, "export-cut", request.operation);
-        if (index.operations.get(selected.operation)) |position|
-            return index.records[position].task;
-    }
+    if (!snapshot) selected.operation = try derivedOperation(a, "export-cut", request.operation);
+    const attempt = try transfer.currentAttempt(driver, a, index, selected.operation);
+    const retried = !std.mem.eql(u8, attempt.operation, selected.operation);
+    if (attempt.current) |position| if (retried) return index.records[position].task;
+    if (attempt.current == null) if (attempt.stranded) |position|
+        return transfer.replaceAttempt(driver, a, attempt, index.records[position].input);
     const admitted = try admission.admit(driver, a, selected, ExportMaterializer(
         @TypeOf(driver),
     ){
