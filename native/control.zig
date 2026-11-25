@@ -8,6 +8,7 @@ const idx = @import("index.zig");
 const experiments = @import("experiments.zig");
 const continuity_control = @import("continuity_control.zig");
 const transfer = @import("transfer.zig");
+const continuity = @import("continuity.zig");
 const ingress_policy = @import("ingress_policy.zig");
 const messages = @import("messages.zig");
 const cli = @import("cli.zig");
@@ -240,6 +241,8 @@ fn validateFresh(
     var indexed = try driver.view(a);
     defer indexed.deinit();
     const index = &indexed.index;
+    if (command != .monitor_add and continuity.importedGenesis(index, operation_id))
+        return error.OperationConflict;
     switch (command) {
         .directive => |value| {
             try ingress_policy.validate(index);
