@@ -1728,6 +1728,7 @@ test "native continuity rebuild keeps the imported lineage over an exact local r
     defer destination.detach();
     const imported = try importAll(&to, &destination, source_state.bundle.value);
     const replay = try to.execute("monitor-retry", .{ .genesis = source_state.local });
+    _ = try destination.submit(a, "monitor-retry", .{ .genesis = source_state.local });
     try std.testing.expect(!std.meta.eql(replay, imported));
     try expectOneLineage(&destination, a, imported);
     var forked = source_state.local;
@@ -2106,6 +2107,7 @@ test "native continuity monitor add conflicts with a carried genesis operation a
     failed.lineage = @splat(0x5a);
     failed.specification.revision = 1;
     _ = try first.execute("failed-operation", .{ .genesis = failed });
+    _ = try original.submit(a, "failed-operation", .{ .genesis = failed });
     var earliest = try transfer.capture(&original, a, source(&first), .snapshot);
     defer earliest.deinit();
     original.detach();
@@ -2207,9 +2209,10 @@ fn adoptImported(f: *Fixture, driver: *Driver) !t.Id {
     const a = f.arena.allocator();
     const genesis = contracts.genesis();
     const target = try f.execute(genesis.envelope.operation.bytes, .{ .genesis = genesis });
+    _ = try driver.submit(a, genesis.envelope.operation.bytes, .{ .genesis = genesis });
     const report = try importedReport(a, driver);
     const digest = continuity.hash(registered_source);
-    _ = try f.execute("adopt-imported", .{ .directive = .{
+    const adoption: t.Input = .{ .directive = .{
         .envelope = .{
             .operation = .{ .bytes = "adopt-imported" },
             .stable_request = @splat(33),
@@ -2227,7 +2230,9 @@ fn adoptImported(f: *Fixture, driver: *Driver) !t.Id {
             .state = .{ .bytes = "" },
             .consecutive_faults = 0,
         } } } },
-    } });
+    } };
+    _ = try f.execute("adopt-imported", adoption);
+    _ = try driver.submit(a, "adopt-imported", adoption);
     try finish(f, (try driver.nextStep(a, target)).?);
     var index = try driver.rebuild(a);
     defer index.deinit();
