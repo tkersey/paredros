@@ -5,6 +5,7 @@ const retained = @import("retained.zig");
 const continuity = @import("continuity.zig");
 const transfer_marker = @import("transfer_marker.zig");
 const admission = @import("admission.zig");
+const lifecycle = @import("lifecycle.zig");
 
 pub const Encoding = enum { contract, json };
 pub const Value = struct {
@@ -640,23 +641,15 @@ const ControlState = struct {
     }
 
     fn apply(self: *ControlState, body: t.DirectiveBody) void {
-        if (self.mode == .cancelled or self.mode == .transferred) return;
-        switch (body) {
-            .pause => {
-                self.mode = .paused;
-                self.desired = .paused;
-            },
-            .cancel => {
-                self.mode = .cancelled;
-                self.desired = .cancelled;
-            },
-            .transfer => self.mode = .transferred,
-            .@"resume" => {
-                self.mode = .active;
-                self.desired = .active;
-            },
-            else => {},
-        }
+        const event = lifecycle.control(body) orelse return;
+        const next = lifecycle.mode.next(self.mode, event) orelse return;
+        self.mode = next;
+        self.desired = switch (event) {
+            .pause => .paused,
+            .cancel => .cancelled,
+            .@"resume" => .active,
+            .transfer => self.desired,
+        };
     }
 };
 

@@ -11,6 +11,7 @@ const recovery = @import("recovery.zig");
 const commands = @import("commands.zig");
 const configuration = @import("configuration.zig");
 const bounds = @import("../app/bounds.zig");
+const lifecycle = @import("lifecycle.zig");
 
 pub const Clock = struct {
     context: *anyopaque,
@@ -392,8 +393,7 @@ pub fn Driver(comptime Types: type) type {
                 const obligation = index.obligation(request.target.?) orelse
                     return error.UnknownObligation;
                 const head = index.head(obligation);
-                if (obligation.effective_mode == .cancelled or
-                    obligation.effective_mode == .transferred) return error.FinalObligation;
+                if (lifecycle.final(obligation.effective_mode)) return error.FinalObligation;
                 if (self.body == .amend) try admission.amendment(self.body.amend);
                 if (self.body == .adopt)
                     try @import("method_catalog.zig").adoption(a, index, self.body.adopt.method);
@@ -460,7 +460,7 @@ pub fn Driver(comptime Types: type) type {
                 self.model,
             );
             const head = index.head(obligation);
-            if (head.mode == .cancelled or head.mode == .transferred) return null;
+            if (lifecycle.final(head.mode)) return null;
             if (!needsStep(index, obligation, clock_ms)) return null;
             var frozen = try materialize.step(a, index, target, clock_ms, self.model);
             defer frozen.deinit();
