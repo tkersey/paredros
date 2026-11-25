@@ -241,8 +241,10 @@ fn validateFresh(
     var indexed = try driver.view(a);
     defer indexed.deinit();
     const index = &indexed.index;
-    if (command != .monitor_add and continuity.importedGenesis(index, operation_id))
+    if (continuity.importedGenesis(index, operation_id)) {
+        if (command == .monitor_add) return;
         return error.OperationConflict;
+    }
     switch (command) {
         .directive => |value| {
             try ingress_policy.validate(index);
