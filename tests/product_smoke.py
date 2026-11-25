@@ -20,11 +20,8 @@ def run(args, *, config=None, input=None, allowed=(0,), seconds=45):
     return proc
 manifest=json.loads(run(['describe-build']).stdout)
 assert manifest['artifact_sha256']==hashlib.sha256(binary.read_bytes()).hexdigest()
-expected_backend = {
-    ('Linux', 'x86_64'): 'stage2_x86_64',
-    ('Darwin', 'arm64'): 'stage2_llvm',
-}[(platform.system(), platform.machine())]
-assert manifest['artifact_zig_backend'] == expected_backend, manifest['artifact_zig_backend']
+assert (platform.system(), platform.machine()) in (('Linux', 'x86_64'), ('Darwin', 'arm64'))
+assert manifest['artifact_zig_backend'] == 'stage2_llvm', manifest['artifact_zig_backend']
 c_compiler = manifest['dependencies']['sqlite']['compiler']
 assert c_compiler['family'] == 'clang' and c_compiler['driver'] == 'zig build-obj', c_compiler
 assert c_compiler['zig_executable_sha256'] == manifest['compiler']['executable_sha256']

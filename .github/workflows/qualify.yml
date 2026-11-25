@@ -46,21 +46,6 @@ jobs:
           - lane: providers
             groups: providers
             budget: 600
-          - lane: simulation-first
-            groups: simulation-first
-            budget: 600
-          - lane: simulation-second
-            groups: simulation-second
-            budget: 600
-          - lane: simulation-third
-            groups: simulation-third
-            budget: 600
-          - lane: simulation-fourth
-            groups: simulation-fourth
-            budget: 600
-          - lane: simulation-fifth
-            groups: simulation-fifth
-            budget: 600
     env:
       ZIG_DEBUG_CMD: '1'
     steps: &lane-steps
@@ -93,9 +78,38 @@ jobs:
     env:
       ZIG_DEBUG_CMD: '1'
     steps: *lane-steps
+  simulation:
+    name: Qualification / simulation / macos-aarch64
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Remove untracked sources and keep ignored build state
+        run: git clean -ffd
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.1'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Qualify simulation
+        run: |
+          if [ -n "${PAREDROS_CI_CACHE:-}" ]; then
+            export ZIG_GLOBAL_CACHE_DIR="$PAREDROS_CI_CACHE/zig-global" ZIG_LOCAL_CACHE_DIR="$PAREDROS_CI_CACHE/zig-local"
+          fi
+          zig build qualify -- --group simulation --budget-seconds 600
   native:
     name: native
-    needs: [qualify, tiger-style]
+    needs: [qualify, tiger-style, simulation]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -108,9 +122,11 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           QUALIFICATION: ${{ needs.qualify.result }}
           TIGER_STYLE: ${{ needs.tiger-style.result }}
+          SIMULATION: ${{ needs.simulation.result }}
         run: |
           test "$QUALIFICATION" = success
           test "$TIGER_STYLE" = success
+          test "$SIMULATION" = success
           if [ "$RUN_ATTEMPT" != 1 ]; then
             echo 'Qualification requires the first attempt of its run.'
             exit 1

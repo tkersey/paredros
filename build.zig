@@ -339,19 +339,15 @@ fn dependencyGraph(
     });
 }
 
-fn useLlvm(target: std.Build.ResolvedTarget) bool {
-    return target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
-}
-
 fn addPlatformTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var selected = options;
-    selected.use_llvm = useLlvm(selected.root_module.resolved_target.?);
+    selected.use_llvm = true;
     return b.addTest(selected);
 }
 
 fn setupInputs(b: *std.Build, dependency: *std.Build.Dependency) void {
     const bootstrap = b.addExecutable(.{
-        .use_llvm = useLlvm(b.graph.host),
+        .use_llvm = true,
         .name = "paredros-dependencies",
         .root_module = b.createModule(.{
             .root_source_file = dependency.path("tools/native/dependencies.zig"),
@@ -504,7 +500,7 @@ fn product(b: *std.Build, dependency: *std.Build.Dependency) ProductAssets {
             .types = b.path("app/types.zig"),
         } },
     });
-    result.executable.use_llvm = useLlvm(result.executable.root_module.resolved_target.?);
+    result.executable.use_llvm = true;
     result.executable.root_module.single_threaded = false;
     const symbols = b.option(bool, "symbols", "Retain symbols for native profiling") orelse false;
     if (symbols) {

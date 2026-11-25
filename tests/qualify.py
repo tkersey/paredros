@@ -238,7 +238,7 @@ def source_identity():
 
 
 def product_expectations(system):
-    return {"artifact_zig_backend": "stage2_x86_64" if system == "Linux" else "stage2_llvm",
+    return {"artifact_zig_backend": "stage2_llvm",
             "c_family": "clang", "c_driver": "zig build-obj", "zig_version": "0.17.1"}
 
 

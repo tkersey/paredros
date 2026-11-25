@@ -11,10 +11,11 @@ qualification have not been performed.
 
 ## Build
 
-Use Zig 0.17.1. For `x86_64-linux-musl`, Zig emits x86-64 machine code directly
-for Zig sources. Its bundled Clang compiles the two C sources, SQLite and the
-POSIX shim. On Apple Silicon, Zig uses LLVM for `aarch64-macos` because its
-direct ARM64 backend in 0.17.1 does not support the daemon's concurrent workers.
+Use Zig 0.17.1. Every target, `x86_64-linux-musl` and `aarch64-macos`, compiles
+Zig sources with LLVM: Zig's direct x86-64 backend ran the same deterministic
+simulation about six times slower, and its direct ARM64 backend in 0.17.1 does not
+support the daemon's concurrent workers. Zig's bundled Clang compiles the two C
+sources, SQLite and the POSIX shim.
 
 ```sh
 zig build setup
@@ -112,14 +113,15 @@ Process death stays with the process-death controller. `native/lifecycle.zig` st
 and fails compilation when a state cannot reach rest through ordinary inputs.
 
 CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
-the source lane with the emitted-application check, providers, and five simulation
-lanes that each build the group once and replay one pinned seed (the first also runs
-the remaining simulation tests), and must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
+the source lane with the emitted-application check and providers on GitHub-hosted
+Ubuntu, plus the simulation group with every pinned seed on the self-hosted macOS
+ARM64 runner (same-repository changes only; fork pull requests never run there), and
+must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
 The Linux product smoke runs on every pull request as its own
 `Qualification / product` check but is outside the gate: compiling the product
 takes six to eight minutes on a hosted runner, which leaves the lane at nine to
 ten minutes, so it runs with `--budget-seconds 840`. It passes `--essential`, omitting the licenses, version and offline
-ask probes, which cost about 75 seconds on the direct backend; the macOS smoke
+ask probes; the macOS smoke
 keeps them. The process-death cases need about nine minutes on a hosted runner,
 so they run in local and fallback qualification. When none of a hosted run's jobs start, the
 fallback workflow dispatches full macOS qualification on the Mac's self-hosted
