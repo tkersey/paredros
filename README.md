@@ -120,18 +120,23 @@ sets it to `/dev/shm` on Linux.
 Process death stays with the process-death controller. `native/lifecycle.zig` states each lifecycle as a table
 and fails compilation when a state cannot reach rest through ordinary inputs.
 
-CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
-the source lane with the emitted-application check and providers on GitHub-hosted
-Ubuntu, plus the simulation group with every pinned seed on the self-hosted macOS
-ARM64 runner (same-repository changes only; fork pull requests never run there), and
-must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
-The Linux product smoke runs on every pull request as its own
-`Qualification / product` check but is outside the gate: compiling the product
-takes six to eight minutes on a hosted runner, which leaves the lane at nine to
-ten minutes, so it runs with `--budget-seconds 840`. It passes `--essential`, omitting the licenses, version and offline
-ask probes; the macOS smoke
-keeps them. The process-death cases need about nine minutes on a hosted runner,
-so they run in local and fallback qualification. When none of a hosted run's jobs start, the
+CI runs on GitHub-hosted Ubuntu x86-64 in two stages, each with a ten-minute
+budget. The BUILD stage runs four jobs in parallel: `source` (the source contract
+test executable and the emitted-application check), `providers`, `product` and
+`crash`. Each runs `zig build qualify -- --build-only` for its groups and uploads
+the artifact directory as a tar archive. Every Linux artifact targets baseline
+`x86_64-linux-musl`, so it runs on whichever hosted CPU picks it up. When its build
+finishes, each RUN stage lane downloads exactly that archive and runs
+`tests/qualify.py --prebuilt` for the same groups; the product smoke and the eight
+process-death cases also require the binary they exercised to match its manifest
+digest. The `native` gate requires TigerStyle, every build and run job, and the
+simulation group with every pinned seed on the self-hosted macOS ARM64 runner
+(same-repository changes only; fork pull requests never run there), all on the
+run's first attempt. It writes both stage times to the job summary and requires the
+last build to finish within 600 seconds of the trigger, the last run within 600
+seconds of the last build, and the simulation within 600 seconds of the trigger.
+The Linux product smoke passes `--essential`, omitting the licenses, version and
+offline ask probes; the macOS smoke keeps them. When none of a hosted run's jobs start, the
 fallback workflow dispatches full macOS qualification on the Mac's self-hosted
 runner as a separate `macOS fallback` check; it never replaces the hosted result.
 

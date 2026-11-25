@@ -32,23 +32,18 @@ jobs:
           use-tool-cache: true
       - name: Enforce TigerStyle on all tracked Zig source
         run: bash tools/tiger-style.sh --all HEAD
-  qualify:
-    name: Qualification / ${{ matrix.lane }} / linux-x86_64
+  build-source:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
-      fail-fast: false
       matrix:
         include:
           - lane: source
             groups: source,emitted
-            budget: 600
-          - lane: providers
-            groups: providers
-            budget: 600
     env:
       ZIG_DEBUG_CMD: '1'
-    steps: &lane-steps
+    steps: &build-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -63,21 +58,122 @@ jobs:
           mirror: https://zigmirror.com
           use-cache: false
           use-tool-cache: true
-      - name: Qualify ${{ matrix.groups }}
-        run: zig build qualify -- --group "${{ matrix.groups }}" --budget-seconds "${{ matrix.budget }}"
-  product:
-    name: Qualification / ${{ matrix.lane }} / linux-x86_64
+      - name: Build ${{ matrix.groups }}
+        run: |
+          zig build qualify -- --build-only --artifacts "$RUNNER_TEMP/artifacts" --group "${{ matrix.groups }}" \
+            --budget-seconds 600
+      - name: Show build logs
+        if: ${{ !success() }}
+        run: tail -n 40 zig-out/qualification/run-*/*.log
+      - name: Archive ${{ matrix.lane }} artifacts
+        run: tar -C "$RUNNER_TEMP/artifacts" -cf "$RUNNER_TEMP/${{ matrix.lane }}.tar" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.lane }}
+          path: ${{ runner.temp }}/${{ matrix.lane }}.tar
+          if-no-files-found: error
+          retention-days: 1
+  build-providers:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers
+            groups: providers
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  build-product:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     strategy:
       matrix:
         include:
           - lane: product
             groups: product
-            budget: 840
     env:
       ZIG_DEBUG_CMD: '1'
-    steps: *lane-steps
+    steps: *build-steps
+  build-crash:
+    name: Build / ${{ matrix.lane }} / linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: crash
+            groups: crash
+    env:
+      ZIG_DEBUG_CMD: '1'
+    steps: *build-steps
+  run-source:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: source
+            groups: source,emitted
+    steps: &run-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.9.0'
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.lane }}
+          path: ${{ runner.temp }}
+      - name: Unpack ${{ matrix.lane }} artifacts
+        run: mkdir "$RUNNER_TEMP/artifacts" && tar -C "$RUNNER_TEMP/artifacts" -xf "$RUNNER_TEMP/${{ matrix.lane }}.tar"
+      - name: Run ${{ matrix.groups }}
+        run: |
+          uv run --no-project python tests/qualify.py --prebuilt "$RUNNER_TEMP/artifacts" --group "${{ matrix.groups }}" \
+            --budget-seconds 600
+      - name: Show run logs
+        if: ${{ !success() }}
+        run: tail -n 40 zig-out/qualification/run-*/*.log
+  run-providers:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-providers
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: providers
+            groups: providers
+    steps: *run-steps
+  run-product:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-product
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: product
+            groups: product
+    steps: *run-steps
+  run-crash:
+    name: Run / ${{ matrix.lane }} / linux-x86_64
+    needs: build-crash
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - lane: crash
+            groups: crash
+    steps: *run-steps
   simulation:
     name: Qualification / simulation / macos-aarch64
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -109,28 +205,37 @@ jobs:
           zig build qualify -- --group simulation --budget-seconds 600
   native:
     name: native
-    needs: [qualify, tiger-style, simulation]
+    needs: [tiger-style, simulation, build-source, build-providers, build-product, build-crash, run-source,
+      run-providers, run-product, run-crash]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require complete qualification within ten minutes
+      - name: Require every stage within ten minutes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          QUALIFICATION: ${{ needs.qualify.result }}
-          TIGER_STYLE: ${{ needs.tiger-style.result }}
-          SIMULATION: ${{ needs.simulation.result }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          test "$QUALIFICATION" = success
-          test "$TIGER_STYLE" = success
-          test "$SIMULATION" = success
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          created=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '.created_at | fromdate')
+          read -r built ran simulated < <(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" | jq -r \
+            --argjson created "$created" '
+              def done(prefix): [.jobs[] | select(.name | startswith(prefix)) | .completed_at | fromdate] | max;
+              [done("Build /") - $created, done("Run /") - done("Build /"),
+                done("Qualification / simulation /") - $created] | map(tostring) | join(" ")')
+          {
+            echo "BUILD stage, trigger to last build completion: ${built}s (maximum 600s)"
+            echo "RUN stage, last build completion to last run completion: ${ran}s (maximum 600s)"
+            echo "Simulation, trigger to completion: ${simulated}s (maximum 600s)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" > /dev/null
           if [ "$RUN_ATTEMPT" != 1 ]; then
             echo 'Qualification requires the first attempt of its run.'
             exit 1
           fi
-          elapsed=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '(now - (.created_at | fromdate)) | floor')
-          echo "Gated qualification from trigger through terminal checks: ${elapsed}s (maximum 600s)" | tee -a "$GITHUB_STEP_SUMMARY"
-          test "$elapsed" -le 600
+          test "$built" -le 600
+          test "$ran" -le 600
+          test "$simulated" -le 600
