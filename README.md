@@ -61,6 +61,13 @@ x86-64 Linux under Rosetta, export `ZIG_DEBUG_CMD=1` before invoking Zig. Use
 `zig build qualify -- --list` to inspect the groups. Each invocation executes the
 tests and writes fresh timings, outcomes, and logs under `zig-out/qualification/`.
 For groups and their prerequisites use `zig build qualify -- --group NAME[,NAME...]`.
+To build on one machine and run on another, `--build-only --artifacts DIR` runs
+only the selected build jobs, installs their outputs into the empty `DIR` and
+writes `DIR/manifest.json` with each file's SHA-256, the source identity, and the
+Zig and backend identity. `--prebuilt DIR` refuses `DIR` unless its manifest
+matches its files and this checkout, then runs only the selected run jobs against
+it, without Zig. In both modes the source contracts are installed by
+`zig build build-test` and executed as a separate run job.
 
 The authority, transitions, rendering, continuity and methods owner groups, the
 24-arm comparison and the 100,000-task daemon are diagnostics. They do not gate a
@@ -84,7 +91,8 @@ Keep the generated namespace at its original location between candidates.
 Ctrl-C lets the current batch close. Running the same generation command
 again with the same producer resumes at the saved batch.
 
-For individual diagnostics, `zig build test` runs the source contracts.
+For individual diagnostics, `zig build test` runs the source contracts and
+`zig build build-test` installs them without running them.
 `zig build test-native -Dnative-tests=true -Dnative-group=NAME -Doptimize=safe`
 runs native suites; repeat `-Dnative-group` to select several. The process-death
 controller uses local fixtures, kills the process at named admission, dispatch,

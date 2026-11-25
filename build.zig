@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     setupInputs(b, dependency);
     if (enabled) stabilizeClangObjects(b, dependency);
     const filter = b.option([]const u8, "test-filter", "Select a focused diagnostic");
-    hostSteps(b, dependency, optimize, filter, check_recovery);
+    hostSteps(b, dependency, target, optimize, filter, check_recovery);
     const assets = if (native_product or crash_tests or scale_tests or
         (native_tests and test_product_assets))
         product(b, dependency)
@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
 fn hostSteps(
     b: *std.Build,
     dependency: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     filter: ?[]const u8,
     check_recovery: bool,
@@ -87,18 +88,25 @@ fn hostSteps(
     const host_protean = dependency.module("protean_host_authoring");
     const host_contracts = dependency.module("protean_contracts_host");
     const host_types = typesModule(b, b.graph.host, optimize, host_protean, host_contracts);
+    const protean = dependency.module("protean");
+    const contracts = dependency.module("protean_contracts");
     const source_root = b.createModule(.{
         .root_source_file = b.path("test.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "application_types", .module = host_types },
-            .{ .name = "protean_contracts", .module = host_contracts },
-            .{ .name = "protean", .module = host_protean },
-            .{ .name = "horos", .module = dependency.module("horos_host_authoring") },
+            .{
+                .name = "application_types",
+                .module = typesModule(b, target, optimize, protean, contracts),
+            },
+            .{ .name = "protean_contracts", .module = contracts },
+            .{ .name = "protean", .module = protean },
+            .{ .name = "horos", .module = dependency.module("horos") },
         },
     });
-    testStep(b, source_root, filter, b.step("test", "Run PAREDROS contract tests"));
+    const source = testStep(b, source_root, filter, b.step("test", "Run PAREDROS contract tests"));
+    const install = b.addInstallFile(source.getEmittedBin(), "test-tools/paredros-source-tests");
+    b.step("build-test", "Build PAREDROS contract tests").dependOn(&install.step);
     checkStep(b, dependency, optimize, host_types, host_contracts, check_recovery);
 }
 
@@ -141,10 +149,10 @@ fn checkStep(
             .{ .name = "protean_contracts", .module = host_contracts },
         },
     });
-    testStep(b, provider_root, null, &checked.step);
+    _ = testStep(b, provider_root, null, &checked.step);
     if (check_recovery) {
         const recovery = nativeTestRoot(b, dependency, optimize, null, "native_providers_test.zig");
-        testStep(
+        _ = testStep(
             b,
             recovery,
             "native GitHub multipage capture survives restart before interpretation " ++
@@ -390,7 +398,7 @@ fn testStep(
     root: *std.Build.Module,
     filter: ?[]const u8,
     step: *std.Build.Step,
-) void {
+) *std.Build.Step.Compile {
     const checks = addPlatformTest(b, .{
         .filters = if (filter) |value| &.{value} else &.{},
         .root_module = root,
@@ -399,6 +407,7 @@ fn testStep(
     if (checks.test_runner != null) run.expectExitCode(0);
     run.has_side_effects = true;
     step.dependOn(&run.step);
+    return checks;
 }
 
 fn nativeTestRoot(
