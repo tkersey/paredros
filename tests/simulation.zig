@@ -1639,7 +1639,9 @@ pub fn free(report: Report) void {
 
 const Pin = struct { seed: u64, events: usize };
 const pinned: []const Pin = &.{
-    .{ .seed = 1, .events = 60 },
+    .{ .seed = 2, .events = 60 },
+    .{ .seed = 3, .events = 60 },
+    .{ .seed = 4, .events = 60 },
     .{ .seed = 5, .events = 60 },
     .{ .seed = 16, .events = 60 },
 };
