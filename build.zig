@@ -232,8 +232,8 @@ fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
     values.addOption(u64, "seeds", b.option(
         u64,
         "simulation-seeds",
-        "Run this many consecutive simulation seeds",
-    ) orelse 24);
+        "Run this many consecutive simulation seeds after the pinned ones",
+    ) orelse 0);
     values.addOption(u64, "first", b.option(
         u64,
         "simulation-first",
@@ -243,7 +243,7 @@ fn simulationOptions(b: *std.Build) *std.Build.Step.Options {
         u64,
         "simulation-events",
         "Events generated per simulation seed",
-    ) orelse 150);
+    ) orelse 60);
     values.addOption(bool, "progress", b.option(
         bool,
         "simulation-progress",

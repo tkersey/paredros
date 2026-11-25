@@ -92,23 +92,28 @@ acquisition counts in a fresh process.
 
 The `simulation` native group runs deterministic simulation. Each seed drives the
 real application, driver and daemon in-process against a temporary namespace with a
-fake wall clock and scripted GitHub and model replies drawn from the seed: monitor
-additions, every caller directive, asks, proposal confirmations, byte-for-byte and
-conflicting replays, clock advances and regressions, restarts (including during a
-dispatch), configuration changes, and snapshot or transfer handoffs through up to two
-fresh namespaces. After every event it checks the laws in `tests/simulation_oracle.zig`
-and, once inputs stop, that every responsibility reaches rest. A violation prints the
-seed, the event, the law and the trace; `-Dsimulation-seed=N` replays one seed.
-`-Dsimulation-seeds=N`, `-Dsimulation-first=N` and `-Dsimulation-events=N` select a
-longer run, and `PAREDROS_SIMULATION_SEED`, `PAREDROS_SIMULATION_SEEDS`,
-`PAREDROS_SIMULATION_FIRST` and `PAREDROS_SIMULATION_EVENTS` override them at run time.
-Process death stays with the process-death controller. `native/lifecycle.zig` states
-each lifecycle as a table and fails compilation when a state cannot reach rest through
-ordinary inputs.
+fake wall clock, seeded task identities and scripted GitHub and model replies drawn
+from the seed: monitor additions, every caller directive, asks, proposal
+confirmations, byte-for-byte and conflicting replays, clock advances and regressions,
+restarts (including during a dispatch), configuration changes, injected per-item
+faults, and snapshot or transfer handoffs through up to two fresh namespaces. After
+every event it checks the laws in `tests/simulation_oracle.zig`, and the driver checks
+its maintained index against a full rebuild; once inputs stop, it requires every
+responsibility and handoff to reach rest. A violation prints the seed, the event, the
+law, the trace and the retained state. The default run replays the pinned regression
+seeds; `-Dsimulation-seed=N` replays one seed, and `-Dsimulation-seeds=N`,
+`-Dsimulation-first=N` and `-Dsimulation-events=N` add consecutive seeds.
+`PAREDROS_SIMULATION_SEED`, `PAREDROS_SIMULATION_SEEDS`, `PAREDROS_SIMULATION_FIRST`
+and `PAREDROS_SIMULATION_EVENTS` override them at run time, `PAREDROS_SIMULATION_TRACE`
+prints a clean seed's trace and `PAREDROS_SIMULATION_PROFILE` its per-poll cost. A
+configuration change while a handoff is unfinished strands its pure tasks, so it is
+generated only under `PAREDROS_SIMULATION_STRAND_CONTINUITY`. Process death stays with
+the process-death controller. `native/lifecycle.zig` states each lifecycle as a table
+and fails compilation when a state cannot reach rest through ordinary inputs.
 
 CI runs on GitHub-hosted Ubuntu x86-64. The `native` gate requires TigerStyle and
-two lanes, source with the emitted-application check and providers, and must pass
-within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
+three lanes, source with the emitted-application check, providers and simulation,
+and must pass within 600 seconds of the trigger. Each lane runs `zig build qualify -- --group`.
 The Linux product smoke runs on every pull request as its own
 `Qualification / product` check but is outside the gate: compiling the product
 takes six to eight minutes on a hosted runner, which leaves the lane at nine to

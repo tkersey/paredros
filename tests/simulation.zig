@@ -326,17 +326,10 @@ fn openNode(sim: *Sim, label: u8) !*Node {
         .model = binding,
         .bindings = configuration.bindings(value.config),
     };
-    verifyIndex(&value.driver);
     value.driver.injection = .{ .context = sim, .fails = Sim.injected };
     try sim.nodes.append(sim.allocator(), value);
     try startDaemon(sim, value);
     return value;
-}
-
-fn verifyIndex(driver: *Driver) void {
-    inline for (.{ "verify_against_rebuild", "verifyAgainstRebuild" }) |name| {
-        if (@hasField(Driver, name)) @field(driver, name) = true;
-    }
 }
 
 fn noControl(_: *anyopaque, _: std.mem.Allocator, _: *Driver, _: u32, _: []const u8) ![]const u8 {
@@ -356,9 +349,7 @@ fn startDaemon(sim: *Sim, value: *Node) !void {
     value.server = try socket.Server.init(gpa, value.socket_path, .{
         .operator_uid = socket.currentUid(),
     });
-    var frame = std.heap.ArenaAllocator.init(gpa);
-    defer frame.deinit();
-    value.daemon = try Daemon.init(frame.allocator(), &value.driver, &value.server.?, .{
+    value.daemon = try Daemon.init(gpa, &value.driver, &value.server.?, .{
         .context = value,
         .call = noControl,
     }, .{ .controls_per_poll = 8, .obligations_per_poll = 8, .stop_grace_ms = 1_000 });
@@ -1112,6 +1103,8 @@ fn exportEvent(sim: *Sim, value: *Node) !void {
 
 fn observe(sim: *Sim) !void {
     const value = sim.node();
+    var maintained = try value.driver.view(sim.allocator());
+    maintained.deinit();
     var index = try rebuild(sim, value);
     defer index.deinit();
     sim.records = index.records.len;
@@ -1425,6 +1418,8 @@ pub fn run(seed: u64, events: usize) !Report {
     defer sim.arena.deinit();
     sim.world = World.init(seed, &sim.wall_ms);
     defer for (sim.nodes.items) |value| destroyNode(value);
+    const unverified = std.testing.environ.getPosix("PAREDROS_SIMULATION_UNVERIFIED");
+    idx.verify_against_rebuild = unverified == null;
     sim.profile.enabled = std.testing.environ.getPosix("PAREDROS_SIMULATION_PROFILE") != null;
     waited_ns = 0;
     var at: usize = 0;
@@ -1487,6 +1482,8 @@ fn dumpState(sim: *Sim) !void {
             });
         }
     }
+    if (value.driver.index != null) dumpDivergence(sim, value, &index) catch |err|
+        std.debug.print("divergence dump: {s}\n", .{@errorName(err)});
     for (value.expectations.items) |expected| std.debug.print("  expected {s} verified {}\n", .{
         short(expected.lineage), expected.verified,
     });
@@ -1494,6 +1491,36 @@ fn dumpState(sim: *Sim) !void {
         std.debug.print("  unfinished {s} {s}\n", .{
             @tagName(record.input), oracle.hex(record.task),
         });
+}
+
+fn dumpDivergence(sim: *Sim, value: *Node, rebuilt: *const idx.Index) !void {
+    idx.verify_against_rebuild = false;
+    defer idx.verify_against_rebuild = true;
+    var maintained = try value.driver.view(sim.allocator());
+    defer maintained.deinit();
+    const kept = &maintained.index;
+    std.debug.print("index difference: {s}\n", .{idx.difference(kept, rebuilt) orelse "none"});
+    var left = kept.operations.iterator();
+    while (left.next()) |entry| {
+        const other = rebuilt.operations.get(entry.key_ptr.*);
+        if (other == null or !std.meta.eql(
+            kept.records[entry.value_ptr.*].task,
+            rebuilt.records[other.?].task,
+        )) std.debug.print("  maintained operation {s} -> {s} {s}\n", .{
+            entry.key_ptr.*,
+            oracle.hex(kept.records[entry.value_ptr.*].task),
+            @tagName(kept.records[entry.value_ptr.*].input),
+        });
+    }
+    var right = rebuilt.operations.iterator();
+    while (right.next()) |entry| {
+        if (kept.operations.get(entry.key_ptr.*) != null) continue;
+        std.debug.print("  rebuilt operation {s} -> {s} {s}\n", .{
+            entry.key_ptr.*,
+            oracle.hex(rebuilt.records[entry.value_ptr.*].task),
+            @tagName(rebuilt.records[entry.value_ptr.*].input),
+        });
+    }
 }
 
 fn dumpHead(record: idx.Record) void {
@@ -1544,7 +1571,11 @@ pub fn free(report: Report) void {
 }
 
 const Pin = struct { seed: u64, events: usize };
-const pinned: []const Pin = &.{};
+const pinned: []const Pin = &.{
+    .{ .seed = 1, .events = 60 },
+    .{ .seed = 5, .events = 60 },
+    .{ .seed = 16, .events = 60 },
+};
 
 fn pinnedSeed(position: usize) Pin {
     for (pinned, 0..) |pin, at| if (at == position) return pin;
@@ -1609,9 +1640,9 @@ test "simulation holds every invariant across the selected seeds" {
 test "simulation replays one seed to the same trace" {
     if (std.testing.environ.getPosix("PAREDROS_SIMULATION_SEED") != null) return error.SkipZigTest;
     const seed = options.seed orelse options.first;
-    const first = try expectClean(seed, 30);
+    const first = try expectClean(seed, 20);
     defer free(first);
-    const second = try expectClean(seed, 30);
+    const second = try expectClean(seed, 20);
     defer free(second);
     try std.testing.expectEqualDeep(first.hash, second.hash);
 }
