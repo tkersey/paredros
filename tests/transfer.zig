@@ -589,7 +589,10 @@ fn cancelledWithLateControl(f: *Fixture, driver: *Driver) !t.Id {
     try driver.attach(a);
     _ = try driver.directive(a, "old-cancel", origin, target, .{ .cancel = {} });
     const step = (try driver.nextStep(a, target)).?;
-    _ = try driver.directive(a, "late-pause", origin, target, .{ .pause = {} });
+    try std.testing.expectError(
+        error.FinalObligation,
+        driver.directive(a, "late-pause", origin, target, .{ .pause = {} }),
+    );
     try finish(f, step);
     var index = try driver.rebuild(a);
     defer index.deinit();
@@ -597,7 +600,7 @@ fn cancelledWithLateControl(f: *Fixture, driver: *Driver) !t.Id {
     return target;
 }
 
-test "native continuity import keeps controls under a cancelled head historical" {
+test "native continuity refuses a control behind a pending cancel and imports none" {
     var from: Fixture = .{};
     defer from.deinit();
     try from.init();
@@ -614,7 +617,7 @@ test "native continuity import keeps controls under a cancelled head historical"
     _ = try cancelledWithLateControl(&from, &original);
     var bundle = try transfer.capture(&original, a, source(&from), .snapshot);
     defer bundle.deinit();
-    try std.testing.expectEqual(1, bundle.value.lineages.items[0].pending_controls.items.len);
+    try std.testing.expectEqual(0, bundle.value.lineages.items[0].pending_controls.items.len);
     original.detach();
     try from.close();
     try to.init();
@@ -1702,7 +1705,7 @@ test "native continuity rebuild keeps the imported lineage over an exact local r
     var forked = source_state.local;
     forked.envelope.operation = .{ .bytes = "monitor-fork" };
     _ = try to.execute("monitor-fork", .{ .genesis = forked });
-    try std.testing.expectError(error.DuplicateLineage, destination.rebuild(a));
+    try std.testing.expectError(error.CorruptState, destination.rebuild(a));
 }
 
 fn controlMonitor(

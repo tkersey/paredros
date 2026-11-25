@@ -372,12 +372,15 @@ with prior cuts. Export refuses a namespace whose own import is incomplete, and
 refuses a filename that already exists before it takes a cut or fences the source;
 existing files are never overwritten. While an admitted `monitor add` has not run,
 snapshot export refuses with `ContinuityGenesisPending` and transfer export keeps
-finalizing. A monitor this build can never run (its task is blocked, or pinned to
-another program, profile, or runtime) is not carried by a bundle, so transfer
-export refuses with `StrandedGenesis` before fencing the source and lists those
-monitors under `data.stranded`. `monitor cancel ID` on such a monitor records the
-operator's cancellation; after that, transfer export proceeds without it. A
-snapshot export leaves it unrun in the source.
+finalizing. A `monitor add` this build can never run (its task is blocked, or
+pinned to another program, profile, or runtime) is carried by both snapshot and
+transfer bundles as a pending monitor: its admitted request travels as a member,
+and import admits it as a fresh monitor in the destination with the same lineage
+and a head at the import clock. Transfer finalization waits for an admitted
+`cancel` to fold rather than adding a `transfer` behind it. Every reference a
+carried record holds is recorded against the bundle member it names, so a bundle
+re-exported through any number of namespaces still resolves its methods,
+reports and batches.
 
 Each snapshot export run takes a new cut, except that a run for a NAME whose cut
 is still pending resumes that cut. A namespace has one transfer: after the first
